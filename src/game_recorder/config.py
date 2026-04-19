@@ -26,7 +26,11 @@ class Config:
     mouse_poll_interval_ms: float = 5.0  # throttle mouse-move events (200 Hz)
 
     # Session management
-    max_segment_seconds: int = 0  # 0 = no auto-segmentation
+    # Auto-segmentation: every N seconds, finalize current mp4 + jsonl and start
+    # a new one within the same session directory.  0 disables segmentation
+    # (single continuous file for the whole session — recommended, since
+    # rotation currently introduces a sub-second video/audio gap).
+    segment_seconds: int = 0
 
     def __post_init__(self) -> None:
         self.output_dir = Path(self.output_dir)

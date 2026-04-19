@@ -8,5 +8,10 @@ __pycache__/
 .venv/
 venv/
 
+# One-click installer artifacts (Windows)
+.tools/
+ffmpeg/
+run.bat
+
 # macOS
 .DS_Store

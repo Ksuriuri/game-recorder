@@ -88,6 +88,12 @@ def main() -> None:
         help="Mouse-move sample rate in Hz (default: 200)",
     )
     parser.add_argument(
+        "--segment-minutes",
+        type=float,
+        default=0.0,
+        help="Auto-save every N minutes into a new mp4 + jsonl pair (default: 0 = disabled, single file)",
+    )
+    parser.add_argument(
         "--no-hotkey",
         action="store_true",
         help="Disable Ctrl+F9 toggle hotkey (start recording immediately)",
@@ -102,12 +108,15 @@ def main() -> None:
         datefmt="%H:%M:%S",
     )
 
+    segment_seconds = max(0, int(round(args.segment_minutes * 60)))
+
     config = Config(
         fps=args.fps,
         output_dir=Path(args.output),
         video_quality=args.quality,
         audio_device=args.audio_device,
         mouse_poll_interval_ms=1000.0 / args.mouse_hz,
+        segment_seconds=segment_seconds,
     )
 
     session: Session | None = None
@@ -133,6 +142,14 @@ def main() -> None:
     print("=" * 60)
     print("  Game Recorder — world model data capture")
     print(f"  FPS: {config.fps}  |  Quality: CQ {config.video_quality}")
+    if config.segment_seconds > 0:
+        print(
+            f"  Auto-save: every {config.segment_seconds // 60}m"
+            f"{config.segment_seconds % 60:02d}s "
+            f"({config.fps * config.segment_seconds} frames)"
+        )
+    else:
+        print("  Auto-save: disabled (single file)")
     print(f"  Output: {config.output_dir.resolve()}")
     if not args.no_hotkey:
         print("  Hotkey: Ctrl+F9 to toggle recording")

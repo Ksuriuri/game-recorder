@@ -113,11 +113,18 @@ def _vk_to_name(vk: int) -> str:
 class InputCapture:
     """Captures keyboard and mouse events using Win32 low-level hooks.
 
+    Each emitted event carries a ``frame`` index computed from the shared
+    T0 epoch and the target FPS, so events are pre-aligned to video frames
+    for downstream per-frame bucketing.
+
     Parameters
     ----------
     t0_ns:
         ``time.perf_counter_ns()`` epoch — all event timestamps are relative
         to this value so they align with the video stream.
+    fps:
+        Target video frame rate.  Used to bucket every event into a frame
+        index via ``frame = int((now_ns - t0_ns) * fps / 1e9)``.
     on_event:
         ``(event_dict) -> None`` called for every captured event.
     mouse_throttle_ms:
@@ -127,10 +134,12 @@ class InputCapture:
     def __init__(
         self,
         t0_ns: int,
+        fps: int,
         on_event: EventCallback,
         mouse_throttle_ms: float = 5.0,
     ) -> None:
         self._t0_ns = t0_ns
+        self._fps = fps
         self._on_event = on_event
         self._mouse_throttle_ns = int(mouse_throttle_ms * 1_000_000)
         self._last_mouse_move_ns: int = 0
@@ -174,15 +183,22 @@ class InputCapture:
 
     # ── Hook procedures ──────────────────────────────────────────────────
 
+    def _frame_index(self, now_ns: int) -> int:
+        """Convert a perf-counter timestamp to a 0-based video-frame index."""
+        delta_ns = now_ns - self._t0_ns
+        if delta_ns < 0:
+            return 0
+        return (delta_ns * self._fps) // 1_000_000_000
+
     def _keyboard_ll_proc(
         self, nCode: int, wParam: int, lParam: int  # noqa: N803
     ) -> int:
         if nCode >= 0:
             kb = ctypes.cast(lParam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
-            t_ms = (time.perf_counter_ns() - self._t0_ns) / 1_000_000
+            frame = self._frame_index(time.perf_counter_ns())
             action = "down" if wParam in (WM_KEYDOWN, WM_SYSKEYDOWN) else "up"
             event = {
-                "t": round(t_ms, 2),
+                "frame": int(frame),
                 "type": "key",
                 "action": action,
                 "vk": kb.vkCode,
@@ -204,10 +220,10 @@ class InputCapture:
                     return user32.CallNextHookEx(None, nCode, wParam, lParam)
                 self._last_mouse_move_ns = now_ns
 
-            t_ms = (now_ns - self._t0_ns) / 1_000_000
+            frame = self._frame_index(now_ns)
             action = _MOUSE_ACTION_MAP.get(wParam, f"unknown_{wParam:#x}")
             event: dict = {
-                "t": round(t_ms, 2),
+                "frame": int(frame),
                 "type": "mouse",
                 "action": action,
                 "x": ms.pt.x,
