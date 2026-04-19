@@ -161,6 +161,7 @@ class Session:
             fps=self.config.fps,
             on_event=self._on_action_event,
             mouse_throttle_ms=self.config.mouse_poll_interval_ms,
+            keyboard_poll_hz=self.config.keyboard_poll_hz,
         )
         self._input_thread = threading.Thread(
             target=self._input.run,
@@ -344,11 +345,17 @@ class Session:
             ):
                 if src == dst:
                     continue
-                try:
-                    if src.exists():
+                if not src.exists():
+                    continue
+                for attempt in range(6):
+                    try:
                         src.rename(dst)
-                except OSError as e:
-                    logger.warning("Failed to rename %s → %s: %s", src.name, dst.name, e)
+                        break
+                    except OSError as e:
+                        if attempt < 5:
+                            time.sleep(0.15)
+                            continue
+                        logger.warning("Failed to rename %s → %s: %s", src.name, dst.name, e)
             final_video = new_video
             final_actions = new_actions
         else:
