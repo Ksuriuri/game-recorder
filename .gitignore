@@ -1,0 +1,12 @@
+screenpipe/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Local environments
+.venv/
+venv/
+
+# macOS
+.DS_Store
