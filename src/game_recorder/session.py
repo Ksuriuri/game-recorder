@@ -101,7 +101,13 @@ class Session:
         # Per-segment & total stats
         self._frame_count = 0  # global cumulative frame count (across segments)
         self._segments_meta: list[SegmentMeta] = []
-        self._segment_event_count: int = 0  # events written to current segment
+        self._segment_event_count: int = 0
+
+        # Cache the encoder/audio identity so we can write meta.json after
+        # the per-segment encoder instance is gone.  Audio routing is the
+        # same for every segment (same Config), so we only need one snapshot.
+        self._encoder_name: str = ""
+        self._audio_source: str | None = None  # events written to current segment
 
     @property
     def session_id(self) -> str:
@@ -207,7 +213,8 @@ class Session:
             duration_s=round(duration_s, 2),
             fps=self.config.fps,
             resolution=[self._width, self._height],
-            encoder=self._encoder.encoder_name if self._encoder else "",
+            encoder=self._encoder_name,
+            audio_source=self._audio_source,
             foreground_window=_get_foreground_window_title(),
             total_frames=self._frame_count,
             total_input_events=total_events,
@@ -301,6 +308,11 @@ class Session:
         self._action_writer = ActionWriter(actions_path)
         self._encoder = FFmpegEncoder(self.config)
         self._encoder.start(self._width, self._height, video_path)
+
+        # Snapshot identity from the first segment (same for all subsequent ones).
+        if not self._encoder_name:
+            self._encoder_name = self._encoder.encoder_name
+            self._audio_source = self._encoder.audio_source
 
         logger.info(
             "Opened segment #%d: frames [%d, %s) → %s",

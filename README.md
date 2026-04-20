@@ -5,7 +5,7 @@
 ## 功能
 
 - **视频捕获**：基于 DXGI Desktop Duplication API（DXcam），零拷贝直读 GPU 显存，对游戏帧率无影响
-- **音频捕获**：通过 FFmpeg 捕获 WASAPI Loopback 系统声音，与视频在同一进程中 mux，天然同步
+- **音频捕获**：默认走 FFmpeg 的 WASAPI Loopback（捕获当前 Windows 默认播放设备），**零配置、不依赖 Stereo Mix、不需要装虚拟声卡**，与视频在同一 FFmpeg 进程中 mux 实现天然同步；不可用时自动回退到 DirectShow（Stereo Mix / VB-CABLE 等）
 - **键鼠捕获**：Win32 低级钩子（`WH_KEYBOARD_LL` / `WH_MOUSE_LL`），事件按视频帧索引对齐
 - **硬件编码**：自动检测 NVIDIA NVENC，使用 GPU 专用编码单元，不占用 CUDA 核心；无 NVENC 时回退到 libx264 ultrafast
 - **统一时钟**：所有数据流共享 `perf_counter_ns` 高精度 T0 基准，同步误差 < 1 帧（33ms）
@@ -26,9 +26,11 @@
 
 1. 下载独立版 `uv`
 2. 通过 uv 安装托管的 Python 3.11
-3. 下载 FFmpeg essentials build
+3. 下载 FFmpeg（[BtbN gpl 构建](https://github.com/BtbN/FFmpeg-Builds)，约 140 MB，**包含 WASAPI loopback 与 NVENC**）
 4. 创建 `.venv` 并 `uv pip install -e .`
 5. 生成启动脚本 `run.bat`
+
+> **注意**：必须使用上面这种 full 构建——`gyan.dev` 的 `release-essentials` 没有编译 `wasapi` indev，会导致默认情况下录不到游戏声音。
 
 **所有文件全部落在项目目录下，不占用系统盘**：
 
@@ -106,6 +108,16 @@ game-recorder -v
 | Ctrl+F9 | 开始/停止录制 |
 | Ctrl+C | 停止录制并退出程序 |
 
+## 多机 / 网吧部署注意事项
+
+针对"把整个目录拷到任意 Windows 机器（如网吧）就能直接录"的场景：
+
+- **不要装在系统盘**。`install.bat` 会检测当前盘符，若在 `C:\` 会要求二次确认。网吧普遍装有"还原系统 / 影子系统"，重启后 C 盘会被清回原状，含本工具和所有录制文件。建议放在 `D:\game-recorder\` 之类。
+- **音频零配置**：默认链路是 WASAPI loopback → 抓"当前 Windows 默认播放设备"的混音，无需启用 Stereo Mix、无需装 VB-CABLE/VoiceMeeter，也不需要管理员权限。安装时下载的 BtbN gpl 构建已经包含 `wasapi` indev。启动后日志会打印 `Starting FFmpeg: encoder=… audio=wasapi:default`，确认这条就说明声音通路 OK。
+- **录制前别动音频设备**：FFmpeg 启动时把"默认播放设备"快照下来，录制中如果**插拔耳机 / 切换输出设备**导致 Windows 切换默认设备，本次录制会继续录原设备（很可能从这一刻起变静音）。需要换设备的话，请先 Ctrl+F9 停止再切。
+- **GTA 等使用 shared-mode 音频的游戏可直接录**。如果你用了**强制独占模式**的应用（少数音频软件），WASAPI loopback 可能被拒绝；本工具会自动降级到 DirectShow，再不行就静音录制（`meta.json` 的 `audio_source` 会是 `null`，便于事后过滤）。
+- **NVENC 跨机泛化**：网吧 GPU 五花八门，不一定是 N 卡。代码里已经做了 NVENC 运行时探测：编译启用但驱动不给开 → 自动落到 `libx264 ultrafast`，1080p@30 在中端 CPU 上无压力。
+
 ## 输出格式
 
 每次录制生成一个 session 目录，里面包含一对或多对 `mp4 + jsonl` 文件，外加一份 `meta.json`。文件命名统一遵循：
@@ -169,6 +181,7 @@ recordings/
   "fps": 30,
   "resolution": [1920, 1080],
   "encoder": "h264_nvenc",
+  "audio_source": "wasapi:default",
   "foreground_window": "Game Title",
   "total_frames": 42130,
   "total_input_events": 95812,

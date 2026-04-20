@@ -6,6 +6,7 @@ internally by FFmpeg — no manual timestamp alignment needed.
 
 from __future__ import annotations
 
+import functools
 import logging
 import re
 import subprocess
@@ -81,6 +82,7 @@ def _is_likely_microphone_only(name: str) -> bool:
     )
 
 
+@functools.lru_cache(maxsize=4)
 def _ffmpeg_has_wasapi_demuxer(ffmpeg: str) -> bool:
     """True if this FFmpeg build registers the WASAPI input device (full builds, not essentials)."""
     try:
@@ -95,6 +97,53 @@ def _ffmpeg_has_wasapi_demuxer(ffmpeg: str) -> bool:
         out = (result.stdout or "") + (result.stderr or "")
         return "wasapi" in out.lower()
     except Exception:
+        return False
+
+
+@functools.lru_cache(maxsize=4)
+def _wasapi_loopback_usable(ffmpeg: str) -> bool:
+    """True if `wasapi -loopback 1 -i default` can actually be opened on this PC.
+
+    Having the demuxer registered is necessary but not sufficient: the default
+    playback endpoint may be missing, in exclusive mode, or rejected by the
+    audio service.  This probe runs a 0.2-second null capture so we can
+    silently fall back to DirectShow in that case.
+    """
+    try:
+        result = subprocess.run(
+            [
+                ffmpeg,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "wasapi",
+                "-loopback",
+                "1",
+                "-i",
+                "default",
+                "-t",
+                "0.2",
+                "-f",
+                "null",
+                "-",
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+        )
+        if result.returncode == 0:
+            return True
+        logger.warning(
+            "WASAPI loopback probe failed (rc=%d): %s",
+            result.returncode,
+            (result.stderr or "").strip().splitlines()[-1:] or "<no stderr>",
+        )
+        return False
+    except Exception as e:
+        logger.warning("WASAPI loopback probe raised: %s", e)
         return False
 
 
@@ -163,10 +212,23 @@ class FFmpegEncoder:
         self._frame_size = 0
         self._ffmpeg_stderr = bytearray()
         self._stdin_broken_logged = False
+        self._audio_source: str | None = None
 
     @property
     def encoder_name(self) -> str:
         return self._encoder
+
+    @property
+    def audio_source(self) -> str | None:
+        """Human-readable description of the audio input actually used.
+
+        ``None`` means the recording has no audio track (no usable device
+        was found on this machine).  Examples:
+            - ``"wasapi:default"``   (zero-config, full FFmpeg build)
+            - ``"dshow:Stereo Mix (Realtek)"``
+        Set by :meth:`start`; valid for the lifetime of the process.
+        """
+        return self._audio_source
 
     def start(self, width: int, height: int, output_path: Path) -> None:
         """Launch the FFmpeg subprocess."""
@@ -174,16 +236,39 @@ class FFmpegEncoder:
 
         cfg = self.config
         use_wasapi = False
+        dshow_device: str | None = None
+
         if cfg.audio_device:
-            dshow_device: str | None = cfg.audio_device
-        elif _ffmpeg_has_wasapi_demuxer(self._ffmpeg_path):
-            use_wasapi = True
-            dshow_device = None
-            logger.info("Using WASAPI loopback (default Windows playback).")
+            dshow_device = cfg.audio_device
         else:
-            dshow_device = _find_loopback_device(self._ffmpeg_path)
+            # Prefer WASAPI loopback: zero-config, no Stereo Mix needed,
+            # works on any Windows 10/11 machine — but only if the demuxer
+            # is compiled in AND the default endpoint is actually openable.
+            if _ffmpeg_has_wasapi_demuxer(
+                self._ffmpeg_path
+            ) and _wasapi_loopback_usable(self._ffmpeg_path):
+                use_wasapi = True
+                logger.info("Using WASAPI loopback (default Windows playback).")
+            else:
+                if not _ffmpeg_has_wasapi_demuxer(self._ffmpeg_path):
+                    logger.info(
+                        "FFmpeg build has no WASAPI indev; falling back to DirectShow. "
+                        "For zero-config audio on arbitrary Windows PCs, install a full "
+                        "FFmpeg build (e.g. BtbN gpl)."
+                    )
+                dshow_device = _find_loopback_device(self._ffmpeg_path)
 
         has_audio = use_wasapi or dshow_device is not None
+        if use_wasapi:
+            self._audio_source = "wasapi:default"
+        elif dshow_device is not None:
+            self._audio_source = f"dshow:{dshow_device}"
+        else:
+            self._audio_source = None
+            logger.warning(
+                "No usable audio capture device found — recording will be SILENT. "
+                "Install a full FFmpeg build (WASAPI loopback) or enable Stereo Mix."
+            )
 
         cmd: list[str] = [self._ffmpeg_path, "-y", "-hide_banner", "-loglevel", "warning"]
         # Must be global: applies to muxer when any input ends (see -shortest in ffmpeg-all).
@@ -241,8 +326,11 @@ class FFmpegEncoder:
 
         cmd.append(str(output_path))
 
-        audio_log = "wasapi:loopback=default" if use_wasapi else dshow_device
-        logger.info("Starting FFmpeg: encoder=%s audio=%s", self._encoder, audio_log)
+        logger.info(
+            "Starting FFmpeg: encoder=%s audio=%s",
+            self._encoder,
+            self._audio_source or "<none>",
+        )
         logger.debug("FFmpeg cmd: %s", " ".join(cmd))
 
         self._proc = subprocess.Popen(

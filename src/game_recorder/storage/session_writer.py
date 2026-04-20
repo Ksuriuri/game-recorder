@@ -29,6 +29,9 @@ class SessionMeta:
     fps: int = 30
     resolution: list[int] = field(default_factory=lambda: [0, 0])
     encoder: str = ""
+    # Audio input actually used; ``None`` means the recording is silent.
+    # Format: ``"wasapi:default"`` or ``"dshow:<device name>"``.
+    audio_source: str | None = None
     foreground_window: str = ""
     total_frames: int = 0
     total_input_events: int = 0

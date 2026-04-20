@@ -29,6 +29,22 @@ echo   (Nothing will be written to your system drive's user dir.)
 echo ============================================================
 echo.
 
+REM ---- Warn if installed on the system drive (网吧 still-restore wipes it on reboot) ----
+set "PROJECT_DRIVE=%PROJECT_DIR:~0,1%"
+set "SYS_DRIVE=%SystemDrive:~0,1%"
+if /I "%PROJECT_DRIVE%"=="%SYS_DRIVE%" (
+    echo [WARN] Project is on the system drive ^(%SystemDrive%^).
+    echo        On internet-cafe / shared PCs with system-restore software
+    echo        ^(网吧还原系统 / 影子系统^), every reboot will wipe the install
+    echo        AND all recordings under this directory.
+    echo        Strongly recommend moving the project to a non-system drive
+    echo        ^(e.g. D:\game-recorder^) before continuing.
+    echo.
+    choice /c YN /n /m "Continue anyway? [Y/N] "
+    if errorlevel 2 exit /b 1
+    echo.
+)
+
 if not exist "%TOOLS_DIR%"           mkdir "%TOOLS_DIR%"
 if not exist "%UV_CACHE_DIR%"        mkdir "%UV_CACHE_DIR%"
 if not exist "%UV_PYTHON_INSTALL_DIR%" mkdir "%UV_PYTHON_INSTALL_DIR%"
@@ -63,19 +79,26 @@ echo [2/4] Installing managed Python 3.11 ...
 if errorlevel 1 goto :fail_install_python
 
 REM ============================================================
-REM  Step 3/4: Download FFmpeg (essentials build)
+REM  Step 3/4: Download FFmpeg (BtbN gpl build — ships WASAPI loopback)
+REM ============================================================
+REM  Why BtbN-gpl instead of gyan-essentials:
+REM    The "essentials" build is compiled WITHOUT the wasapi indev,
+REM    so `-f wasapi -loopback 1 -i default` (the only zero-config way
+REM    to capture system / game audio on a fresh Windows install) does
+REM    not work. BtbN's gpl build enables wasapi + nvenc + libx264.
+REM    Size grows from ~80MB -> ~140MB.
 REM ============================================================
 echo.
 if exist "%FFMPEG_EXE%" (
     echo [3/4] FFmpeg already present, skipping download.
 ) else (
-    echo [3/4] Downloading FFmpeg ^(essentials build, ~80MB^) ...
+    echo [3/4] Downloading FFmpeg ^(BtbN gpl build, ~140MB, includes WASAPI + NVENC^) ...
     set "FFMPEG_ZIP=%TOOLS_DIR%\ffmpeg.zip"
     set "FFMPEG_TMP=%TOOLS_DIR%\ffmpeg-extract"
 
     powershell -NoProfile -ExecutionPolicy Bypass -Command ^
         "$ProgressPreference='SilentlyContinue';" ^
-        "Invoke-WebRequest -Uri 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip' -OutFile '%TOOLS_DIR%\ffmpeg.zip'"
+        "Invoke-WebRequest -Uri 'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip' -OutFile '%TOOLS_DIR%\ffmpeg.zip'"
     if errorlevel 1 goto :fail_download_ffmpeg
 
     if exist "%TOOLS_DIR%\ffmpeg-extract" rmdir /s /q "%TOOLS_DIR%\ffmpeg-extract"
@@ -146,7 +169,7 @@ pause & exit /b 1
 
 :fail_download_ffmpeg
 echo.
-echo [ERROR] Failed to download FFmpeg from gyan.dev. Check your internet / proxy and retry.
+echo [ERROR] Failed to download FFmpeg from github.com/BtbN. Check your internet / proxy and retry.
 pause & exit /b 1
 
 :fail_extract_ffmpeg
