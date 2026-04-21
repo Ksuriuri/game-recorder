@@ -99,7 +99,37 @@ def main() -> None:
         help="Disable Ctrl+F9 toggle hotkey (start recording immediately)",
     )
     parser.add_argument("-v", "--verbose", action="store_true", help="Debug logging")
+    parser.add_argument(
+        "--list-audio-devices",
+        action="store_true",
+        help="List DirectShow names for --audio-device, show WASAPI support, then exit",
+    )
     args = parser.parse_args()
+
+    if args.list_audio_devices:
+        from game_recorder.config import find_ffmpeg
+        from game_recorder.encoder.ffmpeg_pipe import (
+            _ffmpeg_has_wasapi_demuxer,
+            _list_dshow_devices,
+        )
+
+        ff = find_ffmpeg()
+        has_wasapi = _ffmpeg_has_wasapi_demuxer(ff)
+        print("FFmpeg:", ff)
+        print("WASAPI indev (loopback / default playback):", "yes" if has_wasapi else "no")
+        if not has_wasapi:
+            print(
+                "  Most static Windows builds (incl. BtbN) have no wasapi demuxer; use DirectShow. "
+                "For system audio: enable Stereo Mix, or route to VoiceMeeter, or use --audio-device."
+            )
+        print("DirectShow names (use with --audio-device):")
+        devs = _list_dshow_devices(ff)
+        if not devs:
+            print("  (none found)")
+        else:
+            for n in devs:
+                print(" ", n)
+        return
 
     # Logging
     logging.basicConfig(

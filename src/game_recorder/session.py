@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import ctypes
 import logging
+import statistics
 import threading
 import time
 from datetime import datetime
@@ -108,6 +109,9 @@ class Session:
         # same for every segment (same Config), so we only need one snapshot.
         self._encoder_name: str = ""
         self._audio_source: str | None = None  # events written to current segment
+
+        # Per captured frame: wall_frame_index − dxcam idx (median → meta event_video_sync_offset).
+        self._sync_wall_minus_idx: list[int] = []
 
     @property
     def session_id(self) -> str:
@@ -206,12 +210,22 @@ class Session:
 
         total_events = sum(s.event_count for s in self._segments_meta)
 
+        sync_off = 0
+        if self._sync_wall_minus_idx:
+            sync_off = int(round(statistics.median(self._sync_wall_minus_idx)))
+            logger.info(
+                "event_video_sync_offset=%d (median wall−idx, n=%d frames)",
+                sync_off,
+                len(self._sync_wall_minus_idx),
+            )
+
         meta = SessionMeta(
             session_id=self._session_id,
             session_timestamp=self._session_timestamp,
             start_epoch_ms=self._t0_epoch_ms,
             duration_s=round(duration_s, 2),
             fps=self.config.fps,
+            event_video_sync_offset=sync_off,
             resolution=[self._width, self._height],
             encoder=self._encoder_name,
             audio_source=self._audio_source,
@@ -237,6 +251,14 @@ class Session:
     def _on_frame(self, frame_bytes: bytes, idx: int) -> None:
         """Called by the screen-capture thread for every captured frame."""
         with self._segment_lock:
+            wall = int(
+                (time.perf_counter_ns() - self._t0_ns)
+                * int(max(1, self.config.fps))
+                // 1_000_000_000
+            )
+            if len(self._sync_wall_minus_idx) < 100_000:
+                self._sync_wall_minus_idx.append(wall - idx)
+
             self._frame_count = idx + 1
 
             # Rotate when this frame is the start of the next segment

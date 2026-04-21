@@ -79,20 +79,19 @@ echo [2/4] Installing managed Python 3.11 ...
 if errorlevel 1 goto :fail_install_python
 
 REM ============================================================
-REM  Step 3/4: Download FFmpeg (BtbN gpl build — ships WASAPI loopback)
+REM  Step 3/4: Download FFmpeg (BtbN gpl — encoders: NVENC, libx264, dshow, …)
 REM ============================================================
-REM  Why BtbN-gpl instead of gyan-essentials:
-REM    The "essentials" build is compiled WITHOUT the wasapi indev,
-REM    so `-f wasapi -loopback 1 -i default` (the only zero-config way
-REM    to capture system / game audio on a fresh Windows install) does
-REM    not work. BtbN's gpl build enables wasapi + nvenc + libx264.
-REM    Size grows from ~80MB -> ~140MB.
+REM  Note: Upstream static win64 FFmpeg (incl. BtbN) often has NO wasapi
+REM  *demuxer*; system audio is usually captured via DirectShow (Stereo Mix,
+REM  VoiceMeeter route, etc.).  Gyan "essentials" is too stripped; gpl is full.
+REM  URL: master-latest; replace with a release addin (e.g. n7.1) if you need
+REM  a specific branch (folder name still ffmpeg-* after extract).
 REM ============================================================
 echo.
 if exist "%FFMPEG_EXE%" (
     echo [3/4] FFmpeg already present, skipping download.
 ) else (
-    echo [3/4] Downloading FFmpeg ^(BtbN gpl build, ~140MB, includes WASAPI + NVENC^) ...
+    echo [3/4] Downloading FFmpeg ^(BtbN gpl, ~140MB, NVENC + dshow + libx264^) ...
     set "FFMPEG_ZIP=%TOOLS_DIR%\ffmpeg.zip"
     set "FFMPEG_TMP=%TOOLS_DIR%\ffmpeg-extract"
 

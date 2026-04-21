@@ -27,6 +27,8 @@ class SessionMeta:
     start_epoch_ms: int = 0
     duration_s: float = 0.0
     fps: int = 30
+    # jsonl ``frame`` ≈ video capture idx + this (median of wall−idx per captured frame); see Session.
+    event_video_sync_offset: int = 0
     resolution: list[int] = field(default_factory=lambda: [0, 0])
     encoder: str = ""
     # Audio input actually used; ``None`` means the recording is silent.

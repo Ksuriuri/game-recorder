@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+import os
 import shutil
 import subprocess
 import sys
@@ -41,18 +42,35 @@ class Config:
 
 
 def find_ffmpeg() -> str:
-    """Locate the ffmpeg binary: bundled copy first, then PATH."""
-    bundled = Path(__file__).resolve().parent.parent.parent / "ffmpeg" / "ffmpeg.exe"
-    if bundled.is_file():
-        return str(bundled)
+    """Resolve ffmpeg: ``GAME_RECORDER_FFMPEG``, then project ``ffmpeg/``, then PATH.
+
+    BtbN gpl in ``ffmpeg/bin`` (``install.bat``) includes the WASAPI indev used for
+    system/game audio. Minimal builds fall back to DirectShow and often need routing.
+    """
+    override = os.environ.get("GAME_RECORDER_FFMPEG", "").strip()
+    if override:
+        p = Path(override)
+        if p.is_file():
+            return str(p.resolve())
+        print(
+            f"ERROR: GAME_RECORDER_FFMPEG is set but not a file: {override!r}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    root = Path(__file__).resolve().parent.parent.parent
+    for rel in (("ffmpeg", "bin", "ffmpeg.exe"), ("ffmpeg", "ffmpeg.exe")):
+        candidate = root.joinpath(*rel)
+        if candidate.is_file():
+            return str(candidate)
 
     found = shutil.which("ffmpeg")
     if found:
         return found
 
     print(
-        "ERROR: ffmpeg not found. Place ffmpeg.exe in the ffmpeg/ directory "
-        "or add it to PATH.",
+        "ERROR: ffmpeg not found. Run install.bat, or place ffmpeg.exe in ffmpeg\\bin or ffmpeg\\, "
+        "or add a full build to PATH.",
         file=sys.stderr,
     )
     sys.exit(1)

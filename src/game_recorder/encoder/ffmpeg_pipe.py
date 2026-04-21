@@ -84,10 +84,12 @@ def _is_likely_microphone_only(name: str) -> bool:
 
 @functools.lru_cache(maxsize=4)
 def _ffmpeg_has_wasapi_demuxer(ffmpeg: str) -> bool:
-    """True if this FFmpeg build registers the WASAPI input device (full builds, not essentials)."""
+    """True if this FFmpeg build has the ``wasapi`` *demuxer* (rare in upstream static builds)."""
+    # ``-devices`` is unreliable: recent win64 static builds (e.g. BtbN master/7.1) ship without
+    # a wasapi demuxer even in "gpl" variants, so the list never mentions it.
     try:
         result = subprocess.run(
-            [ffmpeg, "-hide_banner", "-devices"],
+            [ffmpeg, "-hide_banner", "-h", "demuxer=wasapi"],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -95,6 +97,8 @@ def _ffmpeg_has_wasapi_demuxer(ffmpeg: str) -> bool:
             timeout=10,
         )
         out = (result.stdout or "") + (result.stderr or "")
+        if "Unknown format" in out or "Unknown demuxer" in out:
+            return False
         return "wasapi" in out.lower()
     except Exception:
         return False
@@ -252,9 +256,10 @@ class FFmpegEncoder:
             else:
                 if not _ffmpeg_has_wasapi_demuxer(self._ffmpeg_path):
                     logger.info(
-                        "FFmpeg build has no WASAPI indev; falling back to DirectShow. "
-                        "For zero-config audio on arbitrary Windows PCs, install a full "
-                        "FFmpeg build (e.g. BtbN gpl)."
+                        "FFmpeg has no wasapi demuxer (typical for official win64 static builds, "
+                        "including BtbN) — using DirectShow. For desktop/game sound: enable "
+                        "Stereo Mix, or route Windows playback through VoiceMeeter/VB-CABLE, or set "
+                        "--audio-device to a name from: game-recorder --list-audio-devices"
                     )
                 dshow_device = _find_loopback_device(self._ffmpeg_path)
 
@@ -263,6 +268,15 @@ class FFmpegEncoder:
             self._audio_source = "wasapi:default"
         elif dshow_device is not None:
             self._audio_source = f"dshow:{dshow_device}"
+            if not cfg.audio_device and "voicemeeter" in dshow_device.lower():
+                logger.error(
+                    "Auto-selected DirectShow %r is usually silent: it only has signal when "
+                    "Windows default playback is a VoiceMeeter *input* (or the app is routed there). "
+                    "Fix: re-run install.bat for WASAPI loopback, or pass --audio-device for "
+                    "Stereo Mix (enable in Settings → System → Sound → input devices), or use "
+                    "game-recorder --list-audio-devices to copy an exact name.",
+                    dshow_device,
+                )
         else:
             self._audio_source = None
             logger.warning(
@@ -271,9 +285,6 @@ class FFmpegEncoder:
             )
 
         cmd: list[str] = [self._ffmpeg_path, "-y", "-hide_banner", "-loglevel", "warning"]
-        # Must be global: applies to muxer when any input ends (see -shortest in ffmpeg-all).
-        if has_audio:
-            cmd.append("-shortest")
 
         # Audio BEFORE rawvideo pipe: avoids FFmpeg waiting on stdin probe while dshow runs,
         # and matches common working pipe+dshow examples.
@@ -323,6 +334,8 @@ class FFmpegEncoder:
             cmd += ["-c:a", "aac", "-b:a", cfg.audio_bitrate]
             # Input order: 0 = audio (dshow or wasapi), 1 = rawvideo from pipe
             cmd += ["-map", "1:v", "-map", "0:a"]
+            # Output muxer option: before any -i, FFmpeg misparses it as an input option (dshow err).
+            cmd.append("-shortest")
 
         cmd.append(str(output_path))
 
