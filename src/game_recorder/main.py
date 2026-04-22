@@ -108,6 +108,7 @@ def main() -> None:
 
     if args.list_audio_devices:
         from game_recorder.config import find_ffmpeg
+        from game_recorder.encoder import python_loopback as _pyloop
         from game_recorder.encoder.ffmpeg_pipe import (
             _ffmpeg_has_wasapi_demuxer,
             _list_dshow_devices,
@@ -115,12 +116,20 @@ def main() -> None:
 
         ff = find_ffmpeg()
         has_wasapi = _ffmpeg_has_wasapi_demuxer(ff)
+        has_pyloop = _pyloop.loopback_usable()
         print("FFmpeg:", ff)
-        print("WASAPI indev (loopback / default playback):", "yes" if has_wasapi else "no")
-        if not has_wasapi:
+        print("FFmpeg WASAPI demuxer (native loopback):", "yes" if has_wasapi else "no")
+        print("Python soundcard loopback (default speaker):", "yes" if has_pyloop else "no")
+        if has_pyloop:
             print(
-                "  Most static Windows builds (incl. BtbN) have no wasapi demuxer; use DirectShow. "
-                "For system audio: enable Stereo Mix, or route to VoiceMeeter, or use --audio-device."
+                "  → Default zero-config audio path: captures the current Windows default "
+                "playback device, no Stereo Mix / VB-CABLE needed."
+            )
+        elif not has_wasapi:
+            print(
+                "  → No automatic loopback available on this machine. Either install/repair the "
+                "`soundcard` Python package, or enable Stereo Mix / install VB-CABLE and pass "
+                "--audio-device."
             )
         print("DirectShow names (use with --audio-device):")
         devs = _list_dshow_devices(ff)

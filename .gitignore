@@ -11,7 +11,9 @@ venv/
 # One-click installer artifacts (Windows)
 .tools/
 ffmpeg/
+wheels/
 run.bat
+game-recorder-portable-*.zip
 
 # macOS
 .DS_Store

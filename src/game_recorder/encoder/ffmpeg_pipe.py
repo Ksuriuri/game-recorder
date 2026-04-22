@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import queue
 import re
 import subprocess
 import sys
@@ -15,8 +16,17 @@ import threading
 from pathlib import Path
 
 from game_recorder.config import Config, detect_nvenc, find_ffmpeg, nvenc_runtime_usable
+from game_recorder.encoder import python_loopback as _pyloop
 
 logger = logging.getLogger(__name__)
+
+# Python loopback (soundcard) format pumped into FFmpeg over TCP.
+# 48 kHz / stereo / s16le matches the standard Windows shared-mode mixer format,
+# so soundcard does no resampling and FFmpeg sees the original mix.
+_PYLOOP_SAMPLERATE = 48_000
+_PYLOOP_CHANNELS = 2
+# Worker should publish "connected" then "streaming" within this budget.
+_PYLOOP_STARTUP_TIMEOUT_S = 12.0
 
 # Windows pipe writes: very large single writes can fail with OSError EINVAL; chunking avoids that.
 _STDIN_CHUNK = 256 * 1024
@@ -218,6 +228,11 @@ class FFmpegEncoder:
         self._stdin_broken_logged = False
         self._audio_source: str | None = None
 
+        # Python soundcard-loopback pump (only set when that path is selected).
+        self._pyloop_thread: threading.Thread | None = None
+        self._pyloop_stop: threading.Event | None = None
+        self._pyloop_queue: queue.Queue | None = None  # type: ignore[type-arg]
+
     @property
     def encoder_name(self) -> str:
         return self._encoder
@@ -240,39 +255,52 @@ class FFmpegEncoder:
 
         cfg = self.config
         use_wasapi = False
+        use_pyloop = False
+        pyloop_port = 0
         dshow_device: str | None = None
 
         if cfg.audio_device:
+            # Explicit override always wins, even if it's silent — user asked for it.
             dshow_device = cfg.audio_device
         else:
-            # Prefer WASAPI loopback: zero-config, no Stereo Mix needed,
-            # works on any Windows 10/11 machine — but only if the demuxer
-            # is compiled in AND the default endpoint is actually openable.
+            # Selection priority for zero-config game-audio capture:
+            #   1) FFmpeg native WASAPI demuxer  (single process; only some builds ship it)
+            #   2) Python soundcard loopback     (zero-config on every Win10+; default on
+            #      BtbN/upstream static FFmpeg, which has no wasapi demuxer)
+            #   3) DirectShow auto-pick          (Stereo Mix / VB-CABLE / VoiceMeeter)
             if _ffmpeg_has_wasapi_demuxer(
                 self._ffmpeg_path
             ) and _wasapi_loopback_usable(self._ffmpeg_path):
                 use_wasapi = True
-                logger.info("Using WASAPI loopback (default Windows playback).")
+                logger.info("Audio: FFmpeg WASAPI loopback (default Windows playback).")
+            elif _pyloop.loopback_usable():
+                use_pyloop = True
+                pyloop_port = _pyloop.free_tcp_port()
+                logger.info(
+                    "Audio: Python WASAPI loopback via soundcard "
+                    "(default speaker → TCP 127.0.0.1:%d → FFmpeg).",
+                    pyloop_port,
+                )
             else:
-                if not _ffmpeg_has_wasapi_demuxer(self._ffmpeg_path):
-                    logger.info(
-                        "FFmpeg has no wasapi demuxer (typical for official win64 static builds, "
-                        "including BtbN) — using DirectShow. For desktop/game sound: enable "
-                        "Stereo Mix, or route Windows playback through VoiceMeeter/VB-CABLE, or set "
-                        "--audio-device to a name from: game-recorder --list-audio-devices"
-                    )
+                logger.info(
+                    "Audio: no WASAPI loopback available "
+                    "(neither FFmpeg wasapi demuxer nor soundcard) — falling back to DirectShow."
+                )
                 dshow_device = _find_loopback_device(self._ffmpeg_path)
 
-        has_audio = use_wasapi or dshow_device is not None
+        has_audio = use_wasapi or use_pyloop or dshow_device is not None
         if use_wasapi:
             self._audio_source = "wasapi:default"
+        elif use_pyloop:
+            self._audio_source = "soundcard:default"
         elif dshow_device is not None:
             self._audio_source = f"dshow:{dshow_device}"
             if not cfg.audio_device and "voicemeeter" in dshow_device.lower():
                 logger.error(
                     "Auto-selected DirectShow %r is usually silent: it only has signal when "
                     "Windows default playback is a VoiceMeeter *input* (or the app is routed there). "
-                    "Fix: re-run install.bat for WASAPI loopback, or pass --audio-device for "
+                    "Fix: install the `soundcard` Python package (already a project dep) so the "
+                    "Python WASAPI loopback path can be used, or pass --audio-device for "
                     "Stereo Mix (enable in Settings → System → Sound → input devices), or use "
                     "game-recorder --list-audio-devices to copy an exact name.",
                     dshow_device,
@@ -281,15 +309,20 @@ class FFmpegEncoder:
             self._audio_source = None
             logger.warning(
                 "No usable audio capture device found — recording will be SILENT. "
-                "Install a full FFmpeg build (WASAPI loopback) or enable Stereo Mix."
+                "Check that the `soundcard` package imported OK (Python WASAPI loopback), "
+                "or enable Stereo Mix / install VB-CABLE."
             )
 
         cmd: list[str] = [self._ffmpeg_path, "-y", "-hide_banner", "-loglevel", "warning"]
 
-        # Audio BEFORE rawvideo pipe: avoids FFmpeg waiting on stdin probe while dshow runs,
-        # and matches common working pipe+dshow examples.
+        # Audio BEFORE rawvideo pipe: avoids FFmpeg waiting on stdin probe while the audio
+        # demuxer initialises, and matches common working pipe+dshow examples.
         if use_wasapi:
             cmd += ["-f", "wasapi", "-loopback", "1", "-i", "default"]
+        elif use_pyloop:
+            cmd += _pyloop.tcp_ffmpeg_input_args(
+                pyloop_port, _PYLOOP_SAMPLERATE, _PYLOOP_CHANNELS
+            )
         elif dshow_device is not None:
             cmd += [
                 "-thread_queue_size",
@@ -355,6 +388,72 @@ class FFmpegEncoder:
         )
         self._start_stderr_drain()
 
+        if use_pyloop:
+            self._start_pyloop_pump(pyloop_port)
+
+    def _start_pyloop_pump(self, port: int) -> None:
+        """Spawn the soundcard→TCP worker; downgrade to silent on failure.
+
+        Failure modes that get us here:
+          * FFmpeg exited before binding the TCP port (encoder rejected video args, etc.)
+          * `soundcard` cannot open the default speaker's loopback (driver / exclusive mode)
+        Either way we kill the FFmpeg process and let the caller observe an empty audio
+        track — but we MUST NOT leave the Popen running with `tcp://?listen` blocking
+        for 15 s, that would make every recording start visibly hang.
+        """
+        thread, q, stop = _pyloop.start_tcp_pump(port, _PYLOOP_SAMPLERATE, _PYLOOP_CHANNELS)
+        self._pyloop_thread = thread
+        self._pyloop_queue = q
+        self._pyloop_stop = stop
+
+        try:
+            connect_msg = q.get(timeout=_PYLOOP_STARTUP_TIMEOUT_S)
+        except queue.Empty:
+            connect_msg = TimeoutError("loopback worker never reported a connect result")
+
+        if isinstance(connect_msg, BaseException):
+            logger.error(
+                "Python loopback failed to attach to FFmpeg (%s). Aborting this FFmpeg "
+                "process and continuing without audio.",
+                connect_msg,
+            )
+            self._abort_pyloop_and_ffmpeg()
+            return
+
+        try:
+            stream_msg = q.get(timeout=_PYLOOP_STARTUP_TIMEOUT_S)
+        except queue.Empty:
+            stream_msg = TimeoutError("loopback worker connected but never opened the recorder")
+
+        if isinstance(stream_msg, BaseException):
+            logger.error(
+                "Python loopback connected to FFmpeg but could not open the speaker "
+                "(%s). Aborting and continuing without audio.",
+                stream_msg,
+            )
+            self._abort_pyloop_and_ffmpeg()
+            return
+
+        logger.info("Python loopback streaming to FFmpeg (s16le %d Hz x%d).",
+                    _PYLOOP_SAMPLERATE, _PYLOOP_CHANNELS)
+
+    def _abort_pyloop_and_ffmpeg(self) -> None:
+        """Stop the loopback worker and kill FFmpeg so the caller can resort to silent retry."""
+        if self._pyloop_stop is not None:
+            self._pyloop_stop.set()
+        if self._pyloop_thread is not None:
+            self._pyloop_thread.join(timeout=2.0)
+        self._pyloop_thread = None
+        self._pyloop_stop = None
+        self._pyloop_queue = None
+        if self._proc is not None and self._proc.poll() is None:
+            try:
+                self._proc.kill()
+            except OSError:
+                pass
+        # Mark this encoder instance as silent so callers / meta.json reflect reality.
+        self._audio_source = None
+
     def _start_stderr_drain(self) -> None:
         """Read FFmpeg stderr in a thread so the pipe never fills and blocks the child."""
         proc = self._proc
@@ -401,6 +500,11 @@ class FFmpegEncoder:
         try:
             if self._proc.stdin:
                 self._proc.stdin.close()
+            # With -shortest, FFmpeg should EOF the audio side once video EOFs,
+            # which makes our soundcard worker's sendall raise BrokenPipe and exit.
+            # Belt-and-braces: also signal stop explicitly.
+            if self._pyloop_stop is not None:
+                self._pyloop_stop.set()
             self._proc.wait(timeout=30)
         except subprocess.TimeoutExpired:
             logger.warning("FFmpeg did not exit in time, killing")
@@ -408,6 +512,13 @@ class FFmpegEncoder:
         finally:
             if self._proc.returncode and self._proc.returncode != 0:
                 self._dump_stderr()
+            if self._pyloop_thread is not None:
+                self._pyloop_thread.join(timeout=3.0)
+                if self._pyloop_thread.is_alive():
+                    logger.warning("Python loopback worker did not exit in time.")
+            self._pyloop_thread = None
+            self._pyloop_stop = None
+            self._pyloop_queue = None
             self._proc = None
             self._ffmpeg_stderr.clear()
 

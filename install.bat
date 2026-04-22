@@ -13,6 +13,7 @@ set "UV_EXE=%UV_DIR%\uv.exe"
 set "FFMPEG_DIR=%PROJECT_DIR%\ffmpeg"
 set "FFMPEG_EXE=%FFMPEG_DIR%\bin\ffmpeg.exe"
 set "VENV_DIR=%PROJECT_DIR%\.venv"
+set "WHEELS_DIR=%PROJECT_DIR%\wheels"
 
 REM ---- Redirect uv state into project dir (avoid %LOCALAPPDATA%, %APPDATA%) ----
 set "UV_CACHE_DIR=%TOOLS_DIR%\uv-cache"
@@ -20,12 +21,29 @@ set "UV_PYTHON_INSTALL_DIR=%TOOLS_DIR%\python"
 set "UV_TOOL_DIR=%TOOLS_DIR%\uv-tools"
 set "UV_TOOL_BIN_DIR=%TOOLS_DIR%\uv-tools\bin"
 
+REM ---- Detect offline portable bundle: presence of wheels/ + pre-baked uv/ffmpeg/python ----
+REM  When this script is unzipped from a build_offline_bundle.bat artifact, every dependency
+REM  is already on disk; we must NOT touch the network (the target box is typically a 网吧
+REM  PC behind a firewall / no proxy).
+set "OFFLINE_MODE=0"
+if exist "%WHEELS_DIR%" if exist "%UV_EXE%" if exist "%FFMPEG_EXE%" if exist "%UV_PYTHON_INSTALL_DIR%" set "OFFLINE_MODE=1"
+if "%OFFLINE_MODE%"=="1" (
+    REM Tell uv: never reach out to PyPI or python-build-standalone
+    set "UV_OFFLINE=1"
+    set "UV_PYTHON_DOWNLOADS=never"
+)
+
 echo ============================================================
 echo   Game Recorder - Windows One-Click Installer
 echo ============================================================
 echo   Install location : %PROJECT_DIR%
 echo   uv cache / Python: %TOOLS_DIR%
-echo   (Nothing will be written to your system drive's user dir.)
+if "%OFFLINE_MODE%"=="1" (
+    echo   Mode             : OFFLINE ^(restoring from local wheels/^)
+) else (
+    echo   Mode             : ONLINE  ^(will download uv / Python / FFmpeg / wheels^)
+)
+echo   ^(Nothing will be written to your system drive's user dir.^)
 echo ============================================================
 echo.
 
@@ -117,13 +135,23 @@ if exist "%FFMPEG_EXE%" (
 
 REM ============================================================
 REM  Step 4/4: Create venv + install project (editable)
+REM
+REM  Online: uv resolves + downloads from PyPI, fills %UV_CACHE_DIR%.
+REM  Offline (wheels/ present): uv resolves from --find-links wheels/ only,
+REM  with --no-index --offline so a missing wheel fails loudly instead of
+REM  silently hanging on a connect attempt.
 REM ============================================================
 echo.
 echo [4/4] Creating virtual environment and installing game-recorder ...
 "%UV_EXE%" venv --python 3.11 "%VENV_DIR%"
 if errorlevel 1 goto :fail_venv
 
-"%UV_EXE%" pip install --python "%VENV_DIR%\Scripts\python.exe" -e .
+if "%OFFLINE_MODE%"=="1" (
+    echo       Offline mode: installing from "%WHEELS_DIR%" ^(no PyPI access^).
+    "%UV_EXE%" pip install --offline --no-index --find-links "%WHEELS_DIR%" --python "%VENV_DIR%\Scripts\python.exe" -e .
+) else (
+    "%UV_EXE%" pip install --python "%VENV_DIR%\Scripts\python.exe" -e .
+)
 if errorlevel 1 goto :fail_install
 
 REM ============================================================

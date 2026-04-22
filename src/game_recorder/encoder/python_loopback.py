@@ -11,6 +11,7 @@ import queue
 import socket
 import sys
 import threading
+import time
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -27,6 +28,10 @@ logger = logging.getLogger(__name__)
 # is already established and this does not limit record duration.
 _FFMEPG_TCP_LISTEN_US = 15_000_000
 _RECORD_FRAMES = 1024
+# How long the worker tolerates "connection refused" before giving up: FFmpeg needs a few ms
+# after Popen to actually bind the listening socket, so we have to retry instead of failing fast.
+_CONNECT_RETRY_DEADLINE_S = 10.0
+_CONNECT_RETRY_INTERVAL_S = 0.05
 
 
 def loopback_usable() -> bool:
@@ -76,21 +81,58 @@ def _resolve_loopback(sc: object) -> object:
     raise IndexError("no loopback device for default speaker")
 
 
+def _connect_with_retry(
+    port: int,
+    stop: threading.Event,
+    deadline_s: float = _CONNECT_RETRY_DEADLINE_S,
+) -> socket.socket:
+    """Connect to FFmpeg's TCP listener, retrying through the bind window.
+
+    FFmpeg's ``tcp://?listen`` binds asynchronously after Popen returns, so a
+    single ``create_connection`` call almost always races and gets
+    ConnectionRefusedError on Windows. We retry until either the connect
+    succeeds, the caller signals stop, or the deadline elapses.
+    """
+    end = time.monotonic() + deadline_s
+    last_err: OSError | None = None
+    while not stop.is_set() and time.monotonic() < end:
+        try:
+            s = socket.create_connection(("127.0.0.1", port), timeout=2.0)
+            s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            return s
+        except (ConnectionRefusedError, TimeoutError, socket.timeout) as e:
+            last_err = e
+            time.sleep(_CONNECT_RETRY_INTERVAL_S)
+        except OSError as e:
+            # WSAECONNREFUSED on Windows comes through as OSError(10061)
+            if getattr(e, "winerror", None) == 10061 or e.errno in (61, 111, 10061):
+                last_err = e
+                time.sleep(_CONNECT_RETRY_INTERVAL_S)
+                continue
+            raise
+    if stop.is_set():
+        raise ConnectionAbortedError("loopback worker stopped before FFmpeg bound TCP port")
+    raise TimeoutError(
+        f"FFmpeg never bound 127.0.0.1:{port} within {deadline_s:.1f}s "
+        f"(last error: {last_err!r})"
+    )
+
+
 def _audio_worker(
     port: int,
     samplerate: int,
     num_channels: int,
     out_q: queue.Queue[Exception | type[None] | str],
+    stop: threading.Event,
 ) -> None:
-    """Connect to FFmpeg TCP, open loopback, stream until *stop* is set."""
+    """Connect to FFmpeg TCP, open loopback, stream until *stop* is set or socket breaks."""
     s: socket.socket | None = None
     try:
-        s = socket.create_connection(("127.0.0.1", port), timeout=30.0)
-        s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-    except (OSError, socket.timeout) as e:
+        s = _connect_with_retry(port, stop)
+    except (OSError, TimeoutError, ConnectionAbortedError) as e:
         out_q.put(e)
         return
-    out_q.put(None)  # TCP is up; ffmpeg can then open rawvideo and wait for BGR
+    out_q.put(None)  # TCP up; FFmpeg's audio input has a client, will start its rawvideo too
     err: Exception | None = None
     try:
         import soundcard as sc  # noqa: PLC0415
@@ -101,13 +143,16 @@ def _audio_worker(
             nch = 2
         with mic.recorder(samplerate=samplerate, channels=nch) as rec:
             out_q.put("streaming")
-            # Pump until parent closes the socket (FFmpeg stop) or stop is implicit via BrokenPipe
-            while True:
+            while not stop.is_set():
                 data = rec.record(numframes=_RECORD_FRAMES)
-                s.sendall(_f32_nch_to_s16le_interleaved(data))
-    except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError, OSError):
+                try:
+                    s.sendall(_f32_nch_to_s16le_interleaved(data))
+                except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError, OSError):
+                    # FFmpeg closed its side (normal stop path) — exit cleanly.
+                    break
+    except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
         pass
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         err = e
     finally:
         if s is not None:
@@ -122,7 +167,7 @@ def _audio_worker(
         if err is not None:
             try:
                 out_q.put(err)
-            except Exception:
+            except Exception:  # noqa: BLE001, S110
                 pass
 
 
@@ -133,14 +178,12 @@ def start_tcp_pump(
 ) -> tuple[threading.Thread, queue.Queue[Exception | type[None] | str], threading.Event]:
     """Start daemon thread. Queue protocol: *None* = connected; *\"streaming\"* = mic open; *Exception* = error."""
     stop = threading.Event()
-    out_q: queue.Queue[Exception | type[None] | str] = queue.Queue(
-        maxsize=8
-    )  # "streaming" and errors
+    out_q: queue.Queue[Exception | type[None] | str] = queue.Queue(maxsize=8)
 
     t = threading.Thread(
         target=_audio_worker,
         name="python-loopback-audio",
-        args=(port, samplerate, channels, out_q),
+        args=(port, samplerate, channels, out_q, stop),
         daemon=True,
     )
     t.start()
