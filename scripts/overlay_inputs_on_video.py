@@ -18,13 +18,20 @@ Spacing: ``--hud-cell``, ``--hud-gap``, ``--hud-margin``.
 Event/video sync: ``meta.json`` has ``event_video_sync_offset`` (median wall−idx per
 video frame). The script replays jsonl buckets before the first aligned frame, then
 ``--event-frame-lead`` can nudge a few frames if mux/capture still lags.
+
+Audio: OpenCV only writes a video track; by default the script muxes the **original**
+segment’s audio onto the HUD file using ``ffmpeg`` (same lookup as ``install.bat`` /
+``GAME_RECORDER_FFMPEG`` / ``PATH``). Use ``--no-audio`` to skip muxing.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -41,6 +48,70 @@ VK_D = 0x44
 SEGMENT_NAME_RE = re.compile(
     r"^(\d{8}_\d{6})_(\d+)_(\d+)\.(mp4|MP4)$",
 )
+
+
+def _repo_root() -> Path:
+    """``scripts/overlay_inputs_on_video.py`` → repository root."""
+    return Path(__file__).resolve().parent.parent
+
+
+def find_ffmpeg() -> str | None:
+    """Same resolution order as ``game_recorder.config.find_ffmpeg`` (no sys.exit)."""
+    override = os.environ.get("GAME_RECORDER_FFMPEG", "").strip()
+    if override:
+        p = Path(override)
+        if p.is_file():
+            return str(p.resolve())
+        print(
+            f"WARN: GAME_RECORDER_FFMPEG is set but not a file: {override!r} — skipping audio mux.",
+            file=sys.stderr,
+        )
+        return None
+    root = _repo_root()
+    for rel in (("ffmpeg", "bin", "ffmpeg.exe"), ("ffmpeg", "ffmpeg.exe")):
+        candidate = root.joinpath(*rel)
+        if candidate.is_file():
+            return str(candidate)
+    found = shutil.which("ffmpeg")
+    return found
+
+
+def mux_audio_copy(
+    ffmpeg_bin: str,
+    *,
+    video_only: Path,
+    audio_source: Path,
+    destination: Path,
+) -> bool:
+    """H.264/MPEG-4 video from ``video_only`` + audio copied from ``audio_source`` → ``destination``."""
+    cmd = [
+        ffmpeg_bin,
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "warning",
+        "-i",
+        str(video_only),
+        "-i",
+        str(audio_source),
+        "-map",
+        "0:v:0",
+        "-map",
+        "1:a?",
+        "-c:v",
+        "copy",
+        "-c:a",
+        "copy",
+        str(destination),
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if proc.returncode != 0:
+        print(
+            f"ERROR: ffmpeg audio mux failed (exit {proc.returncode}):\n{proc.stderr}",
+            file=sys.stderr,
+        )
+        return False
+    return True
 
 
 def parse_segment_from_filename(path: Path) -> tuple[int, int] | None:
@@ -272,6 +343,11 @@ def main() -> None:
         metavar="PX",
         help="Padding from video edges to the outer HUD bbox",
     )
+    ap.add_argument(
+        "--no-audio",
+        action="store_true",
+        help="Do not mux audio from the source mp4 (OpenCV output is video-only)",
+    )
     args = ap.parse_args()
     video: Path = args.video
     if not video.is_file():
@@ -343,9 +419,24 @@ def main() -> None:
 
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     out_path = args.output or video.with_name(f"{video.stem}_inputs{video.suffix}")
-    writer = cv2.VideoWriter(str(out_path), fourcc, float(fps), (vw, vh))
+    mux_audio = not args.no_audio
+    ffmpeg_bin = find_ffmpeg() if mux_audio else None
+    if mux_audio and not ffmpeg_bin:
+        print(
+            "WARN: ffmpeg not found — writing video-only; "
+            "install ffmpeg (see install.bat) or set GAME_RECORDER_FFMPEG.",
+            file=sys.stderr,
+        )
+        mux_audio = False
+
+    hud_tmp = (
+        out_path.with_name(f"{out_path.stem}._hud_tmp{out_path.suffix}")
+        if mux_audio
+        else out_path
+    )
+    writer = cv2.VideoWriter(str(hud_tmp), fourcc, float(fps), (vw, vh))
     if not writer.isOpened():
-        print(f"ERROR: cannot open VideoWriter for {out_path}", file=sys.stderr)
+        print(f"ERROR: cannot open VideoWriter for {hud_tmp}", file=sys.stderr)
         sys.exit(1)
 
     events_by_frame = load_events_by_frame(jsonl)
@@ -399,7 +490,39 @@ def main() -> None:
 
     cap.release()
     writer.release()
-    print(f"Wrote {frame_i} frames → {out_path.resolve()}")
+
+    if mux_audio:
+        assert ffmpeg_bin is not None
+        ok = mux_audio_copy(
+            ffmpeg_bin, video_only=hud_tmp, audio_source=video, destination=out_path
+        )
+        if ok:
+            try:
+                hud_tmp.unlink(missing_ok=True)
+            except OSError as e:
+                print(f"WARN: could not remove temp {hud_tmp}: {e}", file=sys.stderr)
+            print(f"Wrote {frame_i} frames + audio → {out_path.resolve()}")
+        else:
+            try:
+                if out_path.is_file():
+                    out_path.unlink()
+            except OSError:
+                pass
+            try:
+                hud_tmp.replace(out_path)
+            except OSError as e:
+                print(
+                    f"ERROR: ffmpeg mux failed and could not move {hud_tmp} → {out_path}: {e}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            print(
+                f"ERROR: ffmpeg mux failed; saved video-only (no audio) to {out_path.resolve()}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+    else:
+        print(f"Wrote {frame_i} frames → {out_path.resolve()}")
 
 
 if __name__ == "__main__":

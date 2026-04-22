@@ -83,14 +83,30 @@ if errorlevel 1 (
     exit /b 1
 )
 
-"%UV_EXE%" pip download --python "%VENV_DIR%\Scripts\python.exe" -d "%WHEELS_DIR%" -r "%FREEZE_FILE%"
+REM uv has no `pip download` (see uv pip --help). Bootstrap pip into the venv, then use pip.
+"%UV_EXE%" pip install --python "%VENV_DIR%\Scripts\python.exe" pip
 if errorlevel 1 (
-    echo [ERROR] uv pip download failed; wheels\ may be incomplete.
+    echo [ERROR] Could not install pip into venv for wheel download.
+    exit /b 1
+)
+"%VENV_DIR%\Scripts\python.exe" -m pip download -d "%WHEELS_DIR%" -r "%FREEZE_FILE%"
+if errorlevel 1 (
+    echo [ERROR] pip download failed; wheels\ may be incomplete.
+    exit /b 1
+)
+
+REM Offline `uv pip install -e .` needs pyproject build-system deps plus uv's editable helper.
+REM   hatchling -> packaging, pathspec, pluggy, trove-classifiers
+REM   editables   -> required by uv when installing -e from a local path in isolation
+echo       Also downloading hatchling + editables ^(+ deps^) for offline editable installs ...
+"%VENV_DIR%\Scripts\python.exe" -m pip download -d "%WHEELS_DIR%" hatchling "editables>=0.3,<1"
+if errorlevel 1 (
+    echo [ERROR] pip download hatchling/editables failed.
     exit /b 1
 )
 
 REM Sanity check: must contain at least one wheel for each direct dep.
-for %%P in (numpy opencv_python_headless dxcam soundcard) do (
+for %%P in (numpy opencv_python_headless dxcam soundcard hatchling editables) do (
     dir /b "%WHEELS_DIR%\%%P-*.whl" >nul 2>&1 || (
         echo [ERROR] No wheel found for %%P in wheels\.  Bundle would be unusable.
         exit /b 1
@@ -147,6 +163,10 @@ echo     1) Copy the zip to D:\ on the target PC ^(NOT C:\^)
 echo     2) Right-click -^> Extract All
 echo     3) Double-click install.bat   ^(~10 s, no internet needed^)
 echo     4) Double-click run.bat        ^(Ctrl+F9 to toggle recording^)
+echo.
+echo   On THIS machine after a build:
+echo     .venv\ was removed so the zip does not embed a path-bound venv.
+echo     Run install.bat once to recreate .venv\ ^(offline from wheels\ if present^).
 echo ============================================================
 exit /b 0
 
