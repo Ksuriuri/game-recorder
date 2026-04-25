@@ -6,8 +6,11 @@ video). Segment filenames look ``YYYYMMDD_HHMMSS_<start>_<end>.mp4`` where
 ``<end>`` is the exclusive global frame index, matching ``Session`` output.
 
 - Bottom-left: WASD in a cross (W=up, S=down, A=left, D=right); active while held.
-- Bottom-right: view-movement arrows from mouse deltas (↑ / ← / → / ↓); lit when
-  movement in that direction exceeds ``--mouse-threshold`` for that frame.
+- Bottom-right: view-movement arrows from mouse deltas (↑ / ← / → / ↓). Per-frame
+  deltas are **EMA-smoothed** (``--mouse-ema``); components inside ``--mouse-deadzone``
+  are ignored; a direction lights only if the smoothed axis exceeds
+  ``--mouse-threshold`` and wins ``--mouse-axis-ratio`` over the perpendicular axis
+  (reduces diagonal flicker from noise).
 
 Run from repo root (uses project venv / ``uv run``):
 
@@ -305,8 +308,30 @@ def main() -> None:
     ap.add_argument(
         "--mouse-threshold",
         type=float,
-        default=2.0,
-        help="Min |dx| or |dy| in pixels per frame to light a mouse direction",
+        default=3.0,
+        help="Min |smoothed dx| or |smoothed dy| (after dead zone) to light a direction",
+    )
+    ap.add_argument(
+        "--mouse-ema",
+        type=float,
+        default=0.22,
+        metavar="A",
+        help="Mouse delta EMA blend per frame (0–1); lower = smoother, slower response",
+    )
+    ap.add_argument(
+        "--mouse-deadzone",
+        type=float,
+        default=2.5,
+        metavar="PX",
+        help="Smoothed |dx|/|dy| below this (after EMA) are treated as 0 for arrow HUD",
+    )
+    ap.add_argument(
+        "--mouse-axis-ratio",
+        type=float,
+        default=1.2,
+        metavar="R",
+        help="Light vertical only if |smoothed dy| ≥ R×|smoothed dx|, horizontal vice versa; "
+        "use 1.0 to disable this filter",
     )
     ap.add_argument(
         "--event-frame-offset",
@@ -443,6 +468,7 @@ def main() -> None:
 
     vk_down = {VK_W: False, VK_A: False, VK_S: False, VK_D: False}
     last_mouse_cell: list[tuple[int, int] | None] = [None]
+    mouse_smooth_xy: list[float] = [0.0, 0.0]
 
     first_lookup = seg_start + event_offset + event_lead
     for f in range(0, max(0, first_lookup)):
@@ -462,7 +488,7 @@ def main() -> None:
         if not ok:
             break
         global_f = seg_start + frame_i + event_offset + event_lead
-        mouse_dx, mouse_dy, moved = apply_input_bucket(
+        mouse_dx, mouse_dy, _moved = apply_input_bucket(
             events_by_frame.get(global_f, []),
             vk_down,
             last_mouse_cell,
@@ -474,12 +500,25 @@ def main() -> None:
             "left": vk_down[VK_A],
             "right": vk_down[VK_D],
         }
+        ema = max(1e-6, min(1.0, float(args.mouse_ema)))
+        sx = (1.0 - ema) * mouse_smooth_xy[0] + ema * float(mouse_dx)
+        sy = (1.0 - ema) * mouse_smooth_xy[1] + ema * float(mouse_dy)
+        mouse_smooth_xy[0], mouse_smooth_xy[1] = sx, sy
+
+        dz = max(0.0, float(args.mouse_deadzone))
+        if abs(sx) < dz:
+            sx = 0.0
+        if abs(sy) < dz:
+            sy = 0.0
+
         th = float(args.mouse_threshold)
+        ratio = max(1.0, float(args.mouse_axis_ratio))
+        ax_x, ax_y = abs(sx), abs(sy)
         mouse_ui = {
-            "up": moved and mouse_dy < -th,
-            "down": moved and mouse_dy > th,
-            "left": moved and mouse_dx < -th,
-            "right": moved and mouse_dx > th,
+            "up": sy < -th and ax_y >= ax_x * ratio,
+            "down": sy > th and ax_y >= ax_x * ratio,
+            "left": sx < -th and ax_x >= ax_y * ratio,
+            "right": sx > th and ax_x >= ax_y * ratio,
         }
 
         draw_wasd_hud(frame, margin=margin, cell_half=ch, stride=stride, keys=keys_ui)
