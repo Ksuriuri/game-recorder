@@ -1,5 +1,4 @@
 """CLI entry point for Game Recorder.
-
 Usage:
     game-recorder                  # Start with defaults (30 fps, ./recordings)
     game-recorder --fps 60         # Override frame rate
@@ -223,7 +222,7 @@ def main() -> None:
                 print(">>> Stopping active session …")
                 session.stop()
                 print(f">>> Saved to {session.session_dir}")
-        print("Bye.")
+        print("Bye～")
 
 
 if __name__ == "__main__":
