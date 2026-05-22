@@ -6,8 +6,8 @@
 
 - **视频捕获**：基于 DXGI Desktop Duplication API（DXcam），零拷贝直读 GPU 显存，对游戏帧率无影响
 - **音频捕获**：默认走 **Python `soundcard` 包的 WASAPI Loopback**（抓当前 Windows 默认播放设备的混音），通过本机 TCP 把 PCM 喂给 FFmpeg，与视频在同一 FFmpeg 进程内 mux 实现天然同步。**零配置、不依赖 Stereo Mix、不需要装虚拟声卡、不需要管理员权限**，是网吧 / GTA 之类 shared-mode 游戏的标准录音通路。如果当前 FFmpeg 构建恰好带 `wasapi` indev（罕见），优先用单进程 WASAPI；都不行再回退到 DirectShow（Stereo Mix / VB-CABLE 等）
-- **键鼠捕获**：Win32 低级钩子（`WH_KEYBOARD_LL` / `WH_MOUSE_LL`），事件按视频帧索引对齐
-- **硬件编码**：自动检测 NVIDIA NVENC，使用 GPU 专用编码单元，不占用 CUDA 核心；无 NVENC 时回退到 libx264 ultrafast
+- **键鼠捕获**：键盘和鼠标优先走 Win32 Raw Input，避免低级鼠标钩子影响游戏视角；Raw Input 不可用时键盘降级为 `GetAsyncKeyState` 轮询
+- **硬件编码**：自动检测 NVIDIA NVENC，使用 GPU 专用编码单元，不占用 CUDA 核心；无 NVENC 时回退到 `libx264 ultrafast`，默认限制 2 个 x264 线程，避免网吧机器上抢占游戏 CPU
 - **统一时钟**：所有数据流共享 `perf_counter_ns` 高精度 T0 基准，同步误差 < 1 帧（33ms）
 - **可选分段保存**：通过 `--segment-minutes N` 每隔 N 分钟落盘一对 `mp4 + jsonl` 文件（默认关闭，推荐保持关闭以获得无缝音视频；启用时段间会有约几百毫秒的空隙）
 
@@ -70,7 +70,7 @@ scripts\build_offline_bundle.bat
 2. `uv pip freeze` 锁定解析后的精确版本（含 numpy / opencv-python-headless / dxcam / soundcard / cffi / pycparser…）
 3. `uv pip download` 把这些 wheel 全量保存到 `wheels\`
 4. 删掉 `.venv\`（venv 的 `pyvenv.cfg` 写死了绝对路径，搬到别的机器就崩，所以不进包；目标机器会从 `wheels\` 几秒内重建）
-5. `Compress-Archive` 打成 `game-recorder-portable-YYYYMMDD.zip`（约 180 MB）
+5. `Compress-Archive` 打成 `game-recorder-portable-YYYYMMDD.zip`（约 400-450 MB，取决于托管 Python / FFmpeg / wheel 缓存版本）
 
 #### 离线包内容
 
@@ -141,7 +141,10 @@ run.bat
 run.bat --no-hotkey
 
 :: 自定义参数
-run.bat --fps 60 --quality 18 --output ./data --mouse-hz 500 --segment-minutes 5
+run.bat --fps 30 --quality 23 --output ./data --mouse-hz 30 --segment-minutes 5
+
+::: GTA5 / 网吧机器卡顿时，降低采集与软件编码压力
+run.bat --fps 20 --quality 28 --x264-threads 1
 
 :: 调试模式
 run.bat -v
@@ -157,7 +160,10 @@ game-recorder
 game-recorder --no-hotkey
 
 # 自定义参数
-game-recorder --fps 60 --quality 18 --output ./data --mouse-hz 500 --segment-minutes 5
+game-recorder --fps 30 --quality 23 --output ./data --mouse-hz 30 --segment-minutes 5
+
+# GTA5 / 网吧机器卡顿时，降低采集与软件编码压力
+game-recorder --fps 20 --quality 28 --x264-threads 1
 
 # 调试模式
 game-recorder -v
@@ -171,7 +177,8 @@ game-recorder -v
 | `--output` | `./recordings` | 输出目录 |
 | `--quality` | 23 | 视频质量（CQ 值，越低质量越高，文件越大） |
 | `--audio-device` | 自动检测 | DirectShow 音频设备名 |
-| `--mouse-hz` | 200 | 鼠标移动采样率（Hz） |
+| `--mouse-hz` | 30 | 鼠标移动采样率（Hz） |
+| `--x264-threads` | 2 | 无 NVENC 时 `libx264` 软件编码可用的 CPU 线程数；游戏卡顿时可设为 `1` |
 | `--segment-minutes` | 0 | 每隔多少分钟自动切分一段 mp4 + jsonl，`0`（默认）表示关闭分段、整次录制写入单文件 |
 | `--no-hotkey` | - | 跳过热键，立即开始录制 |
 | `-v` | - | 输出调试日志 |
@@ -194,7 +201,8 @@ game-recorder -v
   - `Python soundcard loopback (default speaker): no`   → 极少数情况（驱动问题 / 默认设备配置异常），再考虑 enable Stereo Mix 或 `--audio-device`
 - **录制前别动音频设备**：录制开始时把"默认播放设备"快照下来，录制中如果**插拔耳机 / 切换输出设备**导致 Windows 切换默认设备，本次录制会继续录原设备（很可能从这一刻起变静音）。需要换设备的话，请先 Ctrl+F9 停止再切。
 - **GTA 等使用 shared-mode 音频的游戏可直接录**。极少数**强制独占模式**的应用会让 WASAPI loopback 拿到静音；本工具自动降级到 DirectShow，再不行就静音录制（`meta.json` 的 `audio_source` 会是 `null`，便于事后过滤）。
-- **NVENC 跨机泛化**：网吧 GPU 五花八门，不一定是 N 卡。代码里已经做了 NVENC 运行时探测：编译启用但驱动不给开 → 自动落到 `libx264 ultrafast`，1080p@30 在中端 CPU 上无压力。
+- **NVENC 跨机泛化**：网吧 GPU 五花八门，不一定是 N 卡。代码里已经做了 NVENC 运行时探测：编译启用但驱动不给开 → 自动落到 `libx264 ultrafast`，并默认限制 `--x264-threads 2`。如果 GTA5 等游戏仍然卡，优先用 `run.bat --fps 20 --quality 28 --x264-threads 1`。
+- **切屏 / 全屏切换**：DXGI 在 Alt+Tab 或游戏切全屏时可能短暂报告不同分辨率。录制器会把临时尺寸缩放回本次 session 的初始尺寸，避免视频花屏或被切成多段；真正 0 帧的启动空段会自动清理。
 
 ## 输出格式
 
@@ -323,7 +331,7 @@ def iter_session(session_dir: str):
 main.py          CLI 入口，热键监听
   └─ session.py  Session 生命周期，统一 T0 时钟
        ├─ capture/screen.py      DXcam 帧捕获循环
-       ├─ capture/input_hook.py        Win32 低级键鼠钩子
+       ├─ capture/input_hook.py        Win32 Raw Input 键鼠捕获
        ├─ encoder/ffmpeg_pipe.py       FFmpeg 子进程（rawvideo pipe + 音频选路）
        ├─ encoder/python_loopback.py   默认音频通路：soundcard 抓默认扬声器 → s16le → 本机 TCP → FFmpeg
        └─ storage/
@@ -338,5 +346,6 @@ main.py          CLI 入口，热键监听
 | DXcam 帧捕获 | ~3% 单核 | ~0% | - |
 | FFmpeg NVENC 编码 | ~2% 单核 | 编码单元（不影响游戏） | 8-12 MB/s |
 | 音频（soundcard WASAPI loopback） | ~0.3% 单核 | - | - |
-| Win32 输入钩子 | ~0.1% | - | < 0.1 MB/s |
+| Raw Input 输入捕获 | ~0.1% | - | < 0.1 MB/s |
+| FFmpeg libx264 fallback | 受 `--x264-threads` 限制，默认最多 2 线程 | - | 取决于 `--quality` |
 | **合计** | **~5%** | **~0%** | **~10 MB/s** |

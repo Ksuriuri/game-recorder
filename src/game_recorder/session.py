@@ -248,7 +248,7 @@ class Session:
 
     # ── Frame & event callbacks ──────────────────────────────────────────
 
-    def _on_frame(self, frame_bytes: bytes, idx: int) -> None:
+    def _on_frame(self, frame_bytes: bytes, idx: int, width: int, height: int) -> None:
         """Called by the screen-capture thread for every captured frame."""
         with self._segment_lock:
             wall = int(
@@ -260,6 +260,20 @@ class Session:
                 self._sync_wall_minus_idx.append(wall - idx)
 
             self._frame_count = idx + 1
+
+            if (width, height) != (self._width, self._height):
+                logger.warning(
+                    "Capture resolution changed from %dx%d to %dx%d; rotating segment",
+                    self._width,
+                    self._height,
+                    width,
+                    height,
+                )
+                self._close_segment_locked(actual_end_frame=idx)
+                self._width = width
+                self._height = height
+                self._open_segment_locked(start_frame=idx)
+                self._drain_pending_events_locked()
 
             # Rotate when this frame is the start of the next segment
             if (
@@ -396,12 +410,31 @@ class Session:
             final_video = self._segment_video_path or Path()
             final_actions = self._segment_actions_path or Path()
 
+        frame_count = actual_end_frame - self._segment_start_frame
+        if frame_count <= 0:
+            for path in (final_video, final_actions):
+                try:
+                    if path.exists():
+                        path.unlink()
+                except OSError as e:
+                    logger.warning("Failed to delete empty segment file %s: %s", path.name, e)
+            logger.info(
+                "Discarded empty segment #%d: frames [%d, %d)",
+                self._segment_index,
+                self._segment_start_frame,
+                actual_end_frame,
+            )
+            self._segment_video_path = None
+            self._segment_actions_path = None
+            self._segment_planned_end = None
+            return
+
         self._segments_meta.append(
             SegmentMeta(
                 index=self._segment_index,
                 start_frame=self._segment_start_frame,
                 end_frame=actual_end_frame,
-                frame_count=actual_end_frame - self._segment_start_frame,
+                frame_count=frame_count,
                 event_count=self._segment_event_count,
                 video=final_video.name,
                 actions=final_actions.name,

@@ -75,6 +75,12 @@ def main() -> None:
         help="Video quality — CQ value, lower=better (default: 23)",
     )
     parser.add_argument(
+        "--x264-threads",
+        type=int,
+        default=2,
+        help="CPU threads for libx264 fallback encoding (default: 2)",
+    )
+    parser.add_argument(
         "--audio-device",
         type=str,
         default=None,
@@ -83,8 +89,8 @@ def main() -> None:
     parser.add_argument(
         "--mouse-hz",
         type=float,
-        default=200,
-        help="Mouse-move sample rate in Hz (default: 200)",
+        default=30,
+        help="Mouse-move sample rate in Hz (default: 30)",
     )
     parser.add_argument(
         "--segment-minutes",
@@ -152,6 +158,7 @@ def main() -> None:
         fps=args.fps,
         output_dir=Path(args.output),
         video_quality=args.quality,
+        x264_threads=max(1, args.x264_threads),
         audio_device=args.audio_device,
         mouse_poll_interval_ms=1000.0 / args.mouse_hz,
         segment_seconds=segment_seconds,

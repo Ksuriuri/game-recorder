@@ -359,6 +359,7 @@ class FFmpegEncoder:
                 "-c:v", "libx264",
                 "-preset", "ultrafast",
                 "-crf", str(cfg.video_quality),
+                "-threads", str(max(1, cfg.x264_threads)),
             ]
 
         cmd += ["-pix_fmt", "yuv420p"]
@@ -478,10 +479,11 @@ class FFmpegEncoder:
             return
         if len(frame_bytes) != self._frame_size:
             logger.warning(
-                "Frame byte size %d != expected %d (WxHx3); encoder may desync",
+                "Dropping frame byte size %d != expected %d (WxHx3)",
                 len(frame_bytes),
                 self._frame_size,
             )
+            return
         try:
             mv = memoryview(frame_bytes)
             while len(mv) > 0:
