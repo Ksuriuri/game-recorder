@@ -1,12 +1,10 @@
 """Keyboard and mouse capture on Windows (ctypes).
 
-Mouse: ``SetWindowsHookEx`` with ``WH_MOUSE_LL``.
-
-Keyboard: **Raw Input** (``WM_INPUT`` + ``RIDEV_INPUTSINK``) when possible — it sees keys
+Mouse + keyboard: **Raw Input** (``WM_INPUT`` + ``RIDEV_INPUTSINK``) when possible — it sees keys
 in Task Manager, UWP, and games where ``GetAsyncKeyState`` misses letters (e.g. WASD).
 
-Falls back to ``GetAsyncKeyState`` polling if Raw Input setup fails; mouse-button VKs
-(0x01–0x06) are never logged as keys in that mode.
+Falls back to ``GetAsyncKeyState`` keyboard polling if Raw Input setup fails; mouse-button
+VKs (0x01–0x06) are never logged as keys in that mode.
 """
 
 from __future__ import annotations
@@ -22,26 +20,27 @@ logger = logging.getLogger(__name__)
 
 # ── Win32 constants ──────────────────────────────────────────────────────────
 
-WH_MOUSE_LL = 14
-
 WM_INPUT = 0x00FF
 
-WM_MOUSEMOVE = 0x0200
-WM_LBUTTONDOWN = 0x0201
-WM_LBUTTONUP = 0x0202
-WM_RBUTTONDOWN = 0x0204
-WM_RBUTTONUP = 0x0205
-WM_MBUTTONDOWN = 0x0207
-WM_MBUTTONUP = 0x0208
-WM_MOUSEWHEEL = 0x020A
-WM_XBUTTONDOWN = 0x020B
-WM_XBUTTONUP = 0x020C
-
 RID_INPUT = 0x10000003
+RIM_TYPEMOUSE = 0
 RIM_TYPEKEYBOARD = 1
 RI_KEY_BREAK = 1
 RIDEV_INPUTSINK = 0x00000100
 RIDEV_REMOVE = 0x00000001
+
+RI_MOUSE_LEFT_BUTTON_DOWN = 0x0001
+RI_MOUSE_LEFT_BUTTON_UP = 0x0002
+RI_MOUSE_RIGHT_BUTTON_DOWN = 0x0004
+RI_MOUSE_RIGHT_BUTTON_UP = 0x0008
+RI_MOUSE_MIDDLE_BUTTON_DOWN = 0x0010
+RI_MOUSE_MIDDLE_BUTTON_UP = 0x0020
+RI_MOUSE_BUTTON_4_DOWN = 0x0040
+RI_MOUSE_BUTTON_4_UP = 0x0080
+RI_MOUSE_BUTTON_5_DOWN = 0x0100
+RI_MOUSE_BUTTON_5_UP = 0x0200
+RI_MOUSE_WHEEL = 0x0400
+MOUSE_MOVE_ABSOLUTE = 0x0001
 
 # MsgWaitForMultipleObjects
 QS_INPUT = 0x0407
@@ -51,31 +50,49 @@ PM_REMOVE = 0x0001
 # Do not treat these as keyboard (GetAsyncKeyState mirrors mouse buttons as VKs).
 _SKIP_ASYNC_VK: frozenset[int] = frozenset((0x01, 0x02, 0x04, 0x05, 0x06))
 
-_MOUSE_ACTION_MAP: dict[int, str] = {
-    WM_LBUTTONDOWN: "left_down",
-    WM_LBUTTONUP: "left_up",
-    WM_RBUTTONDOWN: "right_down",
-    WM_RBUTTONUP: "right_up",
-    WM_MBUTTONDOWN: "middle_down",
-    WM_MBUTTONUP: "middle_up",
-    WM_MOUSEWHEEL: "scroll",
-    WM_XBUTTONDOWN: "x_down",
-    WM_XBUTTONUP: "x_up",
-    WM_MOUSEMOVE: "move",
-}
+_RAW_MOUSE_BUTTON_ACTIONS: tuple[tuple[int, str], ...] = (
+    (RI_MOUSE_LEFT_BUTTON_DOWN, "left_down"),
+    (RI_MOUSE_LEFT_BUTTON_UP, "left_up"),
+    (RI_MOUSE_RIGHT_BUTTON_DOWN, "right_down"),
+    (RI_MOUSE_RIGHT_BUTTON_UP, "right_up"),
+    (RI_MOUSE_MIDDLE_BUTTON_DOWN, "middle_down"),
+    (RI_MOUSE_MIDDLE_BUTTON_UP, "middle_up"),
+    (RI_MOUSE_BUTTON_4_DOWN, "x_down"),
+    (RI_MOUSE_BUTTON_4_UP, "x_up"),
+    (RI_MOUSE_BUTTON_5_DOWN, "x2_down"),
+    (RI_MOUSE_BUTTON_5_UP, "x2_up"),
+)
 
-# ── Win32 structures ─────────────────────────────────────────────────────────
+_RAW_INPUT_DEVICES = (
+    (0x01, 0x02),  # mouse
+    (0x01, 0x06),  # keyboard
+)
 
 
-class MSLLHOOKSTRUCT(ctypes.Structure):
+class _RAWMOUSE_BUTTONS_STRUCT(ctypes.Structure):
     _fields_ = [
-        ("pt", wt.POINT),
-        ("mouseData", wt.DWORD),
-        ("flags", wt.DWORD),
-        ("time", wt.DWORD),
-        ("dwExtraInfo", ctypes.c_size_t),
+        ("usButtonFlags", wt.USHORT),
+        ("usButtonData", wt.USHORT),
     ]
 
+
+class _RAWMOUSE_BUTTONS_UNION(ctypes.Union):
+    _fields_ = [
+        ("ulButtons", wt.DWORD),
+        ("buttons", _RAWMOUSE_BUTTONS_STRUCT),
+    ]
+
+
+class RAWMOUSE(ctypes.Structure):
+    _anonymous_ = ("button_union",)
+    _fields_ = [
+        ("usFlags", wt.USHORT),
+        ("button_union", _RAWMOUSE_BUTTONS_UNION),
+        ("ulRawButtons", wt.DWORD),
+        ("lLastX", wt.LONG),
+        ("lLastY", wt.LONG),
+        ("ulExtraInformation", wt.DWORD),
+    ]
 
 class RAWINPUTHEADER(ctypes.Structure):
     _fields_ = [
@@ -99,7 +116,7 @@ class RAWKEYBOARD(ctypes.Structure):
 
 class RAWINPUT(ctypes.Structure):
     class _U(ctypes.Union):
-        _fields_ = [("keyboard", RAWKEYBOARD)]
+        _fields_ = [("mouse", RAWMOUSE), ("keyboard", RAWKEYBOARD)]
 
     _fields_ = [("header", RAWINPUTHEADER), ("data", _U)]
 
@@ -118,7 +135,6 @@ _LRESULT = ctypes.c_ssize_t
 _WPARAM = ctypes.c_size_t
 _LPARAM = ctypes.c_ssize_t
 
-HOOKPROC = ctypes.WINFUNCTYPE(_LRESULT, ctypes.c_int, _WPARAM, _LPARAM)
 WNDPROC = ctypes.WINFUNCTYPE(_LRESULT, wt.HWND, ctypes.c_uint, _WPARAM, _LPARAM)
 
 
@@ -141,15 +157,6 @@ kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
 
 user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
 user32.GetAsyncKeyState.restype = wt.SHORT
-
-user32.CallNextHookEx.argtypes = [wt.HHOOK, ctypes.c_int, _WPARAM, _LPARAM]
-user32.CallNextHookEx.restype = _LRESULT
-
-user32.SetWindowsHookExW.argtypes = [ctypes.c_int, HOOKPROC, wt.HMODULE, wt.DWORD]
-user32.SetWindowsHookExW.restype = wt.HHOOK
-
-user32.UnhookWindowsHookEx.argtypes = [wt.HHOOK]
-user32.UnhookWindowsHookEx.restype = wt.BOOL
 
 user32.MsgWaitForMultipleObjects.argtypes = [
     wt.DWORD,
@@ -237,7 +244,7 @@ def _vk_to_name(vk: int) -> str:
 
 
 class InputCapture:
-    """Captures keyboard (Raw Input or async poll) and mouse (low-level hook)."""
+    """Captures keyboard and mouse with Raw Input when possible."""
 
     def __init__(
         self,
@@ -256,36 +263,24 @@ class InputCapture:
         self._async_key_prev: list[bool] = [False] * 256
         self._mouse_throttle_ns = int(mouse_throttle_ms * 1_000_000)
         self._last_mouse_move_ns: int = 0
-        self._mouse_hook = None
         self._event_count = 0
         self._key_events = 0
         self._mouse_events = 0
 
-        self._mouse_proc = HOOKPROC(self._mouse_ll_proc)
-
-        self._use_raw_keyboard = False
+        self._use_raw_input = False
         self._raw_hwnd: wt.HWND | None = None
         self._raw_class_name: str | None = None
         self._raw_hinstance: wt.HINSTANCE | None = None
         self._wnd_proc_ref: ctypes._CFuncPtr | None = None
 
     def run(self, stop_event: threading.Event) -> None:
-        _hmod_null = wt.HMODULE(0)
-        self._mouse_hook = user32.SetWindowsHookExW(
-            WH_MOUSE_LL, self._mouse_proc, _hmod_null, 0
-        )
-        if not self._mouse_hook:
-            err = kernel32.GetLastError()
-            logger.error("Failed to install mouse hook (GetLastError=%s)", err)
-            return
-
-        self._use_raw_keyboard = self._setup_raw_keyboard()
-        if self._use_raw_keyboard:
-            logger.info("Input capture started (keyboard Raw Input, mouse WH_MOUSE_LL)")
+        self._use_raw_input = self._setup_raw_input()
+        if self._use_raw_input:
+            logger.info("Input capture started (keyboard + mouse Raw Input)")
         else:
             logger.warning(
-                "Raw Input keyboard unavailable — using GetAsyncKeyState @ %.0f Hz "
-                "(Task Manager / some UIs may miss letters; try restarting as admin)",
+                "Raw Input unavailable — using GetAsyncKeyState keyboard polling @ %.0f Hz "
+                "(mouse events disabled; try restarting as admin)",
                 self._keyboard_poll_hz,
             )
             for vk in range(1, 256):
@@ -295,7 +290,7 @@ class InputCapture:
         msg = wt.MSG()
         try:
             while not stop_event.is_set():
-                if not self._use_raw_keyboard:
+                if not self._use_raw_input:
                     self._poll_keyboard_async()
                 if user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, PM_REMOVE):
                     user32.TranslateMessage(ctypes.byref(msg))
@@ -303,9 +298,7 @@ class InputCapture:
                 else:
                     user32.MsgWaitForMultipleObjects(0, None, 0, 10, QS_INPUT)
         finally:
-            self._teardown_raw_keyboard()
-            if self._mouse_hook:
-                user32.UnhookWindowsHookEx(self._mouse_hook)
+            self._teardown_raw_input()
             logger.info(
                 "Input capture stopped (%d events: %d key, %d mouse)",
                 self._event_count,
@@ -313,9 +306,9 @@ class InputCapture:
                 self._mouse_events,
             )
 
-    # ── Raw keyboard ───────────────────────────────────────────────────────────
+    # ── Raw input ──────────────────────────────────────────────────────────────
 
-    def _setup_raw_keyboard(self) -> bool:
+    def _setup_raw_input(self) -> bool:
         hinst = kernel32.GetModuleHandleW(None)
         if not hinst:
             return False
@@ -373,14 +366,17 @@ class InputCapture:
 
         self._raw_hwnd = hwnd
 
-        rid = RAWINPUTDEVICE()
-        rid.usUsagePage = 0x01
-        rid.usUsage = 0x06
-        rid.dwFlags = RIDEV_INPUTSINK
-        rid.hwndTarget = hwnd
+        devices = (RAWINPUTDEVICE * len(_RAW_INPUT_DEVICES))()
+        for idx, (usage_page, usage) in enumerate(_RAW_INPUT_DEVICES):
+            devices[idx].usUsagePage = usage_page
+            devices[idx].usUsage = usage
+            devices[idx].dwFlags = RIDEV_INPUTSINK
+            devices[idx].hwndTarget = hwnd
 
         if not user32.RegisterRawInputDevices(
-            ctypes.byref(rid), 1, ctypes.sizeof(RAWINPUTDEVICE)
+            ctypes.cast(devices, ctypes.POINTER(RAWINPUTDEVICE)),
+            len(devices),
+            ctypes.sizeof(RAWINPUTDEVICE),
         ):
             logger.debug(
                 "RegisterRawInputDevices failed: GetLastError=%s",
@@ -394,15 +390,18 @@ class InputCapture:
 
         return True
 
-    def _teardown_raw_keyboard(self) -> None:
+    def _teardown_raw_input(self) -> None:
         if self._raw_hwnd and self._raw_hinstance:
-            rid = RAWINPUTDEVICE()
-            rid.usUsagePage = 0x01
-            rid.usUsage = 0x06
-            rid.dwFlags = RIDEV_REMOVE
-            rid.hwndTarget = None
+            devices = (RAWINPUTDEVICE * len(_RAW_INPUT_DEVICES))()
+            for idx, (usage_page, usage) in enumerate(_RAW_INPUT_DEVICES):
+                devices[idx].usUsagePage = usage_page
+                devices[idx].usUsage = usage
+                devices[idx].dwFlags = RIDEV_REMOVE
+                devices[idx].hwndTarget = None
             user32.RegisterRawInputDevices(
-                ctypes.byref(rid), 1, ctypes.sizeof(RAWINPUTDEVICE)
+                ctypes.cast(devices, ctypes.POINTER(RAWINPUTDEVICE)),
+                len(devices),
+                ctypes.sizeof(RAWINPUTDEVICE),
             )
             user32.DestroyWindow(self._raw_hwnd)
             self._raw_hwnd = None
@@ -429,9 +428,12 @@ class InputCapture:
         ):
             return
         raw = ctypes.cast(buf, ctypes.POINTER(RAWINPUT)).contents
-        if raw.header.dwType != RIM_TYPEKEYBOARD:
-            return
-        kb = raw.data.keyboard
+        if raw.header.dwType == RIM_TYPEKEYBOARD:
+            self._handle_raw_keyboard(raw.data.keyboard)
+        elif raw.header.dwType == RIM_TYPEMOUSE:
+            self._handle_raw_mouse(raw.data.mouse)
+
+    def _handle_raw_keyboard(self, kb: RAWKEYBOARD) -> None:
         vk = int(kb.VKey)
         if vk == 0:
             return
@@ -447,6 +449,51 @@ class InputCapture:
                 "key": _vk_to_name(vk),
             }
         )
+
+    def _handle_raw_mouse(self, mouse: RAWMOUSE) -> None:
+        now_ns = time.perf_counter_ns()
+        frame = self._frame_index(now_ns)
+        button_flags = int(mouse.buttons.usButtonFlags)
+        dx = int(mouse.lLastX)
+        dy = int(mouse.lLastY)
+
+        if dx or dy:
+            if (now_ns - self._last_mouse_move_ns) >= self._mouse_throttle_ns:
+                self._last_mouse_move_ns = now_ns
+                event: dict = {
+                    "frame": int(frame),
+                    "type": "mouse",
+                    "action": "move",
+                }
+                if mouse.usFlags & MOUSE_MOVE_ABSOLUTE:
+                    event["x"] = dx
+                    event["y"] = dy
+                    event["absolute"] = True
+                else:
+                    event["dx"] = dx
+                    event["dy"] = dy
+                self._emit(event)
+
+        for flag, action in _RAW_MOUSE_BUTTON_ACTIONS:
+            if button_flags & flag:
+                self._emit(
+                    {
+                        "frame": int(frame),
+                        "type": "mouse",
+                        "action": action,
+                    }
+                )
+
+        if button_flags & RI_MOUSE_WHEEL:
+            delta = ctypes.c_short(mouse.buttons.usButtonData).value
+            self._emit(
+                {
+                    "frame": int(frame),
+                    "type": "mouse",
+                    "action": "scroll",
+                    "scroll_delta": delta,
+                }
+            )
 
     # ── Keyboard fallback (async) ────────────────────────────────────────────
 
@@ -480,33 +527,6 @@ class InputCapture:
         if delta_ns < 0:
             return 0
         return (delta_ns * self._fps) // 1_000_000_000
-
-    def _mouse_ll_proc(
-        self, nCode: int, wParam: int, lParam: int  # noqa: N803
-    ) -> int:
-        if nCode >= 0:
-            now_ns = time.perf_counter_ns()
-            ms = ctypes.cast(lParam, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
-
-            if wParam == WM_MOUSEMOVE:
-                if (now_ns - self._last_mouse_move_ns) < self._mouse_throttle_ns:
-                    return user32.CallNextHookEx(None, nCode, wParam, lParam)
-                self._last_mouse_move_ns = now_ns
-
-            frame = self._frame_index(now_ns)
-            action = _MOUSE_ACTION_MAP.get(wParam, f"unknown_{wParam:#x}")
-            event: dict = {
-                "frame": int(frame),
-                "type": "mouse",
-                "action": action,
-                "x": ms.pt.x,
-                "y": ms.pt.y,
-            }
-            if wParam == WM_MOUSEWHEEL:
-                delta = ctypes.c_short(ms.mouseData >> 16).value
-                event["scroll_delta"] = delta
-            self._emit(event)
-        return user32.CallNextHookEx(None, nCode, wParam, lParam)
 
     def _emit(self, event: dict) -> None:
         self._event_count += 1

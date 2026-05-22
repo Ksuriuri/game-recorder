@@ -143,7 +143,7 @@ REM  silently hanging on a connect attempt.
 REM ============================================================
 echo.
 echo [4/4] Creating virtual environment and installing game-recorder ...
-"%UV_EXE%" venv --python 3.11 "%VENV_DIR%"
+"%UV_EXE%" venv --clear --python 3.11 "%VENV_DIR%"
 if errorlevel 1 goto :fail_venv
 
 if "%OFFLINE_MODE%"=="1" (
@@ -172,7 +172,7 @@ echo   Installation complete!
 echo ============================================================
 echo   Start recording  :  run.bat
 echo   No-hotkey mode   :  run.bat --no-hotkey
-echo   Custom params    :  run.bat --fps 60 --quality 18
+echo   Low-lag fallback :  run.bat --fps 20 --quality 28 --x264-threads 1
 echo ============================================================
 echo.
 pause

@@ -11,6 +11,7 @@ import threading
 import time
 from typing import TYPE_CHECKING, Callable
 
+import cv2
 import dxcam
 import numpy as np
 
@@ -19,7 +20,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-FrameCallback = Callable[[bytes, int], None]
+FrameCallback = Callable[[bytes, int, int, int], None]
 
 
 class ScreenCapture:
@@ -30,7 +31,7 @@ class ScreenCapture:
     fps:
         Target capture frame rate.
     on_frame:
-        ``(frame_bytes, frame_index) -> None`` called for every captured frame.
+        ``(frame_bytes, frame_index, width, height) -> None`` called for every captured frame.
         *frame_bytes* is raw BGR24 pixel data.
     """
 
@@ -40,6 +41,7 @@ class ScreenCapture:
         self._camera: dxcam.DXCamera | None = None
         self._width: int = 0
         self._height: int = 0
+        self._last_source_size: tuple[int, int] | None = None
 
     @property
     def width(self) -> int:
@@ -66,7 +68,37 @@ class ScreenCapture:
             while not stop_event.is_set():
                 frame: np.ndarray | None = self._camera.get_latest_frame()
                 if frame is not None:
-                    self.on_frame(frame.tobytes(), frame_idx)
+                    height, width = frame.shape[:2]
+                    if width != self._width or height != self._height:
+                        source_size = (width, height)
+                        if source_size != self._last_source_size:
+                            logger.warning(
+                                "Screen capture source changed to %dx%d; resizing to %dx%d",
+                                width,
+                                height,
+                                self._width,
+                                self._height,
+                            )
+                            self._last_source_size = source_size
+                        frame = cv2.resize(
+                            frame,
+                            (self._width, self._height),
+                            interpolation=cv2.INTER_LINEAR,
+                        )
+                        height, width = frame.shape[:2]
+                    elif self._last_source_size is not None:
+                        logger.info(
+                            "Screen capture source returned to %dx%d",
+                            self._width,
+                            self._height,
+                        )
+                        self._last_source_size = None
+                    self.on_frame(
+                        np.ascontiguousarray(frame).tobytes(),
+                        frame_idx,
+                        width,
+                        height,
+                    )
                     frame_idx += 1
                 else:
                     # No new frame yet — brief sleep to avoid busy-wait

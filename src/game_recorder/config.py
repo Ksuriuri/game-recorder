@@ -19,13 +19,14 @@ class Config:
     # Video encoding
     video_quality: int = 23  # CQ value: lower = better quality, higher = smaller file
     video_preset: str = "p4"  # NVENC preset (p1=fastest … p7=best quality)
+    x264_threads: int = 2  # software fallback should not steal every CPU core from games
 
     # Audio
     audio_device: str | None = None  # None = auto-detect WASAPI loopback
     audio_bitrate: str = "128k"
 
     # Input capture
-    mouse_poll_interval_ms: float = 5.0  # throttle mouse-move events (200 Hz)
+    mouse_poll_interval_ms: float = 1000.0 / 30.0  # throttle mouse-move events (30 Hz)
     # Keyboard: poll rate (Hz). WH_KEYBOARD_LL misses many games; GetAsyncKeyState does not.
     keyboard_poll_hz: float = 200.0
 

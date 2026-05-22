@@ -196,6 +196,14 @@ def apply_input_bucket(
             if isinstance(vk, int) and vk in vk_down and action in ("down", "up"):
                 vk_down[vk] = action == "down"
         elif et == "mouse" and ev.get("action") == "move":
+            dx, dy = ev.get("dx"), ev.get("dy")
+            if isinstance(dx, int) and isinstance(dy, int):
+                mouse_dx += dx
+                mouse_dy += dy
+                moved = moved or dx != 0 or dy != 0
+                continue
+
+            # Older recordings stored absolute cursor coordinates from WH_MOUSE_LL.
             x, y = ev.get("x"), ev.get("y")
             if isinstance(x, int) and isinstance(y, int):
                 if lm is not None:
@@ -308,7 +316,7 @@ def main() -> None:
     ap.add_argument(
         "--mouse-threshold",
         type=float,
-        default=3.0,
+        default=0.8,
         help="Min |smoothed dx| or |smoothed dy| (after dead zone) to light a direction",
     )
     ap.add_argument(
@@ -321,7 +329,7 @@ def main() -> None:
     ap.add_argument(
         "--mouse-deadzone",
         type=float,
-        default=2.5,
+        default=0.3,
         metavar="PX",
         help="Smoothed |dx|/|dy| below this (after EMA) are treated as 0 for arrow HUD",
     )
