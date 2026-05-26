@@ -30,6 +30,12 @@ class Config:
     # Keyboard: poll rate (Hz). WH_KEYBOARD_LL misses many games; GetAsyncKeyState does not.
     keyboard_poll_hz: float = 200.0
 
+    # Video capture target
+    # auto: capture a large foreground client window (borderless games), else full screen.
+    # foreground: force the foreground client window when possible.
+    # screen: always capture the full primary output.
+    capture_mode: str = "auto"
+
     # Session management
     # Auto-segmentation: every N seconds, finalize current mp4 + jsonl and start
     # a new one within the same session directory.  0 disables segmentation

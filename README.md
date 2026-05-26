@@ -5,6 +5,7 @@
 ## 功能
 
 - **视频捕获**：基于 DXGI Desktop Duplication API（DXcam），零拷贝直读 GPU 显存，对游戏帧率无影响
+- **无边框游戏区域自动捕获**：默认 `--capture-mode auto`，按下热键开始录制时会优先捕获当前前台的大客户区窗口（适合 Borderless Windowed），识别不到合适窗口时自动回退整屏
 - **音频捕获**：默认走 **Python `soundcard` 包的 WASAPI Loopback**（抓当前 Windows 默认播放设备的混音），通过本机 TCP 把 PCM 喂给 FFmpeg，与视频在同一 FFmpeg 进程内 mux 实现天然同步。**零配置、不依赖 Stereo Mix、不需要装虚拟声卡、不需要管理员权限**，是网吧 / GTA 之类 shared-mode 游戏的标准录音通路。如果当前 FFmpeg 构建恰好带 `wasapi` indev（罕见），优先用单进程 WASAPI；都不行再回退到 DirectShow（Stereo Mix / VB-CABLE 等）
 - **键鼠捕获**：键盘和鼠标优先走 Win32 Raw Input，避免低级鼠标钩子影响游戏视角；Raw Input 不可用时键盘降级为 `GetAsyncKeyState` 轮询
 - **硬件编码**：自动检测 NVIDIA NVENC，使用 GPU 专用编码单元，不占用 CUDA 核心；无 NVENC 时回退到 `libx264 ultrafast`，默认限制 2 个 x264 线程，避免网吧机器上抢占游戏 CPU
@@ -101,7 +102,7 @@ game-recorder/
 1. U 盘把 zip 拷过去
 2. 解压到 **`D:\game-recorder\`**（**别放 C 盘**——网吧的还原系统重启就把 C 盘清回原状）
 3. 双击 `install.bat`：横幅出现 `Mode : OFFLINE (restoring from local wheels/)` 即说明检测到离线包；脚本会用 `--offline --no-index --find-links wheels\` 重建 `.venv`，全程不碰网络，约 10 秒
-4. 双击 `run.bat` → 按 Ctrl+F9 开始录
+4. 双击 `run.bat` → 按 Ctrl+Alt+R 开始录
 
 整个 zip 自包含，不写注册表，不写 `%LOCALAPPDATA%` / `%APPDATA%`，卸载就是删目录。
 
@@ -134,7 +135,7 @@ game-recorder/
 ### Windows 一键安装后
 
 ```bat
-:: 启动后按 Ctrl+F9 开始/停止录制
+:: 启动后按 Ctrl+Alt+R 开始/停止录制
 run.bat
 
 :: 立即开始录制（无需热键）
@@ -146,6 +147,10 @@ run.bat --fps 30 --quality 23 --output ./data --mouse-hz 30 --segment-minutes 5
 ::: GTA5 / 网吧机器卡顿时，降低采集与软件编码压力
 run.bat --fps 20 --quality 28 --x264-threads 1
 
+::: 强制录当前前台窗口客户区；或用 screen 强制整屏
+run.bat --capture-mode foreground
+run.bat --capture-mode screen
+
 :: 调试模式
 run.bat -v
 ```
@@ -153,7 +158,7 @@ run.bat -v
 ### 手动安装后
 
 ```bash
-# 启动后按 Ctrl+F9 开始/停止录制
+# 启动后按 Ctrl+Alt+R 开始/停止录制
 game-recorder
 
 # 立即开始录制（无需热键）
@@ -164,6 +169,10 @@ game-recorder --fps 30 --quality 23 --output ./data --mouse-hz 30 --segment-minu
 
 # GTA5 / 网吧机器卡顿时，降低采集与软件编码压力
 game-recorder --fps 20 --quality 28 --x264-threads 1
+
+# 强制录当前前台窗口客户区；或用 screen 强制整屏
+game-recorder --capture-mode foreground
+game-recorder --capture-mode screen
 
 # 调试模式
 game-recorder -v
@@ -180,15 +189,25 @@ game-recorder -v
 | `--mouse-hz` | 30 | 鼠标移动采样率（Hz） |
 | `--x264-threads` | 2 | 无 NVENC 时 `libx264` 软件编码可用的 CPU 线程数；游戏卡顿时可设为 `1` |
 | `--segment-minutes` | 0 | 每隔多少分钟自动切分一段 mp4 + jsonl，`0`（默认）表示关闭分段、整次录制写入单文件 |
+| `--capture-mode` | `auto` | `auto`：自动捕获前台的大客户区窗口，否则整屏；`foreground`：尽量强制前台客户区；`screen`：整屏 |
 | `--no-hotkey` | - | 跳过热键，立即开始录制 |
+| `--no-overlay` | - | 关闭游戏内录制状态悬浮窗 |
 | `-v` | - | 输出调试日志 |
 
 ### 快捷键
 
 | 按键 | 功能 |
 |------|------|
-| Ctrl+F9 | 开始/停止录制 |
+| Ctrl+Alt+R | 开始/停止录制 |
 | Ctrl+C | 停止录制并退出程序 |
+
+`Ctrl+Alt+R` 会先走 Windows 全局热键注册，并带有按键轮询兜底；全屏游戏或覆盖层没有把热键消息发出来时，仍有机会被检测到。
+
+### 录制状态悬浮窗
+
+默认会在屏幕右上角显示一个小悬浮窗：未录制时显示 `未开始录制` 和开始录制提示，录制时显示 `正在录制`、已录制时长和停止提示。悬浮窗是鼠标穿透的，不会挡住游戏点击；窗口模式下会一直显示在右上角，不会在录制开始后自动隐藏。
+
+注意：独占全屏游戏可能不允许普通桌面窗口盖在游戏上方；建议把游戏显示模式改成“窗口模式 / 无边框窗口”。不需要悬浮窗时可以用 `run.bat --no-overlay`。
 
 ## 多机 / 网吧部署注意事项
 
@@ -199,7 +218,7 @@ game-recorder -v
 - **想确认这台机器能不能录到声**：到目录下跑 `run.bat --list-audio-devices`，关注两行：
   - `Python soundcard loopback (default speaker): yes`  → 能用，到此为止，无需任何额外配置
   - `Python soundcard loopback (default speaker): no`   → 极少数情况（驱动问题 / 默认设备配置异常），再考虑 enable Stereo Mix 或 `--audio-device`
-- **录制前别动音频设备**：录制开始时把"默认播放设备"快照下来，录制中如果**插拔耳机 / 切换输出设备**导致 Windows 切换默认设备，本次录制会继续录原设备（很可能从这一刻起变静音）。需要换设备的话，请先 Ctrl+F9 停止再切。
+- **录制前别动音频设备**：录制开始时把"默认播放设备"快照下来，录制中如果**插拔耳机 / 切换输出设备**导致 Windows 切换默认设备，本次录制会继续录原设备（很可能从这一刻起变静音）。需要换设备的话，请先 Ctrl+Alt+R 停止再切。
 - **GTA 等使用 shared-mode 音频的游戏可直接录**。极少数**强制独占模式**的应用会让 WASAPI loopback 拿到静音；本工具自动降级到 DirectShow，再不行就静音录制（`meta.json` 的 `audio_source` 会是 `null`，便于事后过滤）。
 - **NVENC 跨机泛化**：网吧 GPU 五花八门，不一定是 N 卡。代码里已经做了 NVENC 运行时探测：编译启用但驱动不给开 → 自动落到 `libx264 ultrafast`，并默认限制 `--x264-threads 2`。如果 GTA5 等游戏仍然卡，优先用 `run.bat --fps 20 --quality 28 --x264-threads 1`。
 - **切屏 / 全屏切换**：DXGI 在 Alt+Tab 或游戏切全屏时可能短暂报告不同分辨率。录制器会把临时尺寸缩放回本次 session 的初始尺寸，避免视频花屏或被切成多段；真正 0 帧的启动空段会自动清理。

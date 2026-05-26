@@ -6,7 +6,7 @@ Usage:
     game-recorder --quality 18     # Higher quality (lower CQ = larger files)
 
 While recording:
-    Ctrl+F9   — toggle recording on/off
+    Ctrl+Alt+R — toggle recording on/off
     Ctrl+C    — stop and exit
 """
 
@@ -19,41 +19,83 @@ import logging
 import sys
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from game_recorder.config import Config
+from game_recorder.overlay import RecordingStatusOverlay
 from game_recorder.session import Session
 
 logger = logging.getLogger(__name__)
 
-# ── Hotkey via RegisterHotKey ────────────────────────────────────────────────
+# ── Hotkey via RegisterHotKey + polling fallback ─────────────────────────────
 
+MOD_ALT = 0x0001
 MOD_CTRL = 0x0002
-VK_F9 = 0x78
+MOD_NOREPEAT = 0x4000
+VK_CTRL = 0x11
+VK_ALT = 0x12
+VK_R = 0x52
+HOTKEY_LABEL = "Ctrl+Alt+R"
+HOTKEY_MODIFIERS = MOD_CTRL | MOD_ALT | MOD_NOREPEAT
+HOTKEY_VK = VK_R
 HOTKEY_ID_TOGGLE = 1
 WM_HOTKEY = 0x0312
+PM_REMOVE = 0x0001
+HOTKEY_DEBOUNCE_SECONDS = 0.5
 
 
 def _hotkey_listener(
-    toggle_cb: callable,  # type: ignore[valid-type]
+    toggle_cb: Callable[[], None],
     stop_event: threading.Event,
 ) -> None:
-    """Register Ctrl+F9 as a global hotkey and listen for it."""
+    """Listen for the global toggle hotkey, with polling for fullscreen games."""
     user32 = ctypes.windll.user32  # type: ignore[attr-defined]
-    if not user32.RegisterHotKey(None, HOTKEY_ID_TOGGLE, MOD_CTRL, VK_F9):
-        logger.warning("Failed to register Ctrl+F9 hotkey (already in use?)")
-        return
+
+    user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
+    user32.GetAsyncKeyState.restype = wt.SHORT
+
+    registered = bool(
+        user32.RegisterHotKey(None, HOTKEY_ID_TOGGLE, HOTKEY_MODIFIERS, HOTKEY_VK)
+    )
+    if not registered:
+        logger.warning(
+            "Failed to register %s hotkey (already in use?); using polling fallback",
+            HOTKEY_LABEL,
+        )
+
+    last_toggle_at = 0.0
+    prev_poll_down = False
+
+    def _fire_once() -> None:
+        nonlocal last_toggle_at
+        now = time.monotonic()
+        if now - last_toggle_at < HOTKEY_DEBOUNCE_SECONDS:
+            return
+        last_toggle_at = now
+        toggle_cb()
+
+    def _key_down(vk: int) -> bool:
+        return bool(user32.GetAsyncKeyState(vk) & 0x8000)
 
     msg = wt.MSG()
     try:
         while not stop_event.is_set():
-            if user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 1):
+            had_message = bool(user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, PM_REMOVE))
+            if had_message:
                 if msg.message == WM_HOTKEY and msg.wParam == HOTKEY_ID_TOGGLE:
-                    toggle_cb()
-            else:
+                    _fire_once()
+
+            poll_down = _key_down(VK_CTRL) and _key_down(VK_ALT) and _key_down(HOTKEY_VK)
+            if poll_down and not prev_poll_down:
+                _fire_once()
+            prev_poll_down = poll_down
+
+            if not had_message:
                 time.sleep(0.05)
     finally:
-        user32.UnregisterHotKey(None, HOTKEY_ID_TOGGLE)
+        if registered:
+            user32.UnregisterHotKey(None, HOTKEY_ID_TOGGLE)
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
@@ -99,9 +141,24 @@ def main() -> None:
         help="Auto-save every N minutes into a new mp4 + jsonl pair (default: 0 = disabled, single file)",
     )
     parser.add_argument(
+        "--capture-mode",
+        choices=("auto", "foreground", "screen"),
+        default="auto",
+        help=(
+            "Video target: auto captures a large foreground borderless game window, "
+            "foreground forces the current foreground client area, screen captures the full output "
+            "(default: auto)"
+        ),
+    )
+    parser.add_argument(
         "--no-hotkey",
         action="store_true",
-        help="Disable Ctrl+F9 toggle hotkey (start recording immediately)",
+        help=f"Disable {HOTKEY_LABEL} toggle hotkey (start recording immediately)",
+    )
+    parser.add_argument(
+        "--no-overlay",
+        action="store_true",
+        help="Disable the in-game recording status overlay",
     )
     parser.add_argument("-v", "--verbose", action="store_true", help="Debug logging")
     parser.add_argument(
@@ -162,23 +219,45 @@ def main() -> None:
         audio_device=args.audio_device,
         mouse_poll_interval_ms=1000.0 / args.mouse_hz,
         segment_seconds=segment_seconds,
+        capture_mode=args.capture_mode,
     )
 
     session: Session | None = None
     session_lock = threading.Lock()
     app_stop = threading.Event()
+    overlay: RecordingStatusOverlay | None = None
+
+    if not args.no_overlay:
+        overlay = RecordingStatusOverlay(
+            idle_hint=f"按 {HOTKEY_LABEL} 开始录制" if not args.no_hotkey else "正在启动录制",
+            recording_hint=f"按 {HOTKEY_LABEL} 停止" if not args.no_hotkey else "按 Ctrl+C 停止",
+        )
+        overlay.start()
 
     def _toggle() -> None:
         nonlocal session
         with session_lock:
             if session is None:
-                session = Session(config)
-                session.start()
+                new_session = Session(config)
+                if overlay is not None:
+                    overlay.set_recording(True)
+                try:
+                    new_session.start()
+                except Exception:
+                    if overlay is not None:
+                        overlay.set_recording(False)
+                    raise
+                session = new_session
                 print(f"\n>>> RECORDING STARTED  [{session.session_id}]")
-                print("    Press Ctrl+F9 to stop, Ctrl+C to exit.\n")
+                if args.no_hotkey:
+                    print("    Press Ctrl+C to stop and exit.\n")
+                else:
+                    print(f"    Press {HOTKEY_LABEL} to stop, Ctrl+C to exit.\n")
             else:
                 print("\n>>> STOPPING …")
                 session.stop()
+                if overlay is not None:
+                    overlay.set_recording(False)
                 print(f">>> RECORDING SAVED    [{session.session_dir}]\n")
                 session = None
 
@@ -187,6 +266,7 @@ def main() -> None:
     print("=" * 60)
     print("  Game Recorder — world model data capture")
     print(f"  FPS: {config.fps}  |  Quality: CQ {config.video_quality}")
+    print(f"  Capture: {config.capture_mode}")
     if config.segment_seconds > 0:
         print(
             f"  Auto-save: every {config.segment_seconds // 60}m"
@@ -197,7 +277,9 @@ def main() -> None:
         print("  Auto-save: disabled (single file)")
     print(f"  Output: {config.output_dir.resolve()}")
     if not args.no_hotkey:
-        print("  Hotkey: Ctrl+F9 to toggle recording")
+        print(f"  Hotkey: {HOTKEY_LABEL} to toggle recording")
+    if not args.no_overlay:
+        print("  Overlay: enabled (top-right status + elapsed time)")
     print("  Ctrl+C to exit")
     print("=" * 60)
 
@@ -228,7 +310,11 @@ def main() -> None:
             if session is not None:
                 print(">>> Stopping active session …")
                 session.stop()
+                if overlay is not None:
+                    overlay.set_recording(False)
                 print(f">>> Saved to {session.session_dir}")
+        if overlay is not None:
+            overlay.stop()
         print("Bye～")
 
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable
 
 import cv2
@@ -23,6 +24,27 @@ logger = logging.getLogger(__name__)
 FrameCallback = Callable[[bytes, int, int, int], None]
 
 
+@dataclass(frozen=True)
+class CaptureRegion:
+    """DXcam capture rectangle in output coordinates."""
+
+    left: int
+    top: int
+    right: int
+    bottom: int
+
+    @property
+    def width(self) -> int:
+        return max(0, self.right - self.left)
+
+    @property
+    def height(self) -> int:
+        return max(0, self.bottom - self.top)
+
+    def as_dxcam_region(self) -> tuple[int, int, int, int]:
+        return (self.left, self.top, self.right, self.bottom)
+
+
 class ScreenCapture:
     """Captures screen frames via DXGI and delivers them through a callback.
 
@@ -35,9 +57,15 @@ class ScreenCapture:
         *frame_bytes* is raw BGR24 pixel data.
     """
 
-    def __init__(self, fps: int, on_frame: FrameCallback) -> None:
+    def __init__(
+        self,
+        fps: int,
+        on_frame: FrameCallback,
+        region: CaptureRegion | None = None,
+    ) -> None:
         self.fps = fps
         self.on_frame = on_frame
+        self.region = region
         self._camera: dxcam.DXCamera | None = None
         self._width: int = 0
         self._height: int = 0
@@ -54,13 +82,23 @@ class ScreenCapture:
     def run(self, stop_event: threading.Event) -> None:
         """Blocking capture loop — run this in a dedicated thread."""
         self._camera = dxcam.create(output_color="BGR")
-        self._width = self._camera.width
-        self._height = self._camera.height
+        if self.region is None:
+            self._width = self._camera.width
+            self._height = self._camera.height
+            dxcam_region = None
+        else:
+            self._width = self.region.width
+            self._height = self.region.height
+            dxcam_region = self.region.as_dxcam_region()
         logger.info(
-            "Screen capture started: %dx%d @ %d fps", self._width, self._height, self.fps
+            "Screen capture started: %dx%d @ %d fps%s",
+            self._width,
+            self._height,
+            self.fps,
+            "" if dxcam_region is None else f" region={dxcam_region}",
         )
 
-        self._camera.start(target_fps=self.fps, video_mode=True)
+        self._camera.start(target_fps=self.fps, video_mode=True, region=dxcam_region)
         frame_idx = 0
         frame_interval = 1.0 / self.fps
 

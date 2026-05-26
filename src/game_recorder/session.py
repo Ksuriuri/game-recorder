@@ -19,7 +19,6 @@ The orchestration order is:
 
 from __future__ import annotations
 
-import ctypes
 import logging
 import statistics
 import threading
@@ -29,27 +28,17 @@ from pathlib import Path
 
 from game_recorder.capture.input_hook import InputCapture
 from game_recorder.capture.screen import ScreenCapture
+from game_recorder.capture.window_region import (
+    CaptureTarget,
+    get_foreground_window_title,
+    resolve_capture_target,
+)
 from game_recorder.config import Config
 from game_recorder.encoder.ffmpeg_pipe import FFmpegEncoder
 from game_recorder.storage.action_writer import ActionWriter
 from game_recorder.storage.session_writer import SegmentMeta, SessionMeta
 
 logger = logging.getLogger(__name__)
-
-
-def _get_foreground_window_title() -> str:
-    """Best-effort: return the title of the current foreground window."""
-    try:
-        user32 = ctypes.windll.user32  # type: ignore[attr-defined]
-        hwnd = user32.GetForegroundWindow()
-        length = user32.GetWindowTextLengthW(hwnd)
-        if length > 0:
-            buf = ctypes.create_unicode_buffer(length + 1)
-            user32.GetWindowTextW(hwnd, buf, length + 1)
-            return buf.value
-    except Exception:
-        pass
-    return ""
 
 
 class Session:
@@ -81,6 +70,7 @@ class Session:
         # Resolution (probed at start)
         self._width: int = 0
         self._height: int = 0
+        self._capture_target: CaptureTarget | None = None
 
         # ── Segment state (guarded by _segment_lock) ─────────────────────
         self._segment_lock = threading.Lock()
@@ -131,13 +121,31 @@ class Session:
         self._t0_ns = time.perf_counter_ns()
         self._t0_epoch_ms = int(time.time() * 1000)
 
-        # Probe screen resolution before launching the first encoder
+        # Probe output size and resolve the capture target before launching the first encoder.
         import dxcam as _dxcam
 
         probe = _dxcam.create(output_color="BGR")
-        self._width, self._height = probe.width, probe.height
+        output_width, output_height = probe.width, probe.height
         del probe
-        logger.info("Detected screen resolution: %dx%d", self._width, self._height)
+
+        self._capture_target = resolve_capture_target(
+            self.config.capture_mode,
+            output_width,
+            output_height,
+        )
+        if self._capture_target.region is None:
+            self._width, self._height = output_width, output_height
+        else:
+            self._width = self._capture_target.region.width
+            self._height = self._capture_target.region.height
+        logger.info(
+            "Detected output %dx%d; recording %dx%d (%s)",
+            output_width,
+            output_height,
+            self._width,
+            self._height,
+            self._capture_target.source,
+        )
 
         # Segment sizing
         seg_s = max(0, int(self.config.segment_seconds))
@@ -156,7 +164,11 @@ class Session:
             self._open_segment_locked(start_frame=0)
 
         # Screen capture thread
-        self._screen = ScreenCapture(fps=self.config.fps, on_frame=self._on_frame)
+        self._screen = ScreenCapture(
+            fps=self.config.fps,
+            on_frame=self._on_frame,
+            region=self._capture_target.region if self._capture_target else None,
+        )
         self._screen_thread = threading.Thread(
             target=self._screen.run,
             args=(self._stop_event,),
@@ -181,7 +193,7 @@ class Session:
         )
         self._input_thread.start()
 
-        fg = _get_foreground_window_title()
+        fg = self._capture_target.title if self._capture_target else get_foreground_window_title()
         encoder_name = self._encoder.encoder_name if self._encoder else "?"
         logger.info(
             "Session started — encoder=%s, fps=%d, foreground=%r",
@@ -229,7 +241,17 @@ class Session:
             resolution=[self._width, self._height],
             encoder=self._encoder_name,
             audio_source=self._audio_source,
-            foreground_window=_get_foreground_window_title(),
+            foreground_window=(
+                self._capture_target.title
+                if self._capture_target
+                else get_foreground_window_title()
+            ),
+            capture_source=self._capture_target.source if self._capture_target else "screen",
+            capture_region=(
+                list(self._capture_target.region.as_dxcam_region())
+                if self._capture_target and self._capture_target.region
+                else None
+            ),
             total_frames=self._frame_count,
             total_input_events=total_events,
             segment_seconds=int(self.config.segment_seconds),

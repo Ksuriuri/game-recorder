@@ -162,7 +162,7 @@ echo   Cafe deployment:
 echo     1) Copy the zip to D:\ on the target PC ^(NOT C:\^)
 echo     2) Right-click -^> Extract All
 echo     3) Double-click install.bat   ^(~10 s, no internet needed^)
-echo     4) Double-click run.bat        ^(Ctrl+F9 to toggle recording^)
+echo     4) Double-click run.bat        ^(Ctrl+Alt+R to toggle recording^)
 echo.
 echo   On THIS machine after a build:
 echo     .venv\ was removed so the zip does not embed a path-bound venv.

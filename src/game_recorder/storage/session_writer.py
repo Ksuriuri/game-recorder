@@ -35,6 +35,8 @@ class SessionMeta:
     # Format: ``"wasapi:default"`` or ``"dshow:<device name>"``.
     audio_source: str | None = None
     foreground_window: str = ""
+    capture_source: str = "screen"
+    capture_region: list[int] | None = None
     total_frames: int = 0
     total_input_events: int = 0
     segment_seconds: int = 0

@@ -67,6 +67,15 @@ if not exist "%TOOLS_DIR%"           mkdir "%TOOLS_DIR%"
 if not exist "%UV_CACHE_DIR%"        mkdir "%UV_CACHE_DIR%"
 if not exist "%UV_PYTHON_INSTALL_DIR%" mkdir "%UV_PYTHON_INSTALL_DIR%"
 
+REM ---- Prefer the exact bundled Python in offline portable zips.
+REM  uv normally maintains a minor-version link directory such as
+REM  cpython-3.11-windows-x86_64-none. Zip extraction can turn that link into
+REM  a normal directory, making `uv python install 3.11` fail with os error 4390.
+set "MANAGED_PYTHON_EXE="
+for /d %%D in ("%UV_PYTHON_INSTALL_DIR%\cpython-3.11.*-windows-*") do (
+    if exist "%%D\python.exe" if not defined MANAGED_PYTHON_EXE set "MANAGED_PYTHON_EXE=%%D\python.exe"
+)
+
 REM ============================================================
 REM  Step 1/4: Download uv (standalone, ~15MB)
 REM ============================================================
@@ -92,9 +101,22 @@ REM ============================================================
 REM  Step 2/4: Install Python 3.11 (into project dir via uv)
 REM ============================================================
 echo.
-echo [2/4] Installing managed Python 3.11 ...
-"%UV_EXE%" python install 3.11
-if errorlevel 1 goto :fail_install_python
+if "%OFFLINE_MODE%"=="1" (
+    if defined MANAGED_PYTHON_EXE (
+        echo [2/4] Bundled Python already present, skipping install.
+        echo       Python: "%MANAGED_PYTHON_EXE%"
+    ) else (
+        goto :fail_missing_offline_python
+    )
+) else (
+    echo [2/4] Installing managed Python 3.11 ...
+    "%UV_EXE%" python install 3.11
+    if errorlevel 1 goto :fail_install_python
+    set "MANAGED_PYTHON_EXE="
+    for /d %%D in ("%UV_PYTHON_INSTALL_DIR%\cpython-3.11.*-windows-*") do (
+        if exist "%%D\python.exe" if not defined MANAGED_PYTHON_EXE set "MANAGED_PYTHON_EXE=%%D\python.exe"
+    )
+)
 
 REM ============================================================
 REM  Step 3/4: Download FFmpeg (BtbN gpl — encoders: NVENC, libx264, dshow, …)
@@ -143,7 +165,11 @@ REM  silently hanging on a connect attempt.
 REM ============================================================
 echo.
 echo [4/4] Creating virtual environment and installing game-recorder ...
-"%UV_EXE%" venv --clear --python 3.11 "%VENV_DIR%"
+if defined MANAGED_PYTHON_EXE (
+    "%UV_EXE%" venv --clear --python "%MANAGED_PYTHON_EXE%" "%VENV_DIR%"
+) else (
+    "%UV_EXE%" venv --clear --python 3.11 "%VENV_DIR%"
+)
 if errorlevel 1 goto :fail_venv
 
 if "%OFFLINE_MODE%"=="1" (
@@ -192,6 +218,11 @@ pause & exit /b 1
 :fail_install_python
 echo.
 echo [ERROR] uv python install failed.
+pause & exit /b 1
+
+:fail_missing_offline_python
+echo.
+echo [ERROR] Offline bundle is missing managed Python under ".tools\python".
 pause & exit /b 1
 
 :fail_download_ffmpeg
