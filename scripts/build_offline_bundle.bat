@@ -20,8 +20,8 @@ REM     .tools\          uv.exe + managed Python 3.11 + uv cache
 REM     ffmpeg\          BtbN gpl FFmpeg (NVENC + libx264 + dshow)
 REM     wheels\          pre-downloaded dependency wheels (numpy, opencv-headless,
 REM                      dxcam, soundcard, cffi, pycparser …)
-REM     src\, pyproject.toml, install.bat, run-console.bat,
-REM     overlay_latest_recording_inputs.bat, README.md
+REM     src\, pyproject.toml, scripts\
+REM     根目录全部 *.bat / *.vbs / *.md（install.bat、run.bat、录制操作手册.md 等）
 REM
 REM   What is NOT shipped:
 REM     .venv\           path-bound; install.bat recreates it offline from wheels\
@@ -142,7 +142,9 @@ REM Per-item array because Compress-Archive otherwise drags in the project root
 REM as a parent directory, which makes the unzipped layout one level too deep.
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
     "$ErrorActionPreference='Stop';" ^
-    "$items = @('.tools','ffmpeg','wheels','src','scripts','pyproject.toml','install.bat','run-console.bat','overlay_latest_recording_inputs.bat','README.md') | Where-Object { Test-Path $_ };" ^
+    "$core = @('.tools','ffmpeg','wheels','src','scripts','pyproject.toml');" ^
+    "$root = Get-ChildItem -LiteralPath '.' -File | Where-Object { $_.Extension -in @('.bat','.vbs','.md') } | ForEach-Object { $_.Name };" ^
+    "$items = ($core + $root) | Select-Object -Unique | Where-Object { Test-Path $_ };" ^
     "Compress-Archive -Path $items -DestinationPath '%BUNDLE%' -CompressionLevel Optimal -Force"
 if errorlevel 1 (
     echo [错误] Compress-Archive 失败。

@@ -82,6 +82,8 @@ scripts\build_offline_bundle.bat
 ```
 game-recorder/
 ├── install.bat                 # 在目标机上离线重建 .venv（自动检测 wheels/ 切到 OFFLINE 模式）
+├── run.bat / run-console.bat   # 一键启动（install 也会从 scripts\ 同步一份）
+├── 录制操作手册.md             # 网吧/采集同学用的简版说明
 ├── pyproject.toml              # 让 uv pip install -e . 知道项目本体
 ├── README.md
 ├── src/                        # 项目源码（editable 安装的目标）
