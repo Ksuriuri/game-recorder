@@ -24,6 +24,7 @@ Next
 
 pathEnv = root & "\ffmpeg\bin;" & root & "\.venv\Scripts;" & sh.Environment("Process").Item("PATH")
 sh.Environment("Process").Item("PATH") = pathEnv
+sh.Environment("Process").Item("PYTHONPATH") = root & "\src"
 sh.CurrentDirectory = root
 cmd = Chr(34) & exe & Chr(34) & args
 sh.Run cmd, 0, False

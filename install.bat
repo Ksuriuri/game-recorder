@@ -58,8 +58,12 @@ if /I "%PROJECT_DRIVE%"=="%SYS_DRIVE%" (
     echo        强烈建议将项目移至非系统盘
     echo        ^(例如 D:\game-recorder^) 后再继续。
     echo.
-    choice /c YN /n /m "仍要继续？[Y/N] "
-    if errorlevel 2 exit /b 1
+    if defined GAME_RECORDER_SKIP_PAUSE (
+        echo       [自动] 打包/脚本模式，跳过确认并继续。
+    ) else (
+        choice /c YN /n /m "仍要继续？[Y/N] "
+        if errorlevel 2 exit /b 1
+    )
     echo.
 )
 
@@ -173,12 +177,29 @@ if defined MANAGED_PYTHON_EXE (
 if errorlevel 1 goto :fail_venv
 
 if "%OFFLINE_MODE%"=="1" (
-    echo       离线模式：从 "%WHEELS_DIR%" 安装 ^(不访问 PyPI^)。
-    "%UV_EXE%" pip install --offline --no-index --find-links "%WHEELS_DIR%" --python "%VENV_DIR%\Scripts\python.exe" -e .
+    set "PROJECT_WHEEL="
+    for %%F in ("%WHEELS_DIR%\game_recorder-*.whl") do set "PROJECT_WHEEL=%%F"
+    if defined PROJECT_WHEEL (
+        echo       离线模式：从 wheel 安装 game-recorder ^(不访问 PyPI^)。
+        "%UV_EXE%" pip install --offline --no-index --find-links "%WHEELS_DIR%" --python "%VENV_DIR%\Scripts\python.exe" "%PROJECT_WHEEL%"
+    ) else (
+        echo       离线模式：从 "%WHEELS_DIR%" editable 安装 ^(不访问 PyPI^)。
+        "%UV_EXE%" pip install --offline --no-index --find-links "%WHEELS_DIR%" --python "%VENV_DIR%\Scripts\python.exe" -e .
+    )
 ) else (
     "%UV_EXE%" pip install --python "%VENV_DIR%\Scripts\python.exe" -e .
 )
 if errorlevel 1 goto :fail_install
+
+set "VERIFY_PY=%VENV_DIR%\Scripts\python.exe"
+"%VERIFY_PY%" -c "import game_recorder" >nul 2>&1
+if errorlevel 1 (
+    set "PYTHONPATH=%PROJECT_DIR%\src"
+    "%VERIFY_PY%" -c "import game_recorder" >nul 2>&1
+    if errorlevel 1 goto :fail_import_check
+    echo [警告] 当前文件夹路径含中文等特殊字符时，editable 安装可能异常。
+    echo        run.bat 已自动加入 PYTHONPATH；建议解压到纯英文路径如 D:\game-recorder。
+)
 
 REM ============================================================
 REM  Install launch scripts (copy templates; avoid fragile echo generation)
@@ -196,63 +217,67 @@ echo   无热键模式    :  run.bat --no-hotkey
 echo   低延迟回退    :  run.bat --fps 20 --quality 28 --x264-threads 1
 echo ============================================================
 echo.
-echo 按任意键继续...
-pause >nul
+call :wait_key
 exit /b 0
 
 
 :fail_download_uv
 echo.
 echo [错误] 下载 uv 失败。请检查网络/代理后重试。
-echo 按任意键退出...
-pause >nul
+call :wait_key
 exit /b 1
 
 :fail_extract_uv
 echo.
 echo [错误] uv 压缩包已解压但未找到 uv.exe。
-echo 按任意键退出...
-pause >nul
+call :wait_key
 exit /b 1
 
 :fail_install_python
 echo.
 echo [错误] uv python install 失败。
-echo 按任意键退出...
-pause >nul
+call :wait_key
 exit /b 1
 
 :fail_missing_offline_python
 echo.
 echo [错误] 离线包缺少 ".tools\python" 下的托管 Python。
-echo 按任意键退出...
-pause >nul
+call :wait_key
 exit /b 1
 
 :fail_download_ffmpeg
 echo.
 echo [错误] 从 github.com/BtbN 下载 FFmpeg 失败。请检查网络/代理后重试。
-echo 按任意键退出...
-pause >nul
+call :wait_key
 exit /b 1
 
 :fail_extract_ffmpeg
 echo.
 echo [错误] FFmpeg 已解压但未找到 ffmpeg.exe。
-echo 按任意键退出...
-pause >nul
+call :wait_key
 exit /b 1
 
 :fail_venv
 echo.
 echo [错误] 创建虚拟环境失败。
-echo 按任意键退出...
-pause >nul
+call :wait_key
 exit /b 1
 
 :fail_install
 echo.
-echo [错误] uv pip install -e . 失败。
-echo 按任意键退出...
-pause >nul
+echo [错误] uv pip install 失败。
+call :wait_key
 exit /b 1
+
+:fail_import_check
+echo.
+echo [错误] 安装后无法导入 game_recorder。
+echo        若路径含中文，请改解压到纯英文目录 ^(如 D:\game-recorder^) 后删除 .venv 再运行本脚本。
+call :wait_key
+exit /b 1
+
+:wait_key
+if defined GAME_RECORDER_SKIP_PAUSE exit /b 0
+echo 按任意键继续...
+pause >nul
+exit /b 0

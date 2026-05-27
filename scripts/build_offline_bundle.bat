@@ -21,7 +21,7 @@ REM     ffmpeg\          BtbN gpl FFmpeg (NVENC + libx264 + dshow)
 REM     wheels\          pre-downloaded dependency wheels (numpy, opencv-headless,
 REM                      dxcam, soundcard, cffi, pycparser …)
 REM     src\, pyproject.toml, scripts\
-REM     根目录全部 *.bat / *.vbs / *.md（install.bat、run.bat、录制操作手册.md 等）
+REM     根目录全部 *.bat / *.vbs / *.md / *.txt（install.bat、run.bat、录制操作手册.txt 等）
 REM
 REM   What is NOT shipped:
 REM     .venv\           path-bound; install.bat recreates it offline from wheels\
@@ -36,9 +36,20 @@ set "VENV_DIR=%PROJECT_DIR%\.venv"
 set "TOOLS_DIR=%PROJECT_DIR%\.tools"
 set "UV_EXE=%TOOLS_DIR%\uv\uv.exe"
 
+if /I "%~1"=="--pack-only" (
+    set "PROJECT_WHEEL="
+    for %%F in ("%WHEELS_DIR%\game_recorder-*.whl") do set "PROJECT_WHEEL=%%F"
+    if not defined PROJECT_WHEEL (
+        echo [错误] wheels\ 中无 game_recorder-*.whl，请先完整运行本脚本。
+        exit /b 1
+    )
+    echo [pack-only] 已有 wheels\，跳过 install，仅重新压缩 ...
+    goto :step4_pack
+)
+
 echo ============================================================
 echo   正在构建离线便携包
-echo   项目: %PROJECT_DIR%
+echo   项目目录 %PROJECT_DIR%
 echo ============================================================
 echo.
 
@@ -57,7 +68,9 @@ if exist "%WHEELS_DIR%" (
     echo       正在删除旧的 wheels\ 以便重新下载。
     rmdir /s /q "%WHEELS_DIR%"
 )
+set "GAME_RECORDER_SKIP_PAUSE=1"
 call "%PROJECT_DIR%\install.bat"
+set "GAME_RECORDER_SKIP_PAUSE="
 if errorlevel 1 (
     echo.
     echo [错误] install.bat 失败。中止打包。
@@ -96,18 +109,17 @@ if errorlevel 1 (
     exit /b 1
 )
 
-REM Offline `uv pip install -e .` needs pyproject build-system deps plus uv's editable helper.
-REM   hatchling -> packaging, pathspec, pluggy, trove-classifiers
-REM   editables   -> required by uv when installing -e from a local path in isolation
-echo       同时下载 hatchling + editables ^(+ 依赖^) 以供离线 editable 安装 ...
-"%VENV_DIR%\Scripts\python.exe" -m pip download -d "%WHEELS_DIR%" hatchling "editables>=0.3,<1"
+REM Bake game-recorder itself as a wheel so offline install does not rely on
+REM editable .pth files (they break when the extract path contains non-ASCII chars).
+echo       正在构建 game_recorder wheel ...
+"%UV_EXE%" build --wheel -o "%WHEELS_DIR%"
 if errorlevel 1 (
-    echo [错误] pip download hatchling/editables 失败。
+    echo [错误] uv build --wheel 失败。
     exit /b 1
 )
 
 REM Sanity check: must contain at least one wheel for each direct dep.
-for %%P in (numpy opencv_python_headless dxcam soundcard hatchling editables) do (
+for %%P in (numpy opencv_python_headless dxcam soundcard game_recorder) do (
     dir /b "%WHEELS_DIR%\%%P-*.whl" >nul 2>&1 || (
         echo [错误] wheels\ 中未找到 %%P 的 wheel。打包将不可用。
         exit /b 1
@@ -131,25 +143,34 @@ REM  10/11 box, so this script needs no extra tooling.  It does NOT
 REM  preserve permissions, but for our payload (binaries + scripts)
 REM  Windows doesn't need exec bits anyway.
 REM ----------------------------------------------------------------
+:step4_pack
 echo.
 echo [4/4] 正在压缩打包 ...
 
-for /f %%D in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd"') do set "DATESTAMP=%%D"
+for /f %%D in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd_HHmmss"') do set "DATESTAMP=%%D"
 set "BUNDLE=%PROJECT_DIR%\game-recorder-portable-%DATESTAMP%.zip"
-if exist "%BUNDLE%" del /q "%BUNDLE%"
+set "BUNDLE_TMP=%TOOLS_DIR%\bundle-%DATESTAMP%.zip"
+if exist "%BUNDLE_TMP%" del /q "%BUNDLE_TMP%" 2>nul
 
-REM Per-item array because Compress-Archive otherwise drags in the project root
-REM as a parent directory, which makes the unzipped layout one level too deep.
+REM Write to .tools\ first, then move — avoids Compress-Archive failing when an
+REM older portable zip in the project root is open in Explorer or the IDE.
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
     "$ErrorActionPreference='Stop';" ^
     "$core = @('.tools','ffmpeg','wheels','src','scripts','pyproject.toml');" ^
-    "$root = Get-ChildItem -LiteralPath '.' -File | Where-Object { $_.Extension -in @('.bat','.vbs','.md') } | ForEach-Object { $_.Name };" ^
+    "$root = Get-ChildItem -LiteralPath '.' -File | Where-Object { $_.Extension -in @('.bat','.vbs','.md','.txt') } | ForEach-Object { $_.Name };" ^
     "$items = ($core + $root) | Select-Object -Unique | Where-Object { Test-Path $_ };" ^
-    "Compress-Archive -Path $items -DestinationPath '%BUNDLE%' -CompressionLevel Optimal -Force"
+    "Compress-Archive -Path $items -DestinationPath '%BUNDLE_TMP%' -CompressionLevel Optimal -Force"
 if errorlevel 1 (
     echo [错误] Compress-Archive 失败。
     exit /b 1
 )
+move /Y "%BUNDLE_TMP%" "%BUNDLE%" >nul
+if errorlevel 1 (
+    echo [错误] 无法将压缩包移动到项目根目录，临时文件保留在:
+    echo        %BUNDLE_TMP%
+    exit /b 1
+)
+if exist "%BUNDLE_TMP%" del /q "%BUNDLE_TMP%" 2>nul
 
 for %%S in ("%BUNDLE%") do set "BUNDLE_SIZE=%%~zS"
 set /a BUNDLE_MB=%BUNDLE_SIZE% / 1048576
@@ -162,10 +183,10 @@ echo   文件 : %BUNDLE%
 echo   大小 : %BUNDLE_MB% MB
 echo.
 echo   网吧部署：
-echo     1) 将 zip 复制到目标 PC 的 D:\ ^(不要用 C:\^)
-echo     2) 右键 -^> 全部提取
-echo     3) 双击 install.bat   ^(约 10 秒，无需联网^)
-echo     4) 双击 run.bat        ^(连按两次大写键切换录制，悬浮窗「退出」结束^)
+echo     1. 将 zip 复制到目标 PC 的 D 盘，不要用 C 盘
+echo     2. 右键 - 全部提取到纯英文目录，如 D:\game-recorder
+echo     3. 双击 install.bat，约 10 秒，无需联网
+echo     4. 双击 run.bat，连按两次大写键切换录制，悬浮窗点「退出」结束
 echo.
 echo   本机构建后：
 echo     .venv\ 已删除，zip 中不包含路径绑定的 venv。

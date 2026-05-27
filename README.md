@@ -72,8 +72,9 @@ scripts\build_offline_bundle.bat
 1. 跑一遍 `install.bat`（联网下载 uv / 托管 Python 3.11 / FFmpeg / 所有依赖 wheel 进 uv 缓存并建好 `.venv`）
 2. `uv pip freeze` 锁定解析后的精确版本（含 numpy / opencv-python-headless / dxcam / soundcard / cffi / pycparser…）
 3. `uv pip download` 把这些 wheel 全量保存到 `wheels\`
-4. 删掉 `.venv\`（venv 的 `pyvenv.cfg` 写死了绝对路径，搬到别的机器就崩，所以不进包；目标机器会从 `wheels\` 几秒内重建）
-5. `Compress-Archive` 打成 `game-recorder-portable-YYYYMMDD.zip`（约 400-450 MB，取决于托管 Python / FFmpeg / wheel 缓存版本）
+4. `uv build --wheel` 把 `game-recorder` 本体打成 `wheels\game_recorder-*.whl`（离线安装用 wheel，避免 editable 的 `.pth` 在**中文路径**下失效）
+5. 删掉 `.venv\`（venv 的 `pyvenv.cfg` 写死了绝对路径，搬到别的机器就崩，所以不进包；目标机器会从 `wheels\` 几秒内重建）
+6. `Compress-Archive` 打成 `game-recorder-portable-YYYYMMDD.zip`（约 400-450 MB，取决于托管 Python / FFmpeg / wheel 缓存版本）
 
 #### 离线包内容
 
@@ -83,13 +84,14 @@ scripts\build_offline_bundle.bat
 game-recorder/
 ├── install.bat                 # 在目标机上离线重建 .venv（自动检测 wheels/ 切到 OFFLINE 模式）
 ├── run.bat / run-console.bat   # 一键启动（install 也会从 scripts\ 同步一份）
-├── 录制操作手册.md             # 网吧/采集同学用的简版说明
-├── pyproject.toml              # 让 uv pip install -e . 知道项目本体
+├── 录制操作手册.txt             # 网吧/采集同学用的简版说明（记事本可直接打开）
+├── pyproject.toml
 ├── README.md
-├── src/                        # 项目源码（editable 安装的目标）
+├── src/                        # 源码（run.bat 也会把 src 加入 PYTHONPATH 作兜底）
 ├── scripts/                    # build_offline_bundle.bat 等
 ├── ffmpeg/bin/ffmpeg.exe       # ~140 MB，BtbN gpl 构建
-├── wheels/                     # ~55 MB，所有 runtime 依赖的 wheel
+├── wheels/                     # ~55 MB，所有 runtime 依赖 + 项目本体的 wheel
+│   ├── game_recorder-*.whl     # 离线 install 安装此项（勿仅用 editable）
 │   ├── numpy-*.whl
 │   ├── opencv_python_headless-*.whl
 │   ├── dxcam-*.whl
@@ -104,8 +106,8 @@ game-recorder/
 #### 在网吧 PC 上部署
 
 1. U 盘把 zip 拷过去
-2. 解压到 **`D:\game-recorder\`**（**别放 C 盘**——网吧的还原系统重启就把 C 盘清回原状）
-3. 双击 `install.bat`：横幅出现 `Mode : OFFLINE (restoring from local wheels/)` 即说明检测到离线包；脚本会用 `--offline --no-index --find-links wheels\` 重建 `.venv`，全程不碰网络，约 10 秒
+2. 解压到 **`D:\game-recorder\` 等纯英文路径**（**别放 C 盘**——网吧还原会清空 C 盘；**不要用「新建文件夹」等中文目录名**，旧版 editable 安装会报 `No module named 'game_recorder'`）
+3. 双击 `install.bat`：横幅出现 `模式 : 离线` 即说明检测到离线包；脚本会从 `wheels\` 安装 wheel 并重建 `.venv`，全程不碰网络，约 10 秒
 4. 双击 `run.bat` → 右上角悬浮窗出现 → **连按两次 Caps Lock（大写键）** 开始/停止录制 → 结束时点悬浮窗 **退出**
 
 整个 zip 自包含，不写注册表，不写 `%LOCALAPPDATA%` / `%APPDATA%`，卸载就是删目录。

@@ -14,6 +14,9 @@ ffmpeg/
 wheels/
 run.bat
 game-recorder-portable-*.zip
+_test_cn_path/
+_zip_inspect/
+.venv_test_offline/
 
 # macOS
 .DS_Store
