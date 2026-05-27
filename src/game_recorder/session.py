@@ -19,12 +19,17 @@ The orchestration order is:
 
 from __future__ import annotations
 
+import ctypes
+import ctypes.wintypes as wt
 import logging
+import shutil
 import statistics
 import threading
 import time
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 from game_recorder.capture.input_hook import InputCapture
 from game_recorder.capture.screen import ScreenCapture
@@ -33,19 +38,132 @@ from game_recorder.capture.window_region import (
     get_foreground_window_title,
     resolve_capture_target,
 )
-from game_recorder.config import Config
+from game_recorder.config import Config, find_ffmpeg
 from game_recorder.encoder.ffmpeg_pipe import FFmpegEncoder
 from game_recorder.storage.action_writer import ActionWriter
+from game_recorder.storage.idle_trim import apply_idle_tail_trim, idle_tail_trim_frames
+from game_recorder.hotkeys import HOTKEY_VKS
+from game_recorder.storage.library_index import add_session, effective_duration_s
 from game_recorder.storage.session_writer import SegmentMeta, SessionMeta
 
 logger = logging.getLogger(__name__)
+
+# Virtual keys for movement keys (character walk).
+_WASD_VKS: frozenset[int] = frozenset((0x57, 0x41, 0x53, 0x44))  # W A S D
+AutoStopReason = Literal["idle", "forbidden_key", "violent"]
+AutoStopCallback = Callable[[AutoStopReason], None]
+
+# Per-second thresholds for violent-input detection (sustained ``violent_duration_s``).
+_VIOLENT_WINDOW_S = 1.0
+_WASD_DOWN_PER_S = 5  # new WASD presses per second (ignore hold / key-repeat)
+_MOUSE_REVERSAL_PER_S = 10  # dx/dy sign flips per second (shake); smooth look rarely hits this
+
+
+class _ViolenceMonitor:
+    """Detect sustained high-frequency WASD tapping or mouse shaking."""
+
+    def __init__(self, duration_s: float) -> None:
+        self._duration_s = duration_s
+        self._lock = threading.Lock()
+        self._window_start = time.monotonic()
+        self._wasd_presses = 0
+        self._mouse_moves = 0
+        self._mouse_reversals = 0
+        self._wasd_held: set[int] = set()
+        self._last_dx = 0
+        self._last_dy = 0
+        self._last_abs_x: int | None = None
+        self._last_abs_y: int | None = None
+        self._violent_since: float | None = None
+
+    def on_wasd_event(self, event: dict, now: float) -> bool:
+        with self._lock:
+            vk = event.get("vk")
+            if not isinstance(vk, int):
+                return self._advance(now)
+            action = event.get("action")
+            if action == "down":
+                if vk in self._wasd_held:
+                    return self._advance(now)
+                self._wasd_held.add(vk)
+                self._wasd_presses += 1
+            elif action == "up":
+                self._wasd_held.discard(vk)
+            return self._advance(now)
+
+    def on_mouse_move(self, event: dict, now: float) -> bool:
+        with self._lock:
+            if event.get("absolute"):
+                x = int(event.get("x", 0))
+                y = int(event.get("y", 0))
+                if self._last_abs_x is not None and self._last_abs_y is not None:
+                    dx = x - self._last_abs_x
+                    dy = y - self._last_abs_y
+                else:
+                    dx = dy = 0
+                self._last_abs_x = x
+                self._last_abs_y = y
+            else:
+                dx = int(event.get("dx", 0))
+                dy = int(event.get("dy", 0))
+            if not dx and not dy:
+                return self._advance(now)
+            self._mouse_moves += 1
+            if self._last_dx and dx and ((self._last_dx > 0) != (dx > 0)):
+                self._mouse_reversals += 1
+            if self._last_dy and dy and ((self._last_dy > 0) != (dy > 0)):
+                self._mouse_reversals += 1
+            self._last_dx = dx
+            self._last_dy = dy
+            return self._advance(now)
+
+    def tick(self, now: float) -> bool:
+        with self._lock:
+            return self._advance(now)
+
+    def _advance(self, now: float) -> bool:
+        """Advance time windows; return True when violent input sustained long enough."""
+        triggered = False
+        while now - self._window_start >= _VIOLENT_WINDOW_S:
+            window_end = self._window_start + _VIOLENT_WINDOW_S
+            if self._evaluate_window(window_end):
+                triggered = True
+            self._window_start = window_end
+            self._reset_window()
+        return triggered
+
+    def _evaluate_window(self, window_end: float) -> bool:
+        hot = (
+            self._wasd_presses >= _WASD_DOWN_PER_S
+            or self._mouse_reversals >= _MOUSE_REVERSAL_PER_S
+        )
+        if hot:
+            if self._violent_since is None:
+                self._violent_since = window_end - _VIOLENT_WINDOW_S
+            if window_end - self._violent_since >= self._duration_s:
+                return True
+        else:
+            self._violent_since = None
+        return False
+
+    def _reset_window(self) -> None:
+        self._wasd_presses = 0
+        self._mouse_moves = 0
+        self._mouse_reversals = 0
+        self._last_dx = 0
+        self._last_dy = 0
 
 
 class Session:
     """A single recording session, possibly spanning multiple segments."""
 
-    def __init__(self, config: Config) -> None:
+    def __init__(
+        self,
+        config: Config,
+        on_auto_stop: AutoStopCallback | None = None,
+    ) -> None:
         self.config = config
+        self._on_auto_stop = on_auto_stop
         self._stop_event = threading.Event()
 
         # Identifiers
@@ -103,6 +221,15 @@ class Session:
         # Per captured frame: wall_frame_index − dxcam idx (median → meta event_video_sync_offset).
         self._sync_wall_minus_idx: list[int] = []
 
+        # Auto-stop rules (WASD-only movement)
+        self._last_movement_at: float = 0.0
+        self._auto_stop_fired = False
+        self._auto_stop_reason: AutoStopReason | None = None
+        self._idle_thread: threading.Thread | None = None
+        self._violence: _ViolenceMonitor | None = None
+        self._stop_finalized = False
+        self._stop_kept = False
+
     @property
     def session_id(self) -> str:
         return self._session_id
@@ -115,11 +242,20 @@ class Session:
 
     def start(self) -> None:
         """Start all capture components."""
-        logger.info("Starting session %s → %s", self._session_id, self._session_dir)
+        logger.info("正在启动会话 %s → %s", self._session_id, self._session_dir)
 
         # Shared clock epoch
         self._t0_ns = time.perf_counter_ns()
         self._t0_epoch_ms = int(time.time() * 1000)
+        self._last_movement_at = time.monotonic()
+        self._auto_stop_fired = False
+        self._auto_stop_reason = None
+        self._stop_finalized = False
+        self._stop_kept = False
+        violent_s = float(self.config.violent_duration_s)
+        self._violence = (
+            _ViolenceMonitor(violent_s) if violent_s > 0 and self._on_auto_stop else None
+        )
 
         # Probe output size and resolve the capture target before launching the first encoder.
         import dxcam as _dxcam
@@ -139,7 +275,7 @@ class Session:
             self._width = self._capture_target.region.width
             self._height = self._capture_target.region.height
         logger.info(
-            "Detected output %dx%d; recording %dx%d (%s)",
+            "检测到输出 %dx%d；录制 %dx%d（%s）",
             output_width,
             output_height,
             self._width,
@@ -152,12 +288,12 @@ class Session:
         self._frames_per_segment = self.config.fps * seg_s if seg_s > 0 else 0
         if self._frames_per_segment > 0:
             logger.info(
-                "Auto-segment: every %d s = %d frames",
+                "自动分段：每 %d 秒 = %d 帧",
                 seg_s,
                 self._frames_per_segment,
             )
         else:
-            logger.info("Auto-segment disabled — single continuous file")
+            logger.info("自动分段已关闭 — 单文件连续录制")
 
         # Open first segment
         with self._segment_lock:
@@ -193,18 +329,45 @@ class Session:
         )
         self._input_thread.start()
 
+        idle_s = float(self.config.idle_timeout_s)
+        watch_idle = idle_s > 0 and self._on_auto_stop is not None
+        watch_violent = self._violence is not None
+        if watch_idle or watch_violent:
+            self._idle_thread = threading.Thread(
+                target=self._auto_stop_watch_loop,
+                args=(idle_s,),
+                name="auto-stop-watch",
+                daemon=True,
+            )
+            self._idle_thread.start()
+            if watch_idle:
+                logger.info("空闲检测已启用：%g 秒未移动人物角色（无 WASD）将自动停止", idle_s)
+        if self._on_auto_stop is not None:
+            logger.info("非 WASD 按键检测已启用：按下其他键将自动停止")
+            if watch_violent:
+                logger.info(
+                    "剧烈操作检测已启用：WASD 或鼠标高频晃动连续 %g 秒将自动停止",
+                    violent_s,
+                )
+
         fg = self._capture_target.title if self._capture_target else get_foreground_window_title()
         encoder_name = self._encoder.encoder_name if self._encoder else "?"
         logger.info(
-            "Session started — encoder=%s, fps=%d, foreground=%r",
+            "会话已启动 — 编码器=%s，fps=%d，前台窗口=%r",
             encoder_name,
             self.config.fps,
             fg,
         )
 
-    def stop(self) -> None:
-        """Signal threads to stop, finalize the active segment, write metadata."""
-        logger.info("Stopping session %s …", self._session_id)
+    def stop(self) -> bool:
+        """Signal threads to stop, finalize the active segment, write metadata.
+
+        Returns True if the session was kept, False if it was discarded as too short.
+        """
+        if self._stop_finalized:
+            return self._stop_kept
+
+        logger.info("正在停止会话 %s …", self._session_id)
         self._stop_event.set()
 
         # Wait for capture threads to drain
@@ -220,13 +383,43 @@ class Session:
         # Compute duration
         duration_s = (time.perf_counter_ns() - self._t0_ns) / 1e9
 
+        min_s = float(self.config.min_recording_duration_s)
+        effective_s = self._effective_recording_duration_s(duration_s)
+        if min_s > 0 and effective_s < min_s:
+            self._discard_session(duration_s, effective_s, min_s)
+            self._stop_finalized = True
+            self._stop_kept = False
+            return False
+
+        idle_tail_trimmed = 0
+        if self._auto_stop_reason == "idle":
+            trim_duration_s = float(self.config.idle_timeout_s)
+        elif self._auto_stop_reason == "violent":
+            trim_duration_s = float(self.config.violent_duration_s)
+        else:
+            trim_duration_s = 0.0
+        if trim_duration_s > 0 and self._segments_meta:
+            trim_n = idle_tail_trim_frames(trim_duration_s, self.config.fps)
+            if trim_n > 0:
+                self._segments_meta, idle_tail_trimmed = apply_idle_tail_trim(
+                    self._session_dir,
+                    self._segments_meta,
+                    trim_frames=trim_n,
+                    fps=self.config.fps,
+                    session_timestamp=self._session_timestamp,
+                    ffmpeg_path=find_ffmpeg(),
+                )
+                if idle_tail_trimmed > 0:
+                    self._frame_count -= idle_tail_trimmed
+                    duration_s = self._frame_count / max(1, self.config.fps)
+
         total_events = sum(s.event_count for s in self._segments_meta)
 
         sync_off = 0
         if self._sync_wall_minus_idx:
             sync_off = int(round(statistics.median(self._sync_wall_minus_idx)))
             logger.info(
-                "event_video_sync_offset=%d (median wall−idx, n=%d frames)",
+                "event_video_sync_offset=%d（wall−idx 中位数，n=%d 帧）",
                 sync_off,
                 len(self._sync_wall_minus_idx),
             )
@@ -256,17 +449,75 @@ class Session:
             total_input_events=total_events,
             segment_seconds=int(self.config.segment_seconds),
             segments=self._segments_meta,
+            auto_stop_reason=self._auto_stop_reason,
+            idle_timeout_s=float(self.config.idle_timeout_s),
+            violent_duration_s=float(self.config.violent_duration_s),
+            idle_tail_trim_frames=idle_tail_trimmed,
         )
         meta.save(self._meta_path)
+        try:
+            add_session(self.config.output_dir, meta)
+        except Exception as exc:
+            logger.warning("更新库索引失败：%s", exc)
 
         logger.info(
-            "Session %s saved: %.1fs, %d frames, %d input events, %d segment(s)",
+            "会话 %s 已保存：%.1f 秒，%d 帧，%d 个输入事件，%d 个分段",
             self._session_id,
             duration_s,
             self._frame_count,
             total_events,
             len(self._segments_meta),
         )
+        self._stop_finalized = True
+        self._stop_kept = True
+        return True
+
+    def _effective_recording_duration_s(self, wall_duration_s: float) -> float:
+        """Wall duration minus auto-stop tail (idle wait or violent-input window)."""
+        return effective_duration_s(
+            wall_duration_s,
+            auto_stop_reason=self._auto_stop_reason,
+            idle_timeout_s=self.config.idle_timeout_s,
+            violent_duration_s=self.config.violent_duration_s,
+        )
+
+    def _auto_stop_tail_deduct_s(self) -> float:
+        if self._auto_stop_reason == "idle":
+            return float(self.config.idle_timeout_s)
+        if self._auto_stop_reason == "violent":
+            return float(self.config.violent_duration_s)
+        return 0.0
+
+    def _discard_session(
+        self,
+        wall_duration_s: float,
+        effective_duration_s: float,
+        min_s: float,
+    ) -> None:
+        """Remove session directory and skip library index (recording too short)."""
+        tail_deduct = self._auto_stop_tail_deduct_s()
+        if effective_duration_s < wall_duration_s - 0.05 and tail_deduct > 0:
+            logger.info(
+                "会话 %s 有效时长 %.1f 秒 < %.1f 秒"
+                "（总时长 %.1f 秒，已扣除自动停止尾部 %.1f 秒），丢弃录制数据",
+                self._session_id,
+                effective_duration_s,
+                min_s,
+                wall_duration_s,
+                tail_deduct,
+            )
+        else:
+            logger.info(
+                "会话 %s 时长 %.1f 秒 < %.1f 秒，丢弃录制数据",
+                self._session_id,
+                effective_duration_s,
+                min_s,
+            )
+        session_dir = self._session_dir
+        try:
+            shutil.rmtree(session_dir)
+        except OSError as exc:
+            logger.warning("删除过短会话目录失败 %s：%s", session_dir, exc)
 
     # ── Frame & event callbacks ──────────────────────────────────────────
 
@@ -285,7 +536,7 @@ class Session:
 
             if (width, height) != (self._width, self._height):
                 logger.warning(
-                    "Capture resolution changed from %dx%d to %dx%d; rotating segment",
+                    "捕获分辨率从 %dx%d 变为 %dx%d；正在轮换分段",
                     self._width,
                     self._height,
                     width,
@@ -311,6 +562,21 @@ class Session:
 
     def _on_action_event(self, event: dict) -> None:
         """Called by the input-hook thread for every keyboard / mouse event."""
+        now = time.monotonic()
+        if self._violence is not None:
+            triggered = False
+            if self._is_wasd_event(event):
+                triggered = self._violence.on_wasd_event(event, now)
+            elif event.get("type") == "mouse" and event.get("action") == "move":
+                triggered = self._violence.on_mouse_move(event, now)
+            else:
+                triggered = self._violence.tick(now)
+            if triggered:
+                self._trigger_auto_stop("violent")
+
+        if self._is_wasd_event(event):
+            self._last_movement_at = now
+
         frame = event.get("frame", 0)
         with self._segment_lock:
             # Event for a future segment that hasn't rotated yet → buffer it
@@ -324,7 +590,7 @@ class Session:
             # Event for an already-finalized segment → drop with warning
             if frame < self._segment_start_frame:
                 logger.debug(
-                    "Dropping late event for closed segment (frame=%d, current=[%d,%s))",
+                    "丢弃已关闭分段的滞后事件（frame=%d，当前=[%d,%s)）",
                     frame,
                     self._segment_start_frame,
                     self._segment_planned_end,
@@ -334,6 +600,68 @@ class Session:
             if self._action_writer is not None:
                 self._action_writer.write(event)
                 self._segment_event_count += 1
+
+        if self._is_forbidden_key_event(event):
+            self._trigger_auto_stop("forbidden_key")
+
+    @staticmethod
+    def _is_wasd_event(event: dict) -> bool:
+        if event.get("type") != "key":
+            return False
+        vk = event.get("vk")
+        return isinstance(vk, int) and vk in _WASD_VKS
+
+    def _is_forbidden_key_event(self, event: dict) -> bool:
+        if event.get("type") != "key" or event.get("action") != "down":
+            return False
+        vk = event.get("vk")
+        if not isinstance(vk, int):
+            return False
+        if vk in _WASD_VKS:
+            return False
+        if vk in HOTKEY_VKS:
+            return False
+        return True
+
+    @staticmethod
+    def _wasd_held() -> bool:
+        user32 = ctypes.windll.user32  # type: ignore[attr-defined]
+        user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
+        user32.GetAsyncKeyState.restype = wt.SHORT
+        return any(bool(user32.GetAsyncKeyState(vk) & 0x8000) for vk in _WASD_VKS)
+
+    def _auto_stop_watch_loop(self, idle_s: float) -> None:
+        while not self._stop_event.wait(0.5):
+            now = time.monotonic()
+            if self._violence is not None and self._violence.tick(now):
+                self._trigger_auto_stop("violent")
+                return
+            if idle_s <= 0:
+                continue
+            if self._wasd_held():
+                self._last_movement_at = now
+                continue
+            if now - self._last_movement_at < idle_s:
+                continue
+            self._trigger_auto_stop("idle")
+            return
+
+    def _trigger_auto_stop(self, reason: AutoStopReason) -> None:
+        if self._auto_stop_fired or self._on_auto_stop is None:
+            return
+        self._auto_stop_fired = True
+        self._auto_stop_reason = reason
+        self._stop_event.set()
+        if reason == "idle":
+            logger.info("检测到 %g 秒未移动人物角色（无 WASD），触发自动停止", self.config.idle_timeout_s)
+        elif reason == "violent":
+            logger.info(
+                "检测到连续 %g 秒高频 WASD / 鼠标晃动，触发自动停止",
+                self.config.violent_duration_s,
+            )
+        else:
+            logger.info("检测到非人物移动按键，触发自动停止")
+        self._on_auto_stop(reason)
 
     # ── Segment management (must be called with _segment_lock held) ─────
 
@@ -373,7 +701,7 @@ class Session:
             self._audio_source = self._encoder.audio_source
 
         logger.info(
-            "Opened segment #%d: frames [%d, %s) → %s",
+            "已打开分段 #%d：帧 [%d, %s) → %s",
             self._segment_index,
             start_frame,
             "∞" if self._segment_planned_end is None else str(self._segment_planned_end),
@@ -390,14 +718,14 @@ class Session:
             try:
                 self._encoder.stop()
             except Exception as e:
-                logger.warning("Error stopping encoder: %s", e)
+                logger.warning("停止编码器时出错：%s", e)
             self._encoder = None
 
         if self._action_writer is not None:
             try:
                 self._action_writer.close()
             except Exception as e:
-                logger.warning("Error closing action writer: %s", e)
+                logger.warning("关闭操作日志写入器时出错：%s", e)
             self._action_writer = None
 
         # Rename when the actual end frame differs from the placeholder /
@@ -425,7 +753,7 @@ class Session:
                         if attempt < 5:
                             time.sleep(0.15)
                             continue
-                        logger.warning("Failed to rename %s → %s: %s", src.name, dst.name, e)
+                        logger.warning("重命名失败 %s → %s：%s", src.name, dst.name, e)
             final_video = new_video
             final_actions = new_actions
         else:
@@ -439,9 +767,9 @@ class Session:
                     if path.exists():
                         path.unlink()
                 except OSError as e:
-                    logger.warning("Failed to delete empty segment file %s: %s", path.name, e)
+                    logger.warning("删除空分段文件失败 %s：%s", path.name, e)
             logger.info(
-                "Discarded empty segment #%d: frames [%d, %d)",
+                "已丢弃空分段 #%d：帧 [%d, %d)",
                 self._segment_index,
                 self._segment_start_frame,
                 actual_end_frame,
@@ -464,7 +792,7 @@ class Session:
         )
 
         logger.info(
-            "Closed segment #%d: frames [%d, %d) → %s (%d events)",
+            "已关闭分段 #%d：帧 [%d, %d) → %s（%d 个事件）",
             self._segment_index,
             self._segment_start_frame,
             actual_end_frame,

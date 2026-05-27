@@ -276,11 +276,11 @@ class InputCapture:
     def run(self, stop_event: threading.Event) -> None:
         self._use_raw_input = self._setup_raw_input()
         if self._use_raw_input:
-            logger.info("Input capture started (keyboard + mouse Raw Input)")
+            logger.info("输入捕获已启动（键盘 + 鼠标 Raw Input）")
         else:
             logger.warning(
-                "Raw Input unavailable — using GetAsyncKeyState keyboard polling @ %.0f Hz "
-                "(mouse events disabled; try restarting as admin)",
+                "Raw Input 不可用 — 使用 GetAsyncKeyState 键盘轮询 @ %.0f Hz "
+                "（鼠标事件已禁用；可尝试以管理员身份重启）",
                 self._keyboard_poll_hz,
             )
             for vk in range(1, 256):
@@ -300,7 +300,7 @@ class InputCapture:
         finally:
             self._teardown_raw_input()
             logger.info(
-                "Input capture stopped (%d events: %d key, %d mouse)",
+                "输入捕获已停止（%d 个事件：%d 键盘，%d 鼠标）",
                 self._event_count,
                 self._key_events,
                 self._mouse_events,
@@ -341,7 +341,7 @@ class InputCapture:
         if not user32.RegisterClassW(ctypes.byref(wc)):
             err = kernel32.GetLastError()
             if err != 1410:  # ERROR_CLASS_ALREADY_EXISTS
-                logger.debug("RegisterClassW failed: GetLastError=%s", err)
+                logger.debug("RegisterClassW 失败：GetLastError=%s", err)
                 return False
 
         hwnd = user32.CreateWindowExW(
@@ -359,7 +359,7 @@ class InputCapture:
             None,
         )
         if not hwnd:
-            logger.debug("CreateWindowExW failed: GetLastError=%s", kernel32.GetLastError())
+            logger.debug("CreateWindowExW 失败：GetLastError=%s", kernel32.GetLastError())
             user32.UnregisterClassW(class_name, hinst)
             self._raw_class_name = None
             return False
@@ -379,7 +379,7 @@ class InputCapture:
             ctypes.sizeof(RAWINPUTDEVICE),
         ):
             logger.debug(
-                "RegisterRawInputDevices failed: GetLastError=%s",
+                "RegisterRawInputDevices 失败：GetLastError=%s",
                 kernel32.GetLastError(),
             )
             user32.DestroyWindow(hwnd)

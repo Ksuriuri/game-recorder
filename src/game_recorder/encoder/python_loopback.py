@@ -46,7 +46,7 @@ def loopback_usable() -> bool:
         spk = sc.default_speaker()
         sc.get_microphone(id=str(spk.id), include_loopback=True)  # noqa: F841
     except (IndexError, OSError, RuntimeError) as e:
-        logger.debug("soundcard loopback not available: %s", e)
+        logger.debug("soundcard 环回不可用：%s", e)
         return False
     return True
 
@@ -78,7 +78,7 @@ def _resolve_loopback(sc: object) -> object:
             return m
     if mics:
         return mics[0]
-    raise IndexError("no loopback device for default speaker")
+    raise IndexError("默认扬声器无环回设备")
 
 
 def _connect_with_retry(
@@ -111,10 +111,10 @@ def _connect_with_retry(
                 continue
             raise
     if stop.is_set():
-        raise ConnectionAbortedError("loopback worker stopped before FFmpeg bound TCP port")
+        raise ConnectionAbortedError("环回 worker 在 FFmpeg 绑定 TCP 端口前已停止")
     raise TimeoutError(
-        f"FFmpeg never bound 127.0.0.1:{port} within {deadline_s:.1f}s "
-        f"(last error: {last_err!r})"
+        f"FFmpeg 在 {deadline_s:.1f} 秒内未绑定 127.0.0.1:{port} "
+        f"（最后错误：{last_err!r}）"
     )
 
 

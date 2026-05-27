@@ -91,11 +91,11 @@ class ScreenCapture:
             self._height = self.region.height
             dxcam_region = self.region.as_dxcam_region()
         logger.info(
-            "Screen capture started: %dx%d @ %d fps%s",
+            "屏幕捕获已启动：%dx%d @ %d fps%s",
             self._width,
             self._height,
             self.fps,
-            "" if dxcam_region is None else f" region={dxcam_region}",
+            "" if dxcam_region is None else f" 区域={dxcam_region}",
         )
 
         self._camera.start(target_fps=self.fps, video_mode=True, region=dxcam_region)
@@ -111,7 +111,7 @@ class ScreenCapture:
                         source_size = (width, height)
                         if source_size != self._last_source_size:
                             logger.warning(
-                                "Screen capture source changed to %dx%d; resizing to %dx%d",
+                                "屏幕捕获源变为 %dx%d；缩放至 %dx%d",
                                 width,
                                 height,
                                 self._width,
@@ -126,7 +126,7 @@ class ScreenCapture:
                         height, width = frame.shape[:2]
                     elif self._last_source_size is not None:
                         logger.info(
-                            "Screen capture source returned to %dx%d",
+                            "屏幕捕获源恢复为 %dx%d",
                             self._width,
                             self._height,
                         )
@@ -143,4 +143,4 @@ class ScreenCapture:
                     time.sleep(frame_interval * 0.25)
         finally:
             self._camera.stop()
-            logger.info("Screen capture stopped after %d frames", frame_idx)
+            logger.info("屏幕捕获已停止，共 %d 帧", frame_idx)

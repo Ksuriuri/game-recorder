@@ -43,6 +43,15 @@ class Config:
     # rotation currently introduces a sub-second video/audio gap).
     segment_seconds: int = 0
 
+    # Stop recording when no WASD key activity for this many seconds. 0 = off.
+    idle_timeout_s: float = 10.0
+
+    # Stop when high-frequency WASD or mouse shaking lasts this many seconds. 0 = off.
+    violent_duration_s: float = 1.0
+
+    # Discard the whole session on stop when shorter than this (seconds). 0 = off.
+    min_recording_duration_s: float = 10.0
+
     def __post_init__(self) -> None:
         self.output_dir = Path(self.output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -60,7 +69,7 @@ def find_ffmpeg() -> str:
         if p.is_file():
             return str(p.resolve())
         print(
-            f"ERROR: GAME_RECORDER_FFMPEG is set but not a file: {override!r}",
+            f"错误：已设置 GAME_RECORDER_FFMPEG 但不是有效文件：{override!r}",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -76,8 +85,8 @@ def find_ffmpeg() -> str:
         return found
 
     print(
-        "ERROR: ffmpeg not found. Run install.bat, or place ffmpeg.exe in ffmpeg\\bin or ffmpeg\\, "
-        "or add a full build to PATH.",
+        "错误：未找到 ffmpeg。请运行 install.bat，或将 ffmpeg.exe 放入 ffmpeg\\bin 或 ffmpeg\\，"
+        "或将完整构建加入 PATH。",
         file=sys.stderr,
     )
     sys.exit(1)

@@ -67,22 +67,23 @@ class ActionWriter:
         Out-of-order events for an already-flushed frame are emitted as a
         new record for that frame to avoid silent data loss.
         """
-        frame = event.pop("frame")
+        frame = int(event["frame"])
+        payload = {k: v for k, v in event.items() if k != "frame"}
         with self._lock:
             self._total_events += 1
             if self._current_frame is None:
                 self._current_frame = frame
-                self._current_events.append(event)
+                self._current_events.append(payload)
                 return
 
             if frame == self._current_frame:
-                self._current_events.append(event)
+                self._current_events.append(payload)
                 return
 
             # Frame transition — emit the previous bucket, open a new one.
             self._emit_current_locked()
             self._current_frame = frame
-            self._current_events.append(event)
+            self._current_events.append(payload)
 
             if len(self._buffer) >= self._buffer_frames:
                 self._flush_buffer_locked()
@@ -101,7 +102,7 @@ class ActionWriter:
             self._file.flush()
             self._file.close()
         logger.info(
-            "Action log closed: %d events across %d frames → %s",
+            "操作日志已关闭：%d 个事件，%d 帧 → %s",
             self._total_events,
             self._total_frames_written,
             self._path,
@@ -122,6 +123,7 @@ class ActionWriter:
         if not self._buffer:
             return
         self._file.write("\n".join(self._buffer) + "\n")
+        self._file.flush()
         self._buffer.clear()
 
     def __enter__(self) -> ActionWriter:

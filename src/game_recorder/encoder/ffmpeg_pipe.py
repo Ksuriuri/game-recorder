@@ -151,13 +151,13 @@ def _wasapi_loopback_usable(ffmpeg: str) -> bool:
         if result.returncode == 0:
             return True
         logger.warning(
-            "WASAPI loopback probe failed (rc=%d): %s",
+            "WASAPI 环回探测失败（rc=%d）：%s",
             result.returncode,
-            (result.stderr or "").strip().splitlines()[-1:] or "<no stderr>",
+            (result.stderr or "").strip().splitlines()[-1:] or "<无 stderr>",
         )
         return False
     except Exception as e:
-        logger.warning("WASAPI loopback probe raised: %s", e)
+        logger.warning("WASAPI 环回探测异常：%s", e)
         return False
 
 
@@ -188,19 +188,19 @@ def _find_loopback_device(ffmpeg: str) -> str | None:
     r = rank(best)
     if r >= 300:
         logger.warning(
-            "Only microphone-like DirectShow devices found; skipping audio. In Windows, "
-            "enable Stereo Mix (Recording tab → show disabled devices) or pass --audio-device."
+            "仅找到类似麦克风的 DirectShow 设备，跳过音频。请在 Windows 中"
+            "启用 Stereo Mix（录制选项卡 → 显示禁用的设备）或通过 --audio-device 指定。"
         )
         return None
     if r >= 50:
         logger.warning(
-            "Using %r — if the video has no desktop/game sound, route Windows playback "
-            "through VoiceMeeter or enable Stereo Mix and pass its exact name to --audio-device.",
+            "正在使用 %r — 若视频无桌面/游戏声音，请将 Windows 播放路由"
+            "至 VoiceMeeter 或启用 Stereo Mix，并将其准确名称传给 --audio-device。",
             best,
         )
     elif r > 10:
         logger.info(
-            "Auto-selected DirectShow audio %r — if silent, enable Stereo Mix or set --audio-device.",
+            "已自动选择 DirectShow 音频 %r — 若无声，请启用 Stereo Mix 或设置 --audio-device。",
             best,
         )
     return best
@@ -219,8 +219,8 @@ class FFmpegEncoder:
         self._has_nvenc = listed and nvenc_runtime_usable(self._ffmpeg_path)
         if listed and not self._has_nvenc:
             logger.warning(
-                "NVENC is built into FFmpeg but the GPU driver rejected it "
-                "(e.g. need NVIDIA driver 570+ for this FFmpeg). Using libx264."
+                "FFmpeg 已编译 NVENC 但 GPU 驱动拒绝使用 "
+                "（例如此 FFmpeg 需要 NVIDIA 570+ 驱动）。将使用 libx264。"
             )
         self._encoder = "h264_nvenc" if self._has_nvenc else "libx264"
         self._frame_size = 0
@@ -272,19 +272,18 @@ class FFmpegEncoder:
                 self._ffmpeg_path
             ) and _wasapi_loopback_usable(self._ffmpeg_path):
                 use_wasapi = True
-                logger.info("Audio: FFmpeg WASAPI loopback (default Windows playback).")
+                logger.info("音频：FFmpeg WASAPI 环回（默认 Windows 播放设备）。")
             elif _pyloop.loopback_usable():
                 use_pyloop = True
                 pyloop_port = _pyloop.free_tcp_port()
                 logger.info(
-                    "Audio: Python WASAPI loopback via soundcard "
-                    "(default speaker → TCP 127.0.0.1:%d → FFmpeg).",
+                    "音频：Python WASAPI 环回（soundcard，默认扬声器 → TCP 127.0.0.1:%d → FFmpeg）。",
                     pyloop_port,
                 )
             else:
                 logger.info(
-                    "Audio: no WASAPI loopback available "
-                    "(neither FFmpeg wasapi demuxer nor soundcard) — falling back to DirectShow."
+                    "音频：无可用 WASAPI 环回 "
+                    "（FFmpeg wasapi 解复用器与 soundcard 均不可用）— 回退至 DirectShow。"
                 )
                 dshow_device = _find_loopback_device(self._ffmpeg_path)
 
@@ -297,20 +296,19 @@ class FFmpegEncoder:
             self._audio_source = f"dshow:{dshow_device}"
             if not cfg.audio_device and "voicemeeter" in dshow_device.lower():
                 logger.error(
-                    "Auto-selected DirectShow %r is usually silent: it only has signal when "
-                    "Windows default playback is a VoiceMeeter *input* (or the app is routed there). "
-                    "Fix: install the `soundcard` Python package (already a project dep) so the "
-                    "Python WASAPI loopback path can be used, or pass --audio-device for "
-                    "Stereo Mix (enable in Settings → System → Sound → input devices), or use "
-                    "game-recorder --list-audio-devices to copy an exact name.",
+                    "自动选择的 DirectShow %r 通常无声：仅当 Windows 默认播放为 VoiceMeeter "
+                    "*输入*（或应用已路由至该处）时才有信号。"
+                    "修复：安装 `soundcard` Python 包（已是项目依赖）以使用 Python WASAPI 环回，"
+                    "或通过 --audio-device 指定 Stereo Mix（在 设置 → 系统 → 声音 → 输入设备 中启用），"
+                    "或运行 game-recorder --list-audio-devices 复制准确设备名。",
                     dshow_device,
                 )
         else:
             self._audio_source = None
             logger.warning(
-                "No usable audio capture device found — recording will be SILENT. "
-                "Check that the `soundcard` package imported OK (Python WASAPI loopback), "
-                "or enable Stereo Mix / install VB-CABLE."
+                "未找到可用音频捕获设备 — 录制将无声。"
+                "请确认 `soundcard` 包导入正常（Python WASAPI 环回），"
+                "或启用 Stereo Mix / 安装 VB-CABLE。"
             )
 
         cmd: list[str] = [self._ffmpeg_path, "-y", "-hide_banner", "-loglevel", "warning"]
@@ -374,11 +372,11 @@ class FFmpegEncoder:
         cmd.append(str(output_path))
 
         logger.info(
-            "Starting FFmpeg: encoder=%s audio=%s",
+            "正在启动 FFmpeg：编码器=%s 音频=%s",
             self._encoder,
-            self._audio_source or "<none>",
+            self._audio_source or "<无>",
         )
-        logger.debug("FFmpeg cmd: %s", " ".join(cmd))
+        logger.debug("FFmpeg 命令：%s", " ".join(cmd))
 
         self._proc = subprocess.Popen(
             cmd,
@@ -410,12 +408,11 @@ class FFmpegEncoder:
         try:
             connect_msg = q.get(timeout=_PYLOOP_STARTUP_TIMEOUT_S)
         except queue.Empty:
-            connect_msg = TimeoutError("loopback worker never reported a connect result")
+            connect_msg = TimeoutError("环回 worker 未报告连接结果")
 
         if isinstance(connect_msg, BaseException):
             logger.error(
-                "Python loopback failed to attach to FFmpeg (%s). Aborting this FFmpeg "
-                "process and continuing without audio.",
+                "Python 环回无法连接 FFmpeg（%s）。中止此 FFmpeg 进程，继续无音频录制。",
                 connect_msg,
             )
             self._abort_pyloop_and_ffmpeg()
@@ -424,18 +421,17 @@ class FFmpegEncoder:
         try:
             stream_msg = q.get(timeout=_PYLOOP_STARTUP_TIMEOUT_S)
         except queue.Empty:
-            stream_msg = TimeoutError("loopback worker connected but never opened the recorder")
+            stream_msg = TimeoutError("环回 worker 已连接但未打开录音器")
 
         if isinstance(stream_msg, BaseException):
             logger.error(
-                "Python loopback connected to FFmpeg but could not open the speaker "
-                "(%s). Aborting and continuing without audio.",
+                "Python 环回已连接 FFmpeg 但无法打开扬声器（%s）。中止并继续无音频录制。",
                 stream_msg,
             )
             self._abort_pyloop_and_ffmpeg()
             return
 
-        logger.info("Python loopback streaming to FFmpeg (s16le %d Hz x%d).",
+        logger.info("Python 环回正在向 FFmpeg 推流（s16le %d Hz x%d）。",
                     _PYLOOP_SAMPLERATE, _PYLOOP_CHANNELS)
 
     def _abort_pyloop_and_ffmpeg(self) -> None:
@@ -479,7 +475,7 @@ class FFmpegEncoder:
             return
         if len(frame_bytes) != self._frame_size:
             logger.warning(
-                "Dropping frame byte size %d != expected %d (WxHx3)",
+                "丢弃帧：字节大小 %d != 预期 %d（宽×高×3）",
                 len(frame_bytes),
                 self._frame_size,
             )
@@ -492,7 +488,7 @@ class FFmpegEncoder:
         except (BrokenPipeError, OSError) as e:
             if not self._stdin_broken_logged:
                 self._stdin_broken_logged = True
-                logger.error("FFmpeg stdin write failed: %s", e)
+                logger.error("FFmpeg stdin 写入失败：%s", e)
                 self._dump_stderr()
 
     def stop(self) -> None:
@@ -509,7 +505,7 @@ class FFmpegEncoder:
                 self._pyloop_stop.set()
             self._proc.wait(timeout=30)
         except subprocess.TimeoutExpired:
-            logger.warning("FFmpeg did not exit in time, killing")
+            logger.warning("FFmpeg 未及时退出，正在强制终止")
             self._proc.kill()
         finally:
             if self._proc.returncode and self._proc.returncode != 0:
@@ -517,7 +513,7 @@ class FFmpegEncoder:
             if self._pyloop_thread is not None:
                 self._pyloop_thread.join(timeout=3.0)
                 if self._pyloop_thread.is_alive():
-                    logger.warning("Python loopback worker did not exit in time.")
+                    logger.warning("Python 环回 worker 未及时退出。")
             self._pyloop_thread = None
             self._pyloop_stop = None
             self._pyloop_queue = None
@@ -534,7 +530,7 @@ class FFmpegEncoder:
             except Exception:
                 pass
         if err_text.strip():
-            logger.error("FFmpeg stderr:\n%s", err_text)
+            logger.error("FFmpeg stderr：\n%s", err_text)
 
 
 def _below_normal_priority() -> int:

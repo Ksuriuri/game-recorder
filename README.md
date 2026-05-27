@@ -11,6 +11,8 @@
 - **硬件编码**：自动检测 NVIDIA NVENC，使用 GPU 专用编码单元，不占用 CUDA 核心；无 NVENC 时回退到 `libx264 ultrafast`，默认限制 2 个 x264 线程，避免网吧机器上抢占游戏 CPU
 - **统一时钟**：所有数据流共享 `perf_counter_ns` 高精度 T0 基准，同步误差 < 1 帧（33ms）
 - **可选分段保存**：通过 `--segment-minutes N` 每隔 N 分钟落盘一对 `mp4 + jsonl` 文件（默认关闭，推荐保持关闭以获得无缝音视频；启用时段间会有约几百毫秒的空隙）
+- **录制状态悬浮窗**：屏幕右上角显示当前段已录制时长与 **累计有效视频时长**（全库汇总，每次录制结束后刷新）；默认后台启动、无黑色终端，通过悬浮窗 **退出** 正常结束程序
+- **自动停止录制**：录制过程中仅允许 **WASD** 移动人物；**10 秒未按 WASD** 或 **按下其他键盘按键**（鼠标移动/点击不算）会自动结束当前段并弹出居中提示，**连按两次大写键（Caps Lock）** 重新开始录制后提示关闭
 
 ## 系统要求
 
@@ -29,7 +31,7 @@
 2. 通过 uv 安装托管的 Python 3.11
 3. 下载 FFmpeg（[BtbN gpl 构建](https://github.com/BtbN/FFmpeg-Builds)，约 140 MB，含 NVENC、libx264、DirectShow 等编码器/复用器）
 4. 创建 `.venv` 并 `uv pip install -e .`（`soundcard` 这个 Python 包就是默认音频通路的关键，pyproject.toml 里已经声明）
-5. 生成启动脚本 `run.bat`
+5. 生成启动脚本 `run.bat`（默认无窗口后台运行；`--console` 显示终端；`--list-audio-devices` / `--no-overlay` 自动带控制台）
 
 > **关于音频**：BtbN / 上游 win64 静态构建几乎都**没有编译 `wasapi` indev**，所以本工具的默认音频通路其实是 Python 端的 `soundcard` WASAPI loopback（抓默认扬声器混音 → s16le → 本机 TCP → FFmpeg）。这条路径不依赖 FFmpeg 构建带不带 wasapi、也不依赖 Stereo Mix 是否启用，是网吧场景能开箱跑通的关键。如果你换的 FFmpeg 构建恰好带 `wasapi` indev，会自动优先用单进程的 wasapi（一点 CPU 优化），但不是必须。
 
@@ -102,7 +104,7 @@ game-recorder/
 1. U 盘把 zip 拷过去
 2. 解压到 **`D:\game-recorder\`**（**别放 C 盘**——网吧的还原系统重启就把 C 盘清回原状）
 3. 双击 `install.bat`：横幅出现 `Mode : OFFLINE (restoring from local wheels/)` 即说明检测到离线包；脚本会用 `--offline --no-index --find-links wheels\` 重建 `.venv`，全程不碰网络，约 10 秒
-4. 双击 `run.bat` → 按 Ctrl+Alt+R 开始录
+4. 双击 `run.bat` → 右上角悬浮窗出现 → **连按两次 Caps Lock（大写键）** 开始/停止录制 → 结束时点悬浮窗 **退出**
 
 整个 zip 自包含，不写注册表，不写 `%LOCALAPPDATA%` / `%APPDATA%`，卸载就是删目录。
 
@@ -112,7 +114,7 @@ game-recorder/
 
 按顺序检查，**90% 的网吧场景在第 1 步就能定位**：
 
-1. **看启动日志**：`run.bat` 启动时如果出现这两条，音频通路就没问题，问题在别处（比如游戏静音）：
+1. **看启动日志**：`run.bat` 默认不显示终端，请用 `run.bat --console` 启动；若出现下面两条，音频通路就没问题，问题在别处（比如游戏静音）：
    ```
    Audio: Python WASAPI loopback via soundcard (default speaker → TCP 127.0.0.1:xxxxx → FFmpeg).
    Python loopback streaming to FFmpeg (s16le 48000 Hz x2).
@@ -122,7 +124,7 @@ game-recorder/
    Python soundcard loopback (default speaker): yes
    ```
    - `yes` 但实际录到静音 → 通常是 Windows "声音 → 输出" 的默认设备选错了（比如默认到了关掉的 HDMI 显示器），改一下默认输出设备
-   - `no` → soundcard 包没装好，或者驱动异常；`run.bat -v` 看 debug 日志里的 `soundcard loopback not available: ...`
+   - `no` → soundcard 包没装好，或者驱动异常；`run.bat --console -v` 看调试日志里的 `soundcard loopback not available: ...`
 3. **看 `meta.json` 的 `audio_source` 字段**判断实际走了哪条路径：
    - `"soundcard:default"` → Python loopback（最常见、最可靠）
    - `"wasapi:default"` → 走了 FFmpeg 原生 wasapi（极少数构建）
@@ -135,14 +137,21 @@ game-recorder/
 ### Windows 一键安装后
 
 ```bat
-:: 启动后按 Ctrl+Alt+R 开始/停止录制
+:: 默认：后台无终端，右上角悬浮窗，连按两次大写键切换录制，点「退出」结束
 run.bat
+
+:: 显示黑色终端（看启动日志、Ctrl+C 退出、配合 -v 调试）
+run.bat --console
 
 :: 立即开始录制（无需热键）
 run.bat --no-hotkey
 
 :: 自定义参数
 run.bat --fps 30 --quality 23 --output ./data --mouse-hz 30 --segment-minutes 5
+
+:: 调整空闲自动停止阈值（秒）；0 = 关闭“长时间未移动”检测（非 WASD 按键检测仍生效）
+run.bat --idle-timeout 15
+run.bat --idle-timeout 0
 
 ::: GTA5 / 网吧机器卡顿时，降低采集与软件编码压力
 run.bat --fps 20 --quality 28 --x264-threads 1
@@ -151,14 +160,26 @@ run.bat --fps 20 --quality 28 --x264-threads 1
 run.bat --capture-mode foreground
 run.bat --capture-mode screen
 
-:: 调试模式
-run.bat -v
+:: 调试模式（需带 --console 才能在终端看到日志）
+run.bat --console -v
+
+:: 列出音频设备（自动打开控制台）
+run.bat --list-audio-devices
 ```
+
+#### `run.bat` 启动方式
+
+| 方式 | 命令 | 说明 |
+|------|------|------|
+| 默认（推荐） | `run.bat` | `pythonw` 后台运行，无黑色终端；用悬浮窗 **退出** 结束 |
+| 控制台 | `run.bat --console` … | 显示终端，可用 **Ctrl+C** 退出；`--console` 后的参数原样传给 `game-recorder` |
+| 自动控制台 | `run.bat --list-audio-devices` | 需要打印设备列表 |
+| 自动控制台 | `run.bat --no-overlay` | 无悬浮窗时没有「退出」入口，保留终端供 **Ctrl+C** 退出 |
 
 ### 手动安装后
 
 ```bash
-# 启动后按 Ctrl+Alt+R 开始/停止录制
+# 启动后连按两次 Caps Lock（大写键）开始/停止录制
 game-recorder
 
 # 立即开始录制（无需热键）
@@ -166,6 +187,10 @@ game-recorder --no-hotkey
 
 # 自定义参数
 game-recorder --fps 30 --quality 23 --output ./data --mouse-hz 30 --segment-minutes 5
+
+# 调整空闲自动停止阈值（秒）；0 = 关闭“长时间未移动”检测
+game-recorder --idle-timeout 15
+game-recorder --idle-timeout 0
 
 # GTA5 / 网吧机器卡顿时，降低采集与软件编码压力
 game-recorder --fps 20 --quality 28 --x264-threads 1
@@ -190,6 +215,7 @@ game-recorder -v
 | `--x264-threads` | 2 | 无 NVENC 时 `libx264` 软件编码可用的 CPU 线程数；游戏卡顿时可设为 `1` |
 | `--segment-minutes` | 0 | 每隔多少分钟自动切分一段 mp4 + jsonl，`0`（默认）表示关闭分段、整次录制写入单文件 |
 | `--capture-mode` | `auto` | `auto`：自动捕获前台的大客户区窗口，否则整屏；`foreground`：尽量强制前台客户区；`screen`：整屏 |
+| `--idle-timeout` | 10 | 未按 WASD 移动人物超过 N 秒则自动停止录制；`0` 关闭此项（按下非 WASD 键仍会停止） |
 | `--no-hotkey` | - | 跳过热键，立即开始录制 |
 | `--no-overlay` | - | 关闭游戏内录制状态悬浮窗 |
 | `-v` | - | 输出调试日志 |
@@ -198,27 +224,57 @@ game-recorder -v
 
 | 按键 | 功能 |
 |------|------|
-| Ctrl+Alt+R | 开始/停止录制 |
-| Ctrl+C | 停止录制并退出程序 |
+| 连按两次 Caps Lock（大写键） | 开始/停止录制 |
+| Ctrl+C | 停止录制并退出程序（`--console` 模式） |
+| 悬浮窗「退出」 | 停止录制并退出程序（默认后台模式） |
 
-`Ctrl+Alt+R` 会先走 Windows 全局热键注册，并带有按键轮询兜底；全屏游戏或覆盖层没有把热键消息发出来时，仍有机会被检测到。
+**连按两次 Caps Lock（大写键）** 通过全局按键轮询检测；全屏游戏下一般仍可用。手动停止/重新开始录制时按下的 **大写键不会** 触发“非 WASD 按键”自动停止。
+
+### 自动停止录制
+
+为采集“纯人物移动”片段，录制期间有两条自动停止规则（均会保存当前段并弹出居中提示）：
+
+| 触发条件 | 提示文案（摘要） |
+|----------|------------------|
+| **10 秒**内未按 **WASD**（按住 WASD 也算有操作） | 由于长时间未移动人物角色，本次录制已自动结束 |
+| 按下 **非 WASD** 的键盘按键（**鼠标移动、点击、滚轮不算**） | 检测到按下了非人物移动的按键，本次录制已自动结束 |
+
+提示框会一直保留，直到再次 **连按两次 Caps Lock（大写键）** 开始新一段录制后自动关闭。可用 `--idle-timeout N` 调整空闲阈值，或 `--idle-timeout 0` 仅关闭“长时间未移动”检测；**非 WASD 按键检测无法单独关闭**。
 
 ### 录制状态悬浮窗
 
-默认会在屏幕右上角显示一个小悬浮窗：未录制时显示 `未开始录制` 和开始录制提示，录制时显示 `正在录制`、已录制时长和停止提示。悬浮窗是鼠标穿透的，不会挡住游戏点击；窗口模式下会一直显示在右上角，不会在录制开始后自动隐藏。
+默认在屏幕右上角显示一个小悬浮窗（状态区鼠标穿透，右上角 **退出** 可正常结束程序）。在 Windows 10 2004 及以上，悬浮窗与自动停止提示会通过系统 API 标记为「不参与屏幕捕获」：你仍能在显示器上看到，但 DXGI 录屏（本程序使用的 DXcam）一般不会把它录进 `mp4`。
 
-注意：独占全屏游戏可能不允许普通桌面窗口盖在游戏上方；建议把游戏显示模式改成“窗口模式 / 无边框窗口”。不需要悬浮窗时可以用 `run.bat --no-overlay`。
+| 状态 | 显示内容 |
+|------|----------|
+| 未录制 | `未开始录制`、开始录制提示、**累计有效视频时长** |
+| 录制中 | `正在录制`、当前段 **已录制** 时长（每 0.5 秒刷新）、停止提示、**累计有效视频时长**（冻结为上次结束时的值，不随本段增长） |
+
+**累计有效视频时长** 的含义与更新规则：
+
+- **统计范围**：`--output` 目录（默认 `recordings/`）下，所有已保存 session 里各段 `mp4` 的有效时长之和。
+- **不算入**：时长不足被丢弃的 session、`*_inputs.mp4` 等衍生文件；**不读取 mp4**（用 `meta.json` 里 `segments[].frame_count ÷ fps` 汇总，与画面长度一致）。
+- **“有效”**：因 **空闲自动停止**（长时间未按 WASD）结束时，会从末段视频裁掉末尾约 `--idle-timeout` 秒对应的帧（`meta.json` 的 `idle_tail_trim_frames`）；若尚未裁剪，则按 `duration_s − idle_timeout_s` 计入累计。手动停止或其它自动停止原因按实际视频时长计入。
+- **何时刷新**：仅在**每次录制成功落盘并写入 `library.json` 之后**更新（`session.stop()` 完成之后）；录制过程中不读盘、不叠加本段秒数。
+- **索引文件**：`recordings/library.json` 由程序维护；首次启动或文件缺失时，后台扫描所有 `session_*/meta.json` 重建一次。
+
+自动停止时会在屏幕**居中偏上**弹出红色醒目提示（见上一节），并周期性置顶，尽量显示在游戏窗口之上。
+
+`run.bat` 默认用无窗口方式在后台启动（不弹出黑色终端）。需要看启动日志或调试时用 `run.bat --console`；`run.bat --list-audio-devices` 会自动带控制台输出。
+
+注意：独占全屏游戏可能不允许普通桌面窗口盖在游戏上方；建议把游戏显示模式改成“窗口模式 / 无边框窗口”。不需要悬浮窗时可以用 `run.bat --no-overlay`（会自动保留控制台，以便 Ctrl+C 退出；自动停止时改为在控制台打印相同提示）。
 
 ## 多机 / 网吧部署注意事项
 
 针对"把整个目录拷到任意 Windows 机器（如网吧）就能直接录"的场景：
 
 - **不要装在系统盘**。`install.bat` 会检测当前盘符，若在 `C:\` 会要求二次确认。网吧普遍装有"还原系统 / 影子系统"，重启后 C 盘会被清回原状，含本工具和所有录制文件。建议放在 `D:\game-recorder\` 之类。
-- **音频零配置（重要）**：默认链路是 **Python `soundcard` 包打开默认扬声器的 WASAPI loopback**，把 s16le PCM 通过本机 TCP 喂给 FFmpeg 一起 mux 进 mp4。无需启用 Stereo Mix、无需装 VB-CABLE/VoiceMeeter、不需要管理员权限、对 FFmpeg 构建零要求。启动后日志里看到 `Audio: Python WASAPI loopback via soundcard ...` 和 `Python loopback streaming to FFmpeg ...` 两条就说明声音通路 OK；最终 `meta.json` 的 `audio_source` 是 `"soundcard:default"`。
+- **后台常驻**：`run.bat` 默认不弹终端，适合网吧双击即用；排错或确认音频时用 `run.bat --console` 看启动日志。结束程序请点悬浮窗 **退出**，不要到任务管理器里强杀（可能丢未落盘的段）。
+- **音频零配置（重要）**：默认链路是 **Python `soundcard` 包打开默认扬声器的 WASAPI loopback**，把 s16le PCM 通过本机 TCP 喂给 FFmpeg 一起 mux 进 mp4。无需启用 Stereo Mix、无需装 VB-CABLE/VoiceMeeter、不需要管理员权限、对 FFmpeg 构建零要求。用 `run.bat --console` 启动后，日志里看到 `Audio: Python WASAPI loopback via soundcard ...` 和 `Python loopback streaming to FFmpeg ...` 两条就说明声音通路 OK；最终 `meta.json` 的 `audio_source` 是 `"soundcard:default"`。
 - **想确认这台机器能不能录到声**：到目录下跑 `run.bat --list-audio-devices`，关注两行：
   - `Python soundcard loopback (default speaker): yes`  → 能用，到此为止，无需任何额外配置
   - `Python soundcard loopback (default speaker): no`   → 极少数情况（驱动问题 / 默认设备配置异常），再考虑 enable Stereo Mix 或 `--audio-device`
-- **录制前别动音频设备**：录制开始时把"默认播放设备"快照下来，录制中如果**插拔耳机 / 切换输出设备**导致 Windows 切换默认设备，本次录制会继续录原设备（很可能从这一刻起变静音）。需要换设备的话，请先 Ctrl+Alt+R 停止再切。
+- **录制前别动音频设备**：录制开始时把"默认播放设备"快照下来，录制中如果**插拔耳机 / 切换输出设备**导致 Windows 切换默认设备，本次录制会继续录原设备（很可能从这一刻起变静音）。需要换设备的话，请先 **连按两次大写键** 停止再切。
 - **GTA 等使用 shared-mode 音频的游戏可直接录**。极少数**强制独占模式**的应用会让 WASAPI loopback 拿到静音；本工具自动降级到 DirectShow，再不行就静音录制（`meta.json` 的 `audio_source` 会是 `null`，便于事后过滤）。
 - **NVENC 跨机泛化**：网吧 GPU 五花八门，不一定是 N 卡。代码里已经做了 NVENC 运行时探测：编译启用但驱动不给开 → 自动落到 `libx264 ultrafast`，并默认限制 `--x264-threads 2`。如果 GTA5 等游戏仍然卡，优先用 `run.bat --fps 20 --quality 28 --x264-threads 1`。
 - **切屏 / 全屏切换**：DXGI 在 Alt+Tab 或游戏切全屏时可能短暂报告不同分辨率。录制器会把临时尺寸缩放回本次 session 的初始尺寸，避免视频花屏或被切成多段；真正 0 帧的启动空段会自动清理。
@@ -239,6 +295,7 @@ game-recorder -v
 
 ```
 recordings/
+  library.json                          # 全库累计有效视频时长索引（悬浮窗读取）
   session_20260411_143022/
     20260411_143022_0_42130.mp4
     20260411_143022_0_42130.jsonl
@@ -310,9 +367,32 @@ recordings/
       "video": "20260411_143022_36000_42130.mp4",
       "actions": "20260411_143022_36000_42130.jsonl"
     }
-  ]
+  ],
+  "auto_stop_reason": null,
+  "idle_timeout_s": 10.0,
+  "idle_tail_trim_frames": 0
 }
 ```
+
+- `auto_stop_reason`：`null` 为手动停止；`"idle"` / `"forbidden_key"` 表示自动停止原因（影响累计有效时长的计算方式，见上文悬浮窗说明）。
+- `idle_tail_trim_frames`：空闲自动停止后从末段裁掉的帧数；`> 0` 时累计时长直接按裁剪后的 `segments` 帧数计算。
+
+### library.json
+
+位于输出目录根部的轻量索引，供悬浮窗快速读取 **累计有效视频时长**，无需扫描全部 `meta.json` 或解析 mp4：
+
+```json
+{
+  "sessions": {
+    "session_20260411_143022": {
+      "duration_s": 1394.3,
+      "video_count": 3
+    }
+  }
+}
+```
+
+每次 session 成功保存后更新对应条目；删除某个 `session_*` 目录后若累计不准，可删除 `library.json`，下次启动会自动重建。
 
 ## 训练数据读取
 
@@ -348,6 +428,7 @@ def iter_session(session_dir: str):
 
 ```
 main.py          CLI 入口，热键监听
+  ├─ overlay.py  右上角状态悬浮窗 + 自动停止居中提示（鼠标穿透 + 「退出」）
   └─ session.py  Session 生命周期，统一 T0 时钟
        ├─ capture/screen.py      DXcam 帧捕获循环
        ├─ capture/input_hook.py        Win32 Raw Input 键鼠捕获
@@ -355,7 +436,9 @@ main.py          CLI 入口，热键监听
        ├─ encoder/python_loopback.py   默认音频通路：soundcard 抓默认扬声器 → s16le → 本机 TCP → FFmpeg
        └─ storage/
             ├─ action_writer.py        JSONL 缓冲写入
-            └─ session_writer.py       元数据序列化
+            ├─ session_writer.py       meta.json 序列化
+            ├─ library_index.py        library.json 累计有效视频时长索引
+            └─ idle_trim.py            空闲自动停止末段裁剪
 ```
 
 ## 性能开销（1080p@30fps）
@@ -366,5 +449,6 @@ main.py          CLI 入口，热键监听
 | FFmpeg NVENC 编码 | ~2% 单核 | 编码单元（不影响游戏） | 8-12 MB/s |
 | 音频（soundcard WASAPI loopback） | ~0.3% 单核 | - | - |
 | Raw Input 输入捕获 | ~0.1% | - | < 0.1 MB/s |
+| 状态悬浮窗 | 可忽略 | - | 录制结束后读一次 `library.json` |
 | FFmpeg libx264 fallback | 受 `--x264-threads` 限制，默认最多 2 线程 | - | 取决于 `--quality` |
 | **合计** | **~5%** | **~0%** | **~10 MB/s** |

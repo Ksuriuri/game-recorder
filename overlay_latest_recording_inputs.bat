@@ -1,11 +1,20 @@
 @echo off
+chcp 65001 >nul
+set "PYTHONUTF8=1"
 setlocal EnableExtensions EnableDelayedExpansion
 
 cd /d "%~dp0"
 
+rem --- 输出压缩（减小 *_inputs.mp4 体积；可按需修改）---
+set "OVERLAY_MAX_WIDTH=960"
+set "OVERLAY_CRF=26"
+set "OVERLAY_PRESET=veryfast"
+set "OVERLAY_AUDIO_BITRATE=64k"
+set "OVERLAY_EXTRA=--max-width %OVERLAY_MAX_WIDTH% --crf %OVERLAY_CRF% --preset %OVERLAY_PRESET% --audio-bitrate %OVERLAY_AUDIO_BITRATE%"
+
 set "RECORDINGS=%CD%\recordings"
 if not exist "%RECORDINGS%\" (
-    echo ERROR: recordings folder not found: "%RECORDINGS%"
+    echo 错误：找不到 recordings 文件夹："%RECORDINGS%"
     pause
     exit /b 1
 )
@@ -15,7 +24,7 @@ for /f "delims=" %%D in ('dir /b /ad /o-n "%RECORDINGS%" 2^>nul') do (
 )
 
 if not defined LATEST (
-    echo ERROR: no session folders found under "%RECORDINGS%"
+    echo 错误："%RECORDINGS%" 下未找到会话文件夹
     pause
     exit /b 1
 )
@@ -26,13 +35,15 @@ if not errorlevel 1 (
 ) else if exist "%CD%\.venv\Scripts\python.exe" (
     set "PYTHON_EXE=%CD%\.venv\Scripts\python.exe"
 ) else (
-    echo ERROR: could not find uv in PATH or project Python at ".venv\Scripts\python.exe"
+    echo 错误：PATH 中未找到 uv，且项目 Python ".venv\Scripts\python.exe" 不存在
     pause
     exit /b 1
 )
 
-echo Latest recording folder:
+echo 最新录制文件夹：
 echo   "%LATEST%"
+echo.
+echo 输出压缩：最大宽度 %OVERLAY_MAX_WIDTH%px，CRF %OVERLAY_CRF%，preset %OVERLAY_PRESET%，音频 %OVERLAY_AUDIO_BITRATE%
 echo.
 
 set "COUNT=0"
@@ -48,15 +59,15 @@ for /f "delims=" %%F in ('dir /b /a-d /on "%LATEST%\*.mp4" 2^>nul') do (
         rem Skip temporary HUD files.
     ) else if exist "%LATEST%\!BASE!.jsonl" (
         set /a COUNT+=1
-        echo [!COUNT!] Overlay inputs on:
+        echo [!COUNT!] 叠加输入 HUD：
         echo   "!FULL!"
         if defined USE_UV (
-            uv run python scripts/overlay_inputs_on_video.py "!FULL!"
+            uv run python scripts/overlay_inputs_on_video.py !OVERLAY_EXTRA! "!FULL!"
         ) else (
-            "!PYTHON_EXE!" scripts\overlay_inputs_on_video.py "!FULL!"
+            "!PYTHON_EXE!" scripts\overlay_inputs_on_video.py !OVERLAY_EXTRA! "!FULL!"
         )
         if errorlevel 1 (
-            echo ERROR: overlay failed for "!FULL!"
+            echo 错误：叠加失败 "!FULL!"
             set "FAILED=1"
         )
         echo.
@@ -64,17 +75,17 @@ for /f "delims=" %%F in ('dir /b /a-d /on "%LATEST%\*.mp4" 2^>nul') do (
 )
 
 if "%COUNT%"=="0" (
-    echo ERROR: no mp4 files with matching jsonl sidecars found in "%LATEST%"
+    echo 错误："%LATEST%" 中未找到带匹配 jsonl 的 mp4 文件
     pause
     exit /b 1
 )
 
 if "%FAILED%"=="1" (
-    echo Done with errors.
+    echo 完成，但有错误。
     pause
     exit /b 1
 )
 
-echo Done. Generated *_inputs.mp4 files in:
+echo 完成。已生成 *_inputs.mp4 文件于：
 echo   "%LATEST%"
 pause

@@ -81,7 +81,7 @@ def resolve_capture_target(
     title = get_foreground_window_title()
     region = _foreground_client_region(output_width, output_height)
     if region is None:
-        logger.info("Capture target: full screen (no usable foreground client window)")
+        logger.info("捕获目标：全屏（无可用前台客户区窗口）")
         return CaptureTarget(region=None, title=title, source="screen")
 
     output_area = max(1, output_width * output_height)
@@ -97,12 +97,12 @@ def resolve_capture_target(
     )
 
     if force_foreground and large_enough_for_forced:
-        logger.info("Capture target: foreground client %s title=%r", region, title)
+        logger.info("捕获目标：前台客户区 %s 标题=%r", region, title)
         return CaptureTarget(region=region, title=title, source="foreground")
 
     if normalized == "auto" and large_enough_for_auto:
         logger.info(
-            "Capture target: auto foreground client %s (%.0f%% of output) title=%r",
+            "捕获目标：自动前台客户区 %s（占输出 %.0f%%）标题=%r",
             region,
             area_ratio * 100,
             title,
@@ -110,7 +110,7 @@ def resolve_capture_target(
         return CaptureTarget(region=region, title=title, source="auto_foreground")
 
     logger.info(
-        "Capture target: full screen (foreground client %dx%d is %.0f%% of output)",
+        "捕获目标：全屏（前台客户区 %dx%d 仅占输出 %.0f%%）",
         region.width,
         region.height,
         area_ratio * 100,
@@ -149,5 +149,5 @@ def _foreground_client_region(output_width: int, output_height: int) -> CaptureR
             return None
         return CaptureRegion(left=left, top=top, right=right, bottom=bottom)
     except Exception as exc:
-        logger.debug("Foreground capture-region detection failed: %s", exc)
+        logger.debug("前台捕获区域检测失败：%s", exc)
         return None

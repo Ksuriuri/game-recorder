@@ -1,0 +1,4 @@
+stdout=<_io.TextIOWrapper name='<stdout>' mode='w' encoding='utf-8'>
+stderr=<_io.TextIOWrapper name='<stderr>' mode='w' encoding='utf-8'>
+import main
+call main
