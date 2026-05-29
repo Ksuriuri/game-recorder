@@ -176,19 +176,24 @@ if defined MANAGED_PYTHON_EXE (
 )
 if errorlevel 1 goto :fail_venv
 
-if "%OFFLINE_MODE%"=="1" (
-    set "PROJECT_WHEEL="
-    for %%F in ("%WHEELS_DIR%\game_recorder-*.whl") do set "PROJECT_WHEEL=%%F"
-    if defined PROJECT_WHEEL (
-        echo       离线模式：从 wheel 安装 game-recorder ^(不访问 PyPI^)。
-        "%UV_EXE%" pip install --offline --no-index --find-links "%WHEELS_DIR%" --python "%VENV_DIR%\Scripts\python.exe" "%PROJECT_WHEEL%"
-    ) else (
-        echo       离线模式：从 "%WHEELS_DIR%" editable 安装 ^(不访问 PyPI^)。
-        "%UV_EXE%" pip install --offline --no-index --find-links "%WHEELS_DIR%" --python "%VENV_DIR%\Scripts\python.exe" -e .
-    )
-) else (
-    "%UV_EXE%" pip install --python "%VENV_DIR%\Scripts\python.exe" -e .
-)
+if "%OFFLINE_MODE%"=="1" goto :install_offline
+"%UV_EXE%" pip install --python "%VENV_DIR%\Scripts\python.exe" -e .
+goto :install_done
+
+:install_offline
+REM Do not set PROJECT_WHEEL inside (...) — CMD expands %% vars at block parse time.
+set "PROJECT_WHEEL="
+for %%F in ("%WHEELS_DIR%\game_recorder-*.whl") do set "PROJECT_WHEEL=%%F"
+if not defined PROJECT_WHEEL goto :install_offline_editable
+echo       离线模式：从 wheel 安装 game-recorder ^(不访问 PyPI^)。
+"%UV_EXE%" pip install --offline --no-index --find-links "%WHEELS_DIR%" --python "%VENV_DIR%\Scripts\python.exe" "%PROJECT_WHEEL%"
+goto :install_done
+
+:install_offline_editable
+echo       离线模式：从 "%WHEELS_DIR%" editable 安装 ^(不访问 PyPI^)。
+"%UV_EXE%" pip install --offline --no-index --find-links "%WHEELS_DIR%" --python "%VENV_DIR%\Scripts\python.exe" -e .
+
+:install_done
 if errorlevel 1 goto :fail_install
 
 set "VERIFY_PY=%VENV_DIR%\Scripts\python.exe"
