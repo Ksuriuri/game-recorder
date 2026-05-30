@@ -11,9 +11,11 @@ import time
 logger = logging.getLogger(__name__)
 
 
-def replace_existing_instance() -> None:
+def replace_existing_instance(*, skip_if_continuing: bool = True) -> None:
     """Terminate other game-recorder python processes before this one starts."""
     if sys.platform != "win32":
+        return
+    if skip_if_continuing and "--continuing" in sys.argv:
         return
     pid = os.getpid()
     ps = (

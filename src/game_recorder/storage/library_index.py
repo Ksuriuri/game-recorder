@@ -84,7 +84,7 @@ def effective_duration_s(
     violent_duration_s: float = 0.0,
 ) -> float:
     """Wall/video duration minus auto-stop tail (idle wait or violent-input window)."""
-    if auto_stop_reason == "idle" and idle_timeout_s > 0:
+    if auto_stop_reason in ("idle", "stuck") and idle_timeout_s > 0:
         return max(0.0, wall_duration_s - float(idle_timeout_s))
     if auto_stop_reason == "violent" and violent_duration_s > 0:
         return max(0.0, wall_duration_s - float(violent_duration_s))

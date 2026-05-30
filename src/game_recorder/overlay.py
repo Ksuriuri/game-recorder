@@ -19,12 +19,18 @@ logger = logging.getLogger(__name__)
 Command = (
     tuple[Literal["recording"], bool]
     | tuple[Literal["stop"]]
-    | tuple[Literal["auto_stop_notice"], Literal["idle", "forbidden_key", "violent"], str]
+    | tuple[
+        Literal["auto_stop_notice"],
+        Literal["idle", "stuck", "forbidden_key", "violent"],
+        str,
+        str | None,
+    ]
 )
 
 _AUTO_STOP_HEADLINES: dict[str, tuple[str, str]] = {
     "idle": ("由于长时间未移动人物角色", "本次录制已自动结束"),
-    "forbidden_key": ("检测到按下了非人物移动的按键", "本次录制已自动结束"),
+    "stuck": ("由于 WASD 按键状态长时间未变化且无鼠标移动", "本次录制已自动结束"),
+    "forbidden_key": ("检测到按下了非人物移动的按键或点击了鼠标", "本次录制已自动结束"),
     "violent": ("由于操作过于剧烈", "本次录制已自动结束"),
 }
 
@@ -71,11 +77,12 @@ class RecordingStatusOverlay:
 
     def show_auto_stop_notice(
         self,
-        reason: Literal["idle", "forbidden_key", "violent"],
+        reason: Literal["idle", "stuck", "forbidden_key", "violent"],
         restart_line: str,
+        extra_line: str | None = None,
     ) -> None:
         if self._thread and self._thread.is_alive():
-            self._commands.put(("auto_stop_notice", reason, restart_line))
+            self._commands.put(("auto_stop_notice", reason, restart_line, extra_line))
 
     def stop(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -152,8 +159,9 @@ class RecordingStatusOverlay:
                 notice_window = None
 
         def show_auto_stop_notice(
-            reason: Literal["idle", "forbidden_key", "violent"],
+            reason: Literal["idle", "stuck", "forbidden_key", "violent"],
             restart_line: str,
+            extra_line: str | None = None,
         ) -> None:
             nonlocal notice_window
             dismiss_notice()
@@ -165,7 +173,9 @@ class RecordingStatusOverlay:
             frame = tk.Frame(notice, bg="#8b0000", padx=28, pady=22)
             frame.pack()
             headline = _AUTO_STOP_HEADLINES[reason]
-            lines = (*headline, restart_line)
+            lines: tuple[str, ...] = (*headline, restart_line)
+            if extra_line:
+                lines = (*lines, extra_line)
             for i, line in enumerate(lines):
                 tk.Label(
                     frame,
@@ -175,7 +185,7 @@ class RecordingStatusOverlay:
                     font=("Microsoft YaHei UI", 16 if i == 0 else 15, "bold"),
                     wraplength=560,
                     justify="center",
-                ).pack(pady=(0, 10 if i < 2 else 0))
+                ).pack(pady=(0, 10 if i < len(lines) - 1 else 0))
             notice.update_idletasks()
             w = notice.winfo_reqwidth()
             h = notice.winfo_reqheight()
@@ -279,7 +289,8 @@ class RecordingStatusOverlay:
                     if cmd[0] == "recording":
                         apply_recording(cmd[1])
                     if cmd[0] == "auto_stop_notice":
-                        show_auto_stop_notice(cmd[1], cmd[2])
+                        extra = cmd[3] if len(cmd) > 3 else None
+                        show_auto_stop_notice(cmd[1], cmd[2], extra)
                     if cmd[0] == "library_ready":
                         update_status_text()
             except queue.Empty:

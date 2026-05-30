@@ -43,7 +43,7 @@ class Config:
     # rotation currently introduces a sub-second video/audio gap).
     segment_seconds: int = 0
 
-    # Stop recording when no WASD key activity for this many seconds. 0 = off.
+    # Stop when no WASD activity, or WASD state unchanged with no mouse move, for this many seconds. 0 = off.
     idle_timeout_s: float = 10.0
 
     # Stop when high-frequency WASD or mouse shaking lasts this many seconds. 0 = off.

@@ -16,6 +16,7 @@ import argparse
 import ctypes
 import ctypes.wintypes as wt
 import logging
+import os
 import queue
 import sys
 import threading
@@ -35,7 +36,9 @@ from game_recorder.hotkeys import (
 )
 from game_recorder.overlay import RecordingStatusOverlay
 from game_recorder.process_guard import replace_existing_instance
+from game_recorder.relaunch import CONTINUING_ARG, relaunch_process
 from game_recorder.session import AutoStopReason, Session
+from game_recorder.storage.pending_notice import PendingAutoStopNotice, consume_pending_notice, write_pending_notice
 
 logger = logging.getLogger(__name__)
 
@@ -107,8 +110,6 @@ def _hotkey_listener(
 
 
 def main() -> None:
-    replace_existing_instance()
-
     parser = argparse.ArgumentParser(
         prog="game-recorder",
         description="游戏数据采集：同步录制视频、音频与键鼠操作，用于世界模型训练。",
@@ -172,7 +173,10 @@ def main() -> None:
         "--idle-timeout",
         type=float,
         default=10.0,
-        help="未按 WASD 移动人物超过 N 秒则自动停止录制（默认：10，0 = 关闭）",
+        help=(
+            "超过 N 秒未按 WASD，或超过 N 秒 WASD 组合不变且无鼠标移动，"
+            "则自动停止（默认：10，0 = 关闭这两项）"
+        ),
     )
     parser.add_argument("-v", "--verbose", action="store_true", help="输出调试日志")
     parser.add_argument(
@@ -180,7 +184,15 @@ def main() -> None:
         action="store_true",
         help="列出 --audio-device 可用的 DirectShow 设备名，并显示 WASAPI 支持情况后退出",
     )
+    parser.add_argument(
+        CONTINUING_ARG,
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     args = parser.parse_args()
+
+    if not args.continuing:
+        replace_existing_instance()
 
     if args.list_audio_devices:
         from game_recorder.config import find_ffmpeg
@@ -243,6 +255,7 @@ def main() -> None:
     session_lock = threading.Lock()
     auto_stop_queue: queue.Queue[AutoStopReason] = queue.Queue()
     app_stop = threading.Event()
+    relaunch_after_session = False
     overlay: RecordingStatusOverlay | None = None
 
     if not args.no_overlay:
@@ -261,33 +274,49 @@ def main() -> None:
             else "请重新运行录制程序以开始新的录制"
         )
 
+    def _show_pending_auto_stop_notice(pending: PendingAutoStopNotice) -> None:
+        extra: str | None = None
+        if pending.discarded_short:
+            extra = (
+                f"本次有效时长不足 {config.min_recording_duration_s:g} 秒，数据已丢弃"
+            )
+        if overlay is not None:
+            overlay.show_auto_stop_notice(pending.reason, _restart_line(), extra)
+        else:
+            print(f"    {_AUTO_STOP_CONSOLE[pending.reason]}")
+            if extra:
+                print(f"    {extra}")
+            print(f"    {_restart_line()}")
+
+    def _request_session_relaunch() -> None:
+        nonlocal relaunch_after_session
+        relaunch_after_session = True
+        app_stop.set()
+
     _AUTO_STOP_CONSOLE: dict[AutoStopReason, str] = {
         "idle": "由于长时间未移动人物角色，本次录制已自动结束。",
-        "forbidden_key": "由于按下了非人物移动的按键，本次录制已自动结束。",
+        "stuck": "由于 WASD 按键状态长时间未变化且无鼠标移动，本次录制已自动结束。",
+        "forbidden_key": "由于按下了非人物移动的按键或点击了鼠标，本次录制已自动结束。",
         "violent": "由于操作过于剧烈，本次录制已自动结束。",
     }
     _AUTO_STOP_REASON_LOG: dict[AutoStopReason, str] = {
         "idle": "长时间未移动人物角色（无 WASD），自动停止录制 …",
-        "forbidden_key": "按下了非人物移动的按键，自动停止录制 …",
+        "stuck": "WASD 按键状态长时间未变化且无鼠标移动，自动停止录制 …",
+        "forbidden_key": "按下了非人物移动的按键或点击了鼠标，自动停止录制 …",
         "violent": "操作过于剧烈（高频 WASD / 鼠标晃动），自动停止录制 …",
     }
 
     def _stop_session(
         *,
         reason: str,
-        auto_stop_reason: AutoStopReason | None = None,
-    ) -> None:
+    ) -> bool:
+        """Stop the active session and finalize files. Returns True if data was kept."""
         nonlocal session
         if session is None:
-            return
+            return False
         print(f"\n>>> {reason}")
-        if overlay is not None and auto_stop_reason is not None:
-            overlay.show_auto_stop_notice(auto_stop_reason, _restart_line())
         if overlay is not None:
             overlay.set_recording(False)
-        elif auto_stop_reason is not None:
-            print(f"    {_AUTO_STOP_CONSOLE[auto_stop_reason]}")
-            print(f"    {_restart_line()}")
         saved = session.stop()
         if saved:
             print(f">>> 录制已保存  [{session.session_dir}]\n")
@@ -297,6 +326,25 @@ def main() -> None:
                 "已丢弃本次数据\n"
             )
         session = None
+        return saved
+
+    def _finish_manual_session_stop() -> None:
+        """Manual stop: save, cold-restart (no red notice in the dying process)."""
+        _stop_session(reason="正在停止 …")
+        _request_session_relaunch()
+
+    def _finish_auto_session_stop(reason: AutoStopReason) -> None:
+        """Auto-stop: save, persist notice, cold-restart; red box shows in the new process."""
+        saved = _stop_session(reason=_AUTO_STOP_REASON_LOG[reason])
+        write_pending_notice(
+            config.output_dir,
+            PendingAutoStopNotice(
+                reason=reason,
+                saved=saved,
+                discarded_short=not saved,
+            ),
+        )
+        _request_session_relaunch()
 
     def _on_auto_stop(reason: AutoStopReason) -> None:
         auto_stop_queue.put(reason)
@@ -308,10 +356,7 @@ def main() -> None:
             except queue.Empty:
                 return
             with session_lock:
-                _stop_session(
-                    reason=_AUTO_STOP_REASON_LOG[reason],
-                    auto_stop_reason=reason,
-                )
+                _finish_auto_session_stop(reason)
 
     def _toggle() -> None:
         nonlocal session
@@ -333,7 +378,7 @@ def main() -> None:
                 else:
                     print(f"    按 {HOTKEY_LABEL} 停止，Ctrl+C 退出。\n")
             else:
-                _stop_session(reason="正在停止 …")
+                _finish_manual_session_stop()
 
     # ── Start ────────────────────────────────────────────────────────────
 
@@ -355,13 +400,16 @@ def main() -> None:
     if not args.no_overlay:
         print("  悬浮窗: 已启用（右上角状态 + 已录制时长，点「退出」结束）")
     if config.idle_timeout_s > 0:
-        print(f"  空闲自动停止: {config.idle_timeout_s:g} 秒未按 WASD 移动人物")
+        print(f"  空闲自动停止: {config.idle_timeout_s:g} 秒未按 WASD")
+        print(
+            f"  僵滞自动停止: {config.idle_timeout_s:g} 秒 WASD 状态不变且无鼠标移动"
+        )
     if config.min_recording_duration_s > 0:
         print(
             f"  最短有效录制: {config.min_recording_duration_s:g} 秒"
-            "（不足则丢弃）"
+            "（不足则丢弃；空闲/僵滞停止时末尾裁剪后再计）"
         )
-    print("  非 WASD 按键: 按下其他键将自动停止录制")
+    print("  禁止操作: 非 WASD 按键或鼠标点击/滚轮将自动停止录制")
     if config.violent_duration_s > 0:
         print(
             f"  剧烈操作自动停止: WASD 或鼠标高频晃动连续"
@@ -369,6 +417,10 @@ def main() -> None:
         )
     print("  Ctrl+C 退出（无控制台时请用悬浮窗「退出」）")
     print("=" * 60)
+
+    pending = consume_pending_notice(config.output_dir)
+    if pending is not None:
+        _show_pending_auto_stop_notice(pending)
 
     if args.no_hotkey:
         # Immediately start recording
@@ -397,7 +449,7 @@ def main() -> None:
         app_stop.set()
         _drain_auto_stop_queue()
         with session_lock:
-            if session is not None:
+            if session is not None and not relaunch_after_session:
                 print(">>> 正在停止当前会话 …")
                 saved = session.stop()
                 if overlay is not None:
@@ -409,8 +461,16 @@ def main() -> None:
                         f">>> 录制时长不足 {config.min_recording_duration_s:g} 秒，"
                         "已丢弃本次数据"
                     )
+                session = None
         if overlay is not None:
             overlay.stop()
+        if relaunch_after_session:
+            try:
+                relaunch_process()
+            except OSError:
+                print(">>> 冷重启失败，请手动重新运行 run.bat")
+                sys.exit(1)
+            os._exit(0)
         print("再见～")
         sys.exit(0)
 

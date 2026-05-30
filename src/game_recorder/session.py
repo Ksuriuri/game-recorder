@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 
 # Virtual keys for movement keys (character walk).
 _WASD_VKS: frozenset[int] = frozenset((0x57, 0x41, 0x53, 0x44))  # W A S D
-AutoStopReason = Literal["idle", "forbidden_key", "violent"]
+AutoStopReason = Literal["idle", "stuck", "forbidden_key", "violent"]
 AutoStopCallback = Callable[[AutoStopReason], None]
 
 # Per-second thresholds for violent-input detection (sustained ``violent_duration_s``).
@@ -223,6 +223,8 @@ class Session:
 
         # Auto-stop rules (WASD-only movement)
         self._last_movement_at: float = 0.0
+        self._last_input_change_at: float = 0.0
+        self._wasd_state: frozenset[int] = frozenset()
         self._auto_stop_fired = False
         self._auto_stop_reason: AutoStopReason | None = None
         self._idle_thread: threading.Thread | None = None
@@ -248,6 +250,8 @@ class Session:
         self._t0_ns = time.perf_counter_ns()
         self._t0_epoch_ms = int(time.time() * 1000)
         self._last_movement_at = time.monotonic()
+        self._last_input_change_at = time.monotonic()
+        self._wasd_state = self._read_wasd_state()
         self._auto_stop_fired = False
         self._auto_stop_reason = None
         self._stop_finalized = False
@@ -342,6 +346,10 @@ class Session:
             self._idle_thread.start()
             if watch_idle:
                 logger.info("空闲检测已启用：%g 秒未移动人物角色（无 WASD）将自动停止", idle_s)
+                logger.info(
+                    "僵滞检测已启用：%g 秒 WASD 按键状态未变化且无鼠标移动将自动停止",
+                    idle_s,
+                )
         if self._on_auto_stop is not None:
             logger.info("非 WASD 按键检测已启用：按下其他键将自动停止")
             if watch_violent:
@@ -392,7 +400,7 @@ class Session:
             return False
 
         idle_tail_trimmed = 0
-        if self._auto_stop_reason == "idle":
+        if self._auto_stop_reason in ("idle", "stuck"):
             trim_duration_s = float(self.config.idle_timeout_s)
         elif self._auto_stop_reason == "violent":
             trim_duration_s = float(self.config.violent_duration_s)
@@ -482,7 +490,7 @@ class Session:
         )
 
     def _auto_stop_tail_deduct_s(self) -> float:
-        if self._auto_stop_reason == "idle":
+        if self._auto_stop_reason in ("idle", "stuck"):
             return float(self.config.idle_timeout_s)
         if self._auto_stop_reason == "violent":
             return float(self.config.violent_duration_s)
@@ -576,6 +584,12 @@ class Session:
 
         if self._is_wasd_event(event):
             self._last_movement_at = now
+            prev_state = self._wasd_state
+            self._wasd_state = self._apply_wasd_event(prev_state, event)
+            if self._wasd_state != prev_state:
+                self._last_input_change_at = now
+        elif event.get("type") == "mouse" and event.get("action") == "move":
+            self._last_input_change_at = now
 
         frame = event.get("frame", 0)
         with self._segment_lock:
@@ -601,7 +615,7 @@ class Session:
                 self._action_writer.write(event)
                 self._segment_event_count += 1
 
-        if self._is_forbidden_key_event(event):
+        if self._is_forbidden_input_event(event):
             self._trigger_auto_stop("forbidden_key")
 
     @staticmethod
@@ -611,7 +625,9 @@ class Session:
         vk = event.get("vk")
         return isinstance(vk, int) and vk in _WASD_VKS
 
-    def _is_forbidden_key_event(self, event: dict) -> bool:
+    def _is_forbidden_input_event(self, event: dict) -> bool:
+        if event.get("type") == "mouse":
+            return event.get("action") != "move"
         if event.get("type") != "key" or event.get("action") != "down":
             return False
         vk = event.get("vk")
@@ -624,11 +640,29 @@ class Session:
         return True
 
     @staticmethod
-    def _wasd_held() -> bool:
+    def _apply_wasd_event(state: frozenset[int], event: dict) -> frozenset[int]:
+        vk = event.get("vk")
+        if not isinstance(vk, int):
+            return state
+        keys = set(state)
+        if event.get("action") == "down":
+            keys.add(vk)
+        elif event.get("action") == "up":
+            keys.discard(vk)
+        return frozenset(keys)
+
+    @staticmethod
+    def _read_wasd_state() -> frozenset[int]:
         user32 = ctypes.windll.user32  # type: ignore[attr-defined]
         user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
         user32.GetAsyncKeyState.restype = wt.SHORT
-        return any(bool(user32.GetAsyncKeyState(vk) & 0x8000) for vk in _WASD_VKS)
+        return frozenset(
+            vk for vk in _WASD_VKS if bool(user32.GetAsyncKeyState(vk) & 0x8000)
+        )
+
+    @staticmethod
+    def _wasd_held() -> bool:
+        return bool(Session._read_wasd_state())
 
     def _auto_stop_watch_loop(self, idle_s: float) -> None:
         while not self._stop_event.wait(0.5):
@@ -639,6 +673,9 @@ class Session:
             if idle_s <= 0:
                 continue
             if self._wasd_held():
+                if now - self._last_input_change_at >= idle_s:
+                    self._trigger_auto_stop("stuck")
+                    return
                 self._last_movement_at = now
                 continue
             if now - self._last_movement_at < idle_s:
@@ -654,13 +691,18 @@ class Session:
         self._stop_event.set()
         if reason == "idle":
             logger.info("检测到 %g 秒未移动人物角色（无 WASD），触发自动停止", self.config.idle_timeout_s)
+        elif reason == "stuck":
+            logger.info(
+                "检测到 %g 秒 WASD 按键状态未变化且无鼠标移动，触发自动停止",
+                self.config.idle_timeout_s,
+            )
         elif reason == "violent":
             logger.info(
                 "检测到连续 %g 秒高频 WASD / 鼠标晃动，触发自动停止",
                 self.config.violent_duration_s,
             )
         else:
-            logger.info("检测到非人物移动按键，触发自动停止")
+            logger.info("检测到非人物移动操作（按键或鼠标点击/滚轮），触发自动停止")
         self._on_auto_stop(reason)
 
     # ── Segment management (must be called with _segment_lock held) ─────
