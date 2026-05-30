@@ -85,6 +85,8 @@ scripts\build_offline_bundle.bat
 game-recorder/
 ├── install.bat                 # 在目标机上离线重建 .venv（自动检测 wheels/ 切到 OFFLINE 模式）
 ├── run.bat / run-console.bat   # 一键启动（install 也会从 scripts\ 同步一份）
+├── overlay_all_recording_inputs.bat      # 批量叠加 HUD：处理全部视频
+├── overlay_sample_recording_inputs.bat   # 批量叠加 HUD：随机抽样 10 条
 ├── 录制操作手册.txt             # 网吧/采集同学用的简版说明（记事本可直接打开）
 ├── pyproject.toml
 ├── README.md
@@ -283,7 +285,7 @@ game-recorder -v
 **累计有效视频时长** 的含义与更新规则：
 
 - **统计范围**：`--output` 目录（默认 `recordings/`）下，所有已保存 session 里各段 `mp4` 的有效时长之和。
-- **不算入**：时长不足被丢弃的 session、`*_inputs.mp4` 等衍生文件；**不读取 mp4**（用 `meta.json` 里 `segments[].frame_count ÷ fps` 汇总，与画面长度一致）。
+- **不算入**：时长不足被丢弃的 session、`recordings/overlay/` 下后处理产物、`*_inputs.mp4` 等衍生文件；**不读取 mp4**（用 `meta.json` 里 `segments[].frame_count ÷ fps` 汇总，与画面长度一致）。
 - **“有效”**：因 **空闲**（`idle`）或 **僵滞**（`stuck`）自动停止结束时，会从末段视频裁掉末尾约 `--idle-timeout` 秒对应的帧（`meta.json` 的 `idle_tail_trim_frames`）；若尚未裁剪，则按 `duration_s − idle_timeout_s` 计入累计。手动停止、禁止操作（`forbidden_key`）、剧烈操作（`violent`）等其它原因按实际视频时长计入。
 - **何时刷新**：仅在**每次录制成功落盘并写入 `library.json` 之后**更新（`session.stop()` 完成之后）；录制过程中不读盘、不叠加本段秒数。
 - **索引文件**：`recordings/library.json` 由程序维护；首次启动或文件缺失时，后台扫描所有 `session_*/meta.json` 重建一次。
@@ -426,6 +428,82 @@ recordings/
 
 每次 session 成功保存后更新对应条目；删除某个 `session_*` 目录后若累计不准，可删除 `library.json`，下次启动会自动重建。
 
+## 叠加输入 HUD（后处理）
+
+录制完成后，可将 **WASD 按键** 与 **鼠标视角方向** 以 HUD 形式烧录到视频上，便于人工抽检或训练数据可视化。原视频与 `jsonl` 不会被修改；处理结果统一输出到 `recordings/overlay/`，**文件名与源 mp4 相同**。
+
+| HUD 位置 | 内容 |
+|----------|------|
+| 左下角 | WASD 十字布局（按住时高亮） |
+| 右下角 | 鼠标视角方向箭头（由鼠标增量 EMA 平滑后判定） |
+
+### 一键批量处理（推荐）
+
+双击项目根目录下的 bat 即可（需先跑过 `install.bat`）：
+
+| 脚本 | 作用 |
+|------|------|
+| `overlay_all_recording_inputs.bat` | 处理 `recordings/` 下**全部** session 中带匹配 `jsonl` 的 mp4（自动跳过 `overlay/` 目录） |
+| `overlay_sample_recording_inputs.bat` | 从上述候选中**随机抽 10 条**（不足 10 条则全部处理） |
+
+运行时会显示 **总进度 / 当前视频进度条** 与 **已用 / 预计剩余时间**；结束后提示「按任意键继续...」。
+
+默认输出压缩参数（可在 bat 内修改）：
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| 最大宽度 | 960 px | 等比缩小，显著减小体积 |
+| CRF | 26 | libx264 质量（越大文件越小） |
+| preset | `veryfast` | 编码速度 |
+| 音频码率 | 64k | AAC |
+
+输出示例：
+
+```
+recordings/
+  session_20260411_143022/
+    20260411_143022_0_42130.mp4      # 原片（不动）
+    20260411_143022_0_42130.jsonl
+    meta.json
+  overlay/                            # 后处理输出目录
+    20260411_143022_0_42130.mp4      # 带 HUD 的版本（同名）
+```
+
+> **性能提示**：后处理为 **CPU 逐帧解码 + 重编码**，不使用 GPU；多个视频 **顺序** 处理。10 小时素材整体可能需要数小时到十几小时，建议挂机或过夜跑 `overlay_all_recording_inputs.bat`；可先用 `overlay_sample_recording_inputs.bat` 估时。
+
+### 命令行（单文件 / 自定义）
+
+```bat
+:: 单个视频，显示进度条
+uv run python scripts/overlay_inputs_on_video.py --progress path/to/20260411_143022_0_42130.mp4
+
+:: 指定输出路径与压缩参数
+uv run python scripts/overlay_inputs_on_video.py --progress ^
+  --max-width 960 --crf 26 --preset veryfast --audio-bitrate 64k ^
+  -o recordings/overlay/20260411_143022_0_42130.mp4 ^
+  path/to/20260411_143022_0_42130.mp4
+
+:: 批量（等同 overlay_all_recording_inputs.bat 逻辑）
+uv run python scripts/batch_overlay_inputs.py recordings ^
+  --output-dir recordings/overlay --exclude-dir overlay ^
+  --max-width 960 --crf 26 --preset veryfast --audio-bitrate 64k
+
+:: 批量抽样 10 条（等同 overlay_sample_recording_inputs.bat）
+uv run python scripts/batch_overlay_inputs.py recordings ^
+  --output-dir recordings/overlay --exclude-dir overlay --sample 10 ^
+  --max-width 960 --crf 26 --preset veryfast --audio-bitrate 64k
+```
+
+相关脚本：
+
+| 文件 | 说明 |
+|------|------|
+| `scripts/batch_overlay_inputs.py` | 批量调度、总进度与 ETA |
+| `scripts/overlay_inputs_on_video.py` | 单段 mp4 + jsonl 叠加 HUD |
+| `scripts/collect_recording_videos.py` | 列出 / 随机抽样待处理视频 |
+
+事件与视频帧对齐依赖 session 目录下的 `meta.json`（`event_video_sync_offset` 等）；HUD 仍滞后时可试 `--event-frame-lead 1`（见 `overlay_inputs_on_video.py --help`）。
+
 ## 训练数据读取
 
 由于事件按全局帧索引聚合、且 jsonl 与 mp4 同名同段，读取时只需按段配对加载即可。下面的 helper 顺序遍历整个 session 的所有段：
@@ -473,6 +551,12 @@ main.py          CLI 入口，热键监听，段间冷重启调度
             ├─ library_index.py        library.json 累计有效视频时长索引
             ├─ pending_notice.py       .pending_auto_stop.json 跨进程自动停止提示
             └─ idle_trim.py            空闲/僵滞自动停止末段裁剪
+
+scripts/（后处理与打包，非运行时依赖）
+  ├─ batch_overlay_inputs.py     批量叠加 HUD + 进度 / ETA
+  ├─ overlay_inputs_on_video.py  单段 mp4 + jsonl 烧录 WASD / 鼠标 HUD
+  ├─ collect_recording_videos.py 枚举 / 抽样待处理视频
+  └─ progress_utils.py             终端进度条工具
 ```
 
 ## 性能开销（1080p@30fps）

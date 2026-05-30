@@ -36,11 +36,18 @@ import re
 import shutil
 import subprocess
 import sys
+import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import cv2
 import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from progress_utils import ProgressWriter, eta_from_rate, format_duration, progress_bar
+
+ProgressCallback = Callable[[int, int | None, str], None]
 
 # Windows virtual-key codes (same as game_recorder.capture.input_hook)
 VK_W = 0x57
@@ -426,7 +433,7 @@ def draw_mouse_hud(
     draw_cell(frame, cx + stride, cy, cell_half, ">", dirs["right"])
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         description="将键鼠 HUD 叠加到 game-recorder 分段视频（MP4 + JSONL）。",
         add_help=False,
@@ -547,16 +554,30 @@ def main() -> None:
         metavar="RATE",
         help="重编码时的 AAC 码率（默认 64k；仅 --crf 时生效）",
     )
-    args = ap.parse_args()
+    ap.add_argument(
+        "--progress",
+        action="store_true",
+        help="显示进度条与剩余时间估计",
+    )
+    return ap
+
+
+def run_overlay(
+    args: argparse.Namespace,
+    *,
+    on_progress: ProgressCallback | None = None,
+) -> int:
     video: Path = args.video
     if not video.is_file():
         print(f"错误：找不到视频：{video}", file=sys.stderr)
-        sys.exit(1)
+        return 1
 
     jsonl = args.jsonl or video.with_suffix(".jsonl")
     if not jsonl.is_file():
         print(f"错误：找不到 jsonl：{jsonl}", file=sys.stderr)
-        sys.exit(1)
+        return 1
+
+    show_hints = not args.progress
 
     meta_fps, meta_start, meta_end, meta_sync = load_meta_fps_segment_sync(video)
     parsed = parse_segment_from_filename(video)
@@ -586,13 +607,13 @@ def main() -> None:
         else meta_sync
     )
     event_lead = int(args.event_frame_lead)
-    if args.event_frame_offset is None and meta_sync != 0:
+    if args.event_frame_offset is None and meta_sync != 0 and show_hints:
         print(
             f"提示：jsonl 帧 = 视频索引 + {meta_sync} "
             f"（meta.json 中的 event_video_sync_offset）。",
             file=sys.stderr,
         )
-    if event_lead != 0:
+    if event_lead != 0 and show_hints:
         print(
             f"提示：事件帧超前 {event_lead:+d}（jsonl 查找索引已偏移）。",
             file=sys.stderr,
@@ -601,7 +622,11 @@ def main() -> None:
     cap = cv2.VideoCapture(str(video))
     if not cap.isOpened():
         print(f"错误：无法打开视频：{video}", file=sys.stderr)
-        sys.exit(1)
+        return 1
+
+    frame_total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or None
+    if frame_total is not None and frame_total <= 0:
+        frame_total = None
 
     vw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     vh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -609,7 +634,7 @@ def main() -> None:
     vfps_i = int(round(vfps)) if vfps and vfps > 1e-3 else 30
 
     fps = args.fps or meta_fps or vfps_i
-    if args.fps is None and meta_fps is not None and abs(meta_fps - vfps_i) > 1:
+    if args.fps is None and meta_fps is not None and abs(meta_fps - vfps_i) > 1 and show_hints:
         print(
             f"提示：使用 meta/录制 fps={meta_fps} 对齐事件 "
             f"（容器报告 {vfps_i}）。",
@@ -617,7 +642,7 @@ def main() -> None:
         )
 
     out_w, out_h, frame_scale = scaled_output_size(vw, vh, args.max_width)
-    if frame_scale != 1.0:
+    if frame_scale != 1.0 and show_hints:
         print(
             f"提示：输出分辨率 {out_w}x{out_h}（源 {vw}x{vh}，--max-width {args.max_width}）。",
             file=sys.stderr,
@@ -626,10 +651,11 @@ def main() -> None:
     encode_crf = int(args.crf) if args.crf is not None else None
     if encode_crf is not None:
         encode_crf = max(0, min(51, encode_crf))
-        print(
-            f"提示：将用 libx264 CRF {encode_crf}（preset {args.preset}）重编码输出。",
-            file=sys.stderr,
-        )
+        if show_hints:
+            print(
+                f"提示：将用 libx264 CRF {encode_crf}（preset {args.preset}）重编码输出。",
+                file=sys.stderr,
+            )
 
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     out_path = args.output or video.with_name(f"{video.stem}_inputs{video.suffix}")
@@ -643,7 +669,7 @@ def main() -> None:
                 "或设置 GAME_RECORDER_FFMPEG。",
                 file=sys.stderr,
             )
-            sys.exit(1)
+            return 1
         print(
             "警告：未找到 ffmpeg — 仅输出视频；"
             "请安装 ffmpeg（见 install.bat）或设置 GAME_RECORDER_FFMPEG。",
@@ -660,7 +686,11 @@ def main() -> None:
     writer = cv2.VideoWriter(str(hud_tmp), fourcc, float(fps), (out_w, out_h))
     if not writer.isOpened():
         print(f"错误：无法打开 VideoWriter：{hud_tmp}", file=sys.stderr)
-        sys.exit(1)
+        return 1
+
+    show_progress = args.progress or on_progress is not None
+    progress_writer = ProgressWriter() if show_progress and on_progress is None else None
+    progress_start = time.perf_counter()
 
     events_by_frame = load_events_by_frame(jsonl)
 
@@ -727,8 +757,30 @@ def main() -> None:
         writer.write(frame)
         frame_i += 1
 
+        if show_progress:
+            if on_progress is not None:
+                on_progress(frame_i, frame_total, "frames")
+            elif progress_writer is not None:
+                elapsed = time.perf_counter() - progress_start
+                total = frame_total or frame_i
+                eta = eta_from_rate(frame_i, total, elapsed) if frame_total else "--:--"
+                count_text = f"{frame_i}/{frame_total}" if frame_total else str(frame_i)
+                progress_writer.update(
+                    f"处理 {video.name}  {progress_bar(frame_i, frame_total)}  "
+                    f"{count_text}  已用 {format_duration(elapsed)}  剩余 {eta}"
+                )
+
     cap.release()
     writer.release()
+
+    if show_progress:
+        if on_progress is not None:
+            on_progress(frame_i, frame_total, "encode")
+        elif progress_writer is not None:
+            progress_writer.update(
+                f"处理 {video.name}  编码/混流中...  {frame_i} 帧",
+                force=True,
+            )
 
     if use_temp:
         assert ffmpeg_bin is not None
@@ -747,28 +799,46 @@ def main() -> None:
             except OSError as e:
                 print(f"警告：无法删除临时文件 {hud_tmp}：{e}", file=sys.stderr)
             audio_note = " + 音频" if mux_audio else ""
-            print(f"已写入 {frame_i} 帧{audio_note} → {out_path.resolve()}")
-        else:
-            try:
-                if out_path.is_file():
-                    out_path.unlink()
-            except OSError:
-                pass
-            try:
-                hud_tmp.replace(out_path)
-            except OSError as e:
-                print(
-                    f"错误：ffmpeg 处理失败且无法移动 {hud_tmp} → {out_path}：{e}",
-                    file=sys.stderr,
+            if progress_writer is not None:
+                progress_writer.finish(
+                    f"完成 {video.name}  {frame_i} 帧{audio_note}  →  {out_path.name}"
                 )
-                sys.exit(1)
+            elif on_progress is None:
+                print(f"已写入 {frame_i} 帧{audio_note} → {out_path.resolve()}")
+            return frame_i
+        try:
+            if out_path.is_file():
+                out_path.unlink()
+        except OSError:
+            pass
+        try:
+            hud_tmp.replace(out_path)
+        except OSError as e:
+            if progress_writer is not None:
+                progress_writer.finish()
             print(
-                f"错误：ffmpeg 处理失败；已保存中间视频至 {out_path.resolve()}",
+                f"错误：ffmpeg 处理失败且无法移动 {hud_tmp} → {out_path}：{e}",
                 file=sys.stderr,
             )
-            sys.exit(1)
-    else:
+            return 1
+        if progress_writer is not None:
+            progress_writer.finish()
+        print(
+            f"错误：ffmpeg 处理失败；已保存中间视频至 {out_path.resolve()}",
+            file=sys.stderr,
+        )
+        return 1
+    if progress_writer is not None:
+        progress_writer.finish(
+            f"完成 {video.name}  {frame_i} 帧  →  {out_path.name}"
+        )
+    elif on_progress is None:
         print(f"已写入 {frame_i} 帧 → {out_path.resolve()}")
+    return frame_i
+
+
+def main() -> None:
+    sys.exit(0 if run_overlay(build_parser().parse_args()) > 0 else 1)
 
 
 if __name__ == "__main__":
