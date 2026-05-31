@@ -50,6 +50,9 @@ PM_REMOVE = 0x0001
 # Do not treat these as keyboard (GetAsyncKeyState mirrors mouse buttons as VKs).
 _SKIP_ASYNC_VK: frozenset[int] = frozenset((0x01, 0x02, 0x04, 0x05, 0x06))
 
+# Movement keys — only these are seeded at capture start (see _seed_keyboard_state).
+_WASD_VKS: frozenset[int] = frozenset((0x57, 0x41, 0x53, 0x44))  # W A S D
+
 _RAW_MOUSE_BUTTON_ACTIONS: tuple[tuple[int, str], ...] = (
     (RI_MOUSE_LEFT_BUTTON_DOWN, "left_down"),
     (RI_MOUSE_LEFT_BUTTON_UP, "left_up"),
@@ -283,9 +286,9 @@ class InputCapture:
                 "（鼠标事件已禁用；可尝试以管理员身份重启）",
                 self._keyboard_poll_hz,
             )
-            for vk in range(1, 256):
-                self._async_key_prev[vk] = bool(user32.GetAsyncKeyState(vk) & 0x8000)
             self._last_key_poll_ns = time.perf_counter_ns()
+        # Keys held before capture starts never generate Raw Input / poll edges.
+        self._seed_keyboard_state()
 
         msg = wt.MSG()
         try:
@@ -496,6 +499,37 @@ class InputCapture:
             )
 
     # ── Keyboard fallback (async) ────────────────────────────────────────────
+
+    def _seed_keyboard_state(self) -> None:
+        """Sync poll state and emit synthetic WASD down for keys held before capture.
+
+        Only WASD are written to the action log. Other VKs are not seeded: toggle
+        keys (Num/Caps/Scroll Lock) often read as \"down\" via GetAsyncKeyState when
+        merely latched on, which would falsely trigger forbidden-key auto-stop.
+        """
+        now_ns = time.perf_counter_ns()
+        frame = self._frame_index(now_ns)
+        seeded = 0
+        for vk in range(1, 256):
+            if vk in _SKIP_ASYNC_VK:
+                continue
+            down = bool(user32.GetAsyncKeyState(vk) & 0x8000)
+            self._async_key_prev[vk] = down
+            if not down or vk not in _WASD_VKS:
+                continue
+            self._emit(
+                {
+                    "frame": int(frame),
+                    "type": "key",
+                    "action": "down",
+                    "vk": vk,
+                    "key": _vk_to_name(vk),
+                    "seed": True,
+                }
+            )
+            seeded += 1
+        if seeded:
+            logger.debug("已同步录制开始前按住的 WASD：%d 个", seeded)
 
     def _poll_keyboard_async(self) -> None:
         now_ns = time.perf_counter_ns()

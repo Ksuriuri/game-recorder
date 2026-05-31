@@ -20,7 +20,7 @@ Spacing: ``--hud-cell``, ``--hud-gap``, ``--hud-margin``.
 
 Event/video sync: ``meta.json`` has ``event_video_sync_offset`` (median wall−idx per
 video frame). The script replays jsonl buckets before the first aligned frame, then
-``--event-frame-lead`` can nudge a few frames if mux/capture still lags.
+``--event-frame-lead`` (default 1) compensates capture/encode/display pipeline lag.
 
 Audio: OpenCV only writes a video track; by default the script muxes the **original**
 segment’s audio onto the HUD file using ``ffmpeg`` (same lookup as ``install.bat`` /
@@ -497,9 +497,10 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument(
         "--event-frame-lead",
         type=int,
-        default=0,
+        default=1,
         metavar="K",
-        help="jsonl 查找索引加 K（正数 = 更新输入；HUD 仍滞后可试 1–3）",
+        help="jsonl 查找索引加 K（正数 = 输入更早显示；默认 1 补偿采集/编码管线；"
+        "仍滞后可试 2–3，超前则 0 或 -1）",
     )
     ap.add_argument(
         "--hud-cell",

@@ -36,7 +36,12 @@ from game_recorder.hotkeys import (
 )
 from game_recorder.overlay import RecordingStatusOverlay
 from game_recorder.process_guard import replace_existing_instance
-from game_recorder.relaunch import CONTINUING_ARG, relaunch_process
+from game_recorder.relaunch import (
+    CONTINUING_ARG,
+    relaunch_process,
+    schedule_restore_game_focus,
+    write_pending_focus,
+)
 from game_recorder.session import AutoStopReason, Session
 from game_recorder.storage.pending_notice import PendingAutoStopNotice, consume_pending_notice, write_pending_notice
 
@@ -256,16 +261,16 @@ def main() -> None:
     auto_stop_queue: queue.Queue[AutoStopReason] = queue.Queue()
     app_stop = threading.Event()
     relaunch_after_session = False
+    pending_game_focus: tuple[int | None, str] | None = None
     overlay: RecordingStatusOverlay | None = None
+    overlay_ui_settled = threading.Event()
 
-    if not args.no_overlay:
-        overlay = RecordingStatusOverlay(
-            idle_hint=HOTKEY_HINT if not args.no_hotkey else "正在启动录制",
-            recording_hint=HOTKEY_HINT if not args.no_hotkey else "按 Ctrl+C 停止",
-            recordings_dir=config.output_dir,
-            on_quit=app_stop.set,
-        )
-        overlay.start()
+    _AUTO_STOP_CONSOLE: dict[AutoStopReason, str] = {
+        "idle": "由于长时间未移动人物角色，本次录制已自动结束。",
+        "stuck": "由于 WASD 按键状态长时间未变化且无鼠标移动，本次录制已自动结束。",
+        "forbidden_key": "由于按下了非人物移动的按键或点击了鼠标，本次录制已自动结束。",
+        "violent": "由于操作过于剧烈，本次录制已自动结束。",
+    }
 
     def _restart_line() -> str:
         return (
@@ -288,17 +293,27 @@ def main() -> None:
                 print(f"    {extra}")
             print(f"    {_restart_line()}")
 
+    pending_auto_stop = consume_pending_notice(config.output_dir)
+
+    if not args.no_overlay:
+        overlay = RecordingStatusOverlay(
+            idle_hint=HOTKEY_HINT if not args.no_hotkey else "正在启动录制",
+            recording_hint=HOTKEY_HINT if not args.no_hotkey else "按 Ctrl+C 停止",
+            recordings_dir=config.output_dir,
+            on_quit=app_stop.set,
+            ui_settled=overlay_ui_settled,
+            expect_auto_stop_notice=pending_auto_stop is not None,
+        )
+        overlay.start()
+
+    if pending_auto_stop is not None:
+        _show_pending_auto_stop_notice(pending_auto_stop)
+
     def _request_session_relaunch() -> None:
         nonlocal relaunch_after_session
         relaunch_after_session = True
         app_stop.set()
 
-    _AUTO_STOP_CONSOLE: dict[AutoStopReason, str] = {
-        "idle": "由于长时间未移动人物角色，本次录制已自动结束。",
-        "stuck": "由于 WASD 按键状态长时间未变化且无鼠标移动，本次录制已自动结束。",
-        "forbidden_key": "由于按下了非人物移动的按键或点击了鼠标，本次录制已自动结束。",
-        "violent": "由于操作过于剧烈，本次录制已自动结束。",
-    }
     _AUTO_STOP_REASON_LOG: dict[AutoStopReason, str] = {
         "idle": "长时间未移动人物角色（无 WASD），自动停止录制 …",
         "stuck": "WASD 按键状态长时间未变化且无鼠标移动，自动停止录制 …",
@@ -311,9 +326,12 @@ def main() -> None:
         reason: str,
     ) -> bool:
         """Stop the active session and finalize files. Returns True if data was kept."""
-        nonlocal session
+        nonlocal session, pending_game_focus
         if session is None:
             return False
+        target = session.capture_target
+        if target is not None and (target.hwnd or target.title):
+            pending_game_focus = (target.hwnd, target.title)
         print(f"\n>>> {reason}")
         if overlay is not None:
             overlay.set_recording(False)
@@ -418,9 +436,11 @@ def main() -> None:
     print("  Ctrl+C 退出（无控制台时请用悬浮窗「退出」）")
     print("=" * 60)
 
-    pending = consume_pending_notice(config.output_dir)
-    if pending is not None:
-        _show_pending_auto_stop_notice(pending)
+    if args.continuing:
+        schedule_restore_game_focus(
+            config.output_dir,
+            ui_settled=overlay_ui_settled if overlay is not None else None,
+        )
 
     if args.no_hotkey:
         # Immediately start recording
@@ -465,6 +485,9 @@ def main() -> None:
         if overlay is not None:
             overlay.stop()
         if relaunch_after_session:
+            if pending_game_focus is not None:
+                hwnd, title = pending_game_focus
+                write_pending_focus(config.output_dir, hwnd=hwnd, title=title)
             try:
                 relaunch_process()
             except OSError:

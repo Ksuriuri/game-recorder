@@ -54,11 +54,15 @@ class RecordingStatusOverlay:
         recording_hint: str,
         recordings_dir: Path | None = None,
         on_quit: Callable[[], None] | None = None,
+        ui_settled: threading.Event | None = None,
+        expect_auto_stop_notice: bool = False,
     ) -> None:
         self._idle_hint = idle_hint
         self._recording_hint = recording_hint
         self._recordings_dir = Path(recordings_dir) if recordings_dir else None
         self._on_quit = on_quit
+        self._ui_settled = ui_settled
+        self._expect_auto_stop_notice = expect_auto_stop_notice
         self._library_total_s: float = 0.0
         self._commands: queue.Queue[Command] = queue.Queue()
         self._thread: threading.Thread | None = None
@@ -148,6 +152,15 @@ class RecordingStatusOverlay:
         self._ready.set()
         recording_started_at: float | None = None
         notice_window: tk.Toplevel | None = None
+        ui_settled_signalled = False
+
+        def signal_ui_settled() -> None:
+            nonlocal ui_settled_signalled
+            if ui_settled_signalled:
+                return
+            ui_settled_signalled = True
+            if self._ui_settled is not None:
+                self._ui_settled.set()
 
         def dismiss_notice() -> None:
             nonlocal notice_window
@@ -197,6 +210,7 @@ class RecordingStatusOverlay:
             self._exclude_from_capture(notice_hwnd)
             notice.deiconify()
             self._raise_topmost(notice_hwnd)
+            signal_ui_settled()
 
         def apply_recording(recording: bool) -> None:
             nonlocal recording_started_at
@@ -305,6 +319,8 @@ class RecordingStatusOverlay:
                     self._raise_topmost(notice_hwnd)
                 except tk.TclError:
                     pass
+            if not self._expect_auto_stop_notice:
+                signal_ui_settled()
             root.after(500, pump)
 
         if self._recordings_dir is not None:

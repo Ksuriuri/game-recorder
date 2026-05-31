@@ -9,6 +9,7 @@ set "OVERLAY_MAX_WIDTH=960"
 set "OVERLAY_CRF=26"
 set "OVERLAY_PRESET=veryfast"
 set "OVERLAY_AUDIO_BITRATE=64k"
+set "OVERLAY_EVENT_FRAME_LEAD=1"
 set "SAMPLE_COUNT=10"
 
 set "RECORDINGS=%CD%\recordings"
@@ -41,9 +42,9 @@ echo Output: "%OUTPUT_DIR%"
 echo.
 
 if defined USE_UV (
-    uv run python scripts/batch_overlay_inputs.py "%RECORDINGS%" --output-dir "%OUTPUT_DIR%" --exclude-dir %OUTPUT_DIR_NAME% --sample %SAMPLE_COUNT% --max-width %OVERLAY_MAX_WIDTH% --crf %OVERLAY_CRF% --preset %OVERLAY_PRESET% --audio-bitrate %OVERLAY_AUDIO_BITRATE%
+    uv run python scripts/batch_overlay_inputs.py "%RECORDINGS%" --output-dir "%OUTPUT_DIR%" --exclude-dir %OUTPUT_DIR_NAME% --sample %SAMPLE_COUNT% --max-width %OVERLAY_MAX_WIDTH% --crf %OVERLAY_CRF% --preset %OVERLAY_PRESET% --audio-bitrate %OVERLAY_AUDIO_BITRATE% --event-frame-lead %OVERLAY_EVENT_FRAME_LEAD%
 ) else (
-    "!PYTHON_EXE!" scripts\batch_overlay_inputs.py "%RECORDINGS%" --output-dir "%OUTPUT_DIR%" --exclude-dir %OUTPUT_DIR_NAME% --sample %SAMPLE_COUNT% --max-width %OVERLAY_MAX_WIDTH% --crf %OVERLAY_CRF% --preset %OVERLAY_PRESET% --audio-bitrate %OVERLAY_AUDIO_BITRATE%
+    "!PYTHON_EXE!" scripts\batch_overlay_inputs.py "%RECORDINGS%" --output-dir "%OUTPUT_DIR%" --exclude-dir %OUTPUT_DIR_NAME% --sample %SAMPLE_COUNT% --max-width %OVERLAY_MAX_WIDTH% --crf %OVERLAY_CRF% --preset %OVERLAY_PRESET% --audio-bitrate %OVERLAY_AUDIO_BITRATE% --event-frame-lead %OVERLAY_EVENT_FRAME_LEAD%
 )
 
 set "EXIT_CODE=%ERRORLEVEL%"

@@ -26,6 +26,16 @@ def count_frames(path: Path) -> int:
     return max(0, n)
 
 
+def output_is_up_to_date(video: Path, output: Path) -> bool:
+    if not output.is_file():
+        return False
+    out_mtime = output.stat().st_mtime
+    for src in (video, video.with_suffix(".jsonl")):
+        if src.is_file() and src.stat().st_mtime > out_mtime:
+            return False
+    return True
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="批量叠加输入 HUD，显示总进度与 ETA。")
     ap.add_argument("recordings", type=Path, help="recordings 根目录")
@@ -43,6 +53,18 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--crf", type=int, default=26)
     ap.add_argument("--preset", type=str, default="veryfast")
     ap.add_argument("--audio-bitrate", type=str, default="64k")
+    ap.add_argument(
+        "--event-frame-lead",
+        type=int,
+        default=1,
+        metavar="K",
+        help="jsonl 查找索引加 K（默认 1，补偿 HUD 相对画面的滞后）",
+    )
+    ap.add_argument(
+        "--force",
+        action="store_true",
+        help="即使输出已存在也重新处理",
+    )
     return ap
 
 
@@ -65,11 +87,11 @@ def make_overlay_args(args: argparse.Namespace, video: Path, output: Path) -> ar
         fps=None,
         segment_start=None,
         mouse_threshold=0.8,
-        mouse_ema=0.22,
+        mouse_ema=0.5,
         mouse_deadzone=0.3,
         mouse_axis_ratio=1.2,
         event_frame_offset=None,
-        event_frame_lead=0,
+        event_frame_lead=args.event_frame_lead,
         hud_cell=32,
         hud_gap=80,
         hud_margin=48,
@@ -92,18 +114,38 @@ def main() -> None:
     output_dir: Path = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    videos = collect_videos(args)
-    if not videos:
+    all_videos = collect_videos(args)
+    if not all_videos:
         print(f"错误：{recordings} 中未找到带匹配 jsonl 的 mp4 文件", file=sys.stderr)
         sys.exit(1)
+
+    skipped = 0
+    if args.force:
+        videos = all_videos
+    else:
+        videos = []
+        for video in all_videos:
+            if output_is_up_to_date(video, output_dir / video.name):
+                skipped += 1
+            else:
+                videos.append(video)
+
+    if skipped:
+        print(f"跳过 {skipped} 个已处理视频", flush=True)
+    if not videos:
+        print(f"全部 {len(all_videos)} 个视频均已处理，无需重做。")
+        print(f"输出：{output_dir.resolve()}")
+        sys.exit(0)
 
     frame_counts = [count_frames(v) for v in videos]
     total_frames = sum(frame_counts) or None
     total_videos = len(videos)
 
-    print(f"共 {total_videos} 个视频", end="", flush=True)
+    print(f"待处理 {total_videos} 个视频", end="", flush=True)
     if total_frames:
         print(f"，约 {total_frames} 帧", end="", flush=True)
+    if skipped:
+        print(f"（共 {len(all_videos)} 个，已跳过 {skipped} 个）", end="", flush=True)
     print(f"\n输出目录：{output_dir.resolve()}\n", flush=True)
 
     writer = ProgressWriter()
@@ -196,11 +238,11 @@ def main() -> None:
         )
         sys.exit(1)
 
-    print(
-        f"\n全部完成：{total_videos} 个视频，总耗时 {format_duration(total_elapsed)}。"
-        f"\n输出：{output_dir.resolve()}",
-        flush=True,
-    )
+    summary = f"\n全部完成：处理 {total_videos} 个视频"
+    if skipped:
+        summary += f"，跳过 {skipped} 个"
+    summary += f"，总耗时 {format_duration(total_elapsed)}。\n输出：{output_dir.resolve()}"
+    print(summary, flush=True)
 
 
 if __name__ == "__main__":

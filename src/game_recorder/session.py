@@ -62,14 +62,18 @@ _MOUSE_REVERSAL_PER_S = 10  # dx/dy sign flips per second (shake); smooth look r
 class _ViolenceMonitor:
     """Detect sustained high-frequency WASD tapping or mouse shaking."""
 
-    def __init__(self, duration_s: float) -> None:
+    def __init__(
+        self,
+        duration_s: float,
+        initial_wasd_held: frozenset[int] | None = None,
+    ) -> None:
         self._duration_s = duration_s
         self._lock = threading.Lock()
         self._window_start = time.monotonic()
         self._wasd_presses = 0
         self._mouse_moves = 0
         self._mouse_reversals = 0
-        self._wasd_held: set[int] = set()
+        self._wasd_held: set[int] = set(initial_wasd_held or ())
         self._last_dx = 0
         self._last_dy = 0
         self._last_abs_x: int | None = None
@@ -240,6 +244,10 @@ class Session:
     def session_dir(self) -> Path:
         return self._session_dir
 
+    @property
+    def capture_target(self) -> CaptureTarget | None:
+        return self._capture_target
+
     # ── Public lifecycle ─────────────────────────────────────────────────
 
     def start(self) -> None:
@@ -258,7 +266,9 @@ class Session:
         self._stop_kept = False
         violent_s = float(self.config.violent_duration_s)
         self._violence = (
-            _ViolenceMonitor(violent_s) if violent_s > 0 and self._on_auto_stop else None
+            _ViolenceMonitor(violent_s, initial_wasd_held=self._wasd_state)
+            if violent_s > 0 and self._on_auto_stop
+            else None
         )
 
         # Probe output size and resolve the capture target before launching the first encoder.
@@ -389,12 +399,13 @@ class Session:
             self._close_segment_locked(actual_end_frame=self._frame_count)
 
         # Compute duration
-        duration_s = (time.perf_counter_ns() - self._t0_ns) / 1e9
+        wall_duration_s = (time.perf_counter_ns() - self._t0_ns) / 1e9
+        video_duration_s = self._frame_count / max(1, self.config.fps)
 
         min_s = float(self.config.min_recording_duration_s)
-        effective_s = self._effective_recording_duration_s(duration_s)
+        effective_s = self._effective_recording_duration_s(wall_duration_s)
         if min_s > 0 and effective_s < min_s:
-            self._discard_session(duration_s, effective_s, min_s)
+            self._discard_session(wall_duration_s, effective_s, min_s)
             self._stop_finalized = True
             self._stop_kept = False
             return False
@@ -419,8 +430,20 @@ class Session:
                 )
                 if idle_tail_trimmed > 0:
                     self._frame_count -= idle_tail_trimmed
-                    duration_s = self._frame_count / max(1, self.config.fps)
+                    video_duration_s = self._frame_count / max(1, self.config.fps)
 
+        if min_s > 0 and video_duration_s < min_s:
+            self._discard_session(
+                wall_duration_s,
+                video_duration_s,
+                min_s,
+                after_tail_trim=idle_tail_trimmed > 0,
+            )
+            self._stop_finalized = True
+            self._stop_kept = False
+            return False
+
+        duration_s = video_duration_s
         total_events = sum(s.event_count for s in self._segments_meta)
 
         sync_off = 0
@@ -501,10 +524,19 @@ class Session:
         wall_duration_s: float,
         effective_duration_s: float,
         min_s: float,
+        *,
+        after_tail_trim: bool = False,
     ) -> None:
         """Remove session directory and skip library index (recording too short)."""
         tail_deduct = self._auto_stop_tail_deduct_s()
-        if effective_duration_s < wall_duration_s - 0.05 and tail_deduct > 0:
+        if after_tail_trim:
+            logger.info(
+                "会话 %s 裁剪后视频时长 %.1f 秒 < %.1f 秒，丢弃录制数据",
+                self._session_id,
+                effective_duration_s,
+                min_s,
+            )
+        elif effective_duration_s < wall_duration_s - 0.05 and tail_deduct > 0:
             logger.info(
                 "会话 %s 有效时长 %.1f 秒 < %.1f 秒"
                 "（总时长 %.1f 秒，已扣除自动停止尾部 %.1f 秒），丢弃录制数据",
@@ -626,6 +658,8 @@ class Session:
         return isinstance(vk, int) and vk in _WASD_VKS
 
     def _is_forbidden_input_event(self, event: dict) -> bool:
+        if event.get("seed"):
+            return False
         if event.get("type") == "mouse":
             return event.get("action") != "move"
         if event.get("type") != "key" or event.get("action") != "down":
