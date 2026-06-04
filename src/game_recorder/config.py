@@ -36,6 +36,9 @@ class Config:
     # screen: always capture the full primary output.
     capture_mode: str = "auto"
 
+    # Optional alphanumeric prefix for session folder and segment filenames.
+    recording_id: str | None = None
+
     # Session management
     # Auto-segmentation: every N seconds, finalize current mp4 + jsonl and start
     # a new one within the same session directory.  0 disables segmentation

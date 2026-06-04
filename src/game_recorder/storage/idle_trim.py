@@ -26,7 +26,7 @@ def apply_idle_tail_trim(
     *,
     trim_frames: int,
     fps: int,
-    session_timestamp: str,
+    file_prefix: str,
     ffmpeg_path: str,
 ) -> tuple[list[SegmentMeta], int]:
     """Trim the tail of the last segment on disk.
@@ -65,8 +65,8 @@ def apply_idle_tail_trim(
         except Exception as exc:
             logger.warning("裁剪操作日志失败 %s：%s", actions_path.name, exc)
 
-    new_video_name = f"{session_timestamp}_{last.start_frame}_{new_end}.mp4"
-    new_actions_name = f"{session_timestamp}_{last.start_frame}_{new_end}.jsonl"
+    new_video_name = f"{file_prefix}_{last.start_frame}_{new_end}.mp4"
+    new_actions_name = f"{file_prefix}_{last.start_frame}_{new_end}.jsonl"
     new_video_path = session_dir / new_video_name
     new_actions_path = session_dir / new_actions_name
 

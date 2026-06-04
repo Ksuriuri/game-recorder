@@ -4,7 +4,8 @@ All components share a single T0 epoch (perf_counter_ns) so their timestamps
 are directly comparable.  A session may be split into multiple *segments*
 (every ``config.segment_seconds`` seconds → ``fps * segment_seconds`` frames):
 each segment produces its own ``mp4`` + ``jsonl`` pair under the session
-directory, named ``{session_timestamp}_{start_frame}_{end_frame}``.
+directory, named ``{id_}{session_timestamp}_{start_frame}_{end_frame}``
+(``id_`` is omitted when no ``--recording-id`` was given).
 
 The orchestration order is:
 
@@ -171,8 +172,12 @@ class Session:
         self._stop_event = threading.Event()
 
         # Identifiers
+        self._recording_id = (config.recording_id or "").strip()
         self._session_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self._session_id = f"session_{self._session_timestamp}"
+        if self._recording_id:
+            self._session_id = f"{self._recording_id}_session_{self._session_timestamp}"
+        else:
+            self._session_id = f"session_{self._session_timestamp}"
         self._session_dir = config.output_dir / self._session_id
         self._session_dir.mkdir(parents=True, exist_ok=True)
 
@@ -425,7 +430,7 @@ class Session:
                     self._segments_meta,
                     trim_frames=trim_n,
                     fps=self.config.fps,
-                    session_timestamp=self._session_timestamp,
+                    file_prefix=self._segment_file_prefix(),
                     ffmpeg_path=find_ffmpeg(),
                 )
                 if idle_tail_trimmed > 0:
@@ -741,9 +746,14 @@ class Session:
 
     # ── Segment management (must be called with _segment_lock held) ─────
 
+    def _segment_file_prefix(self) -> str:
+        if self._recording_id:
+            return f"{self._recording_id}_{self._session_timestamp}"
+        return self._session_timestamp
+
     def _segment_paths(self, start_frame: int, end_frame: int) -> tuple[Path, Path]:
         """Build (video, actions) paths for a segment with the given frame range."""
-        base = f"{self._session_timestamp}_{start_frame}_{end_frame}"
+        base = f"{self._segment_file_prefix()}_{start_frame}_{end_frame}"
         return (
             self._session_dir / f"{base}.mp4",
             self._session_dir / f"{base}.jsonl",

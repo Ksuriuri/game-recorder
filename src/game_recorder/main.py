@@ -126,6 +126,12 @@ def main() -> None:
         "--output", type=str, default="recordings", help="输出目录（默认：./recordings）"
     )
     parser.add_argument(
+        "--recording-id",
+        type=str,
+        default=None,
+        help="录制 ID 前缀，用于会话文件夹与视频/操作日志文件名（仅字母和数字）",
+    )
+    parser.add_argument(
         "--quality",
         type=int,
         default=23,
@@ -196,6 +202,12 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    if args.recording_id is not None:
+        rid = args.recording_id.strip()
+        if not rid or not rid.isalnum():
+            parser.error("--recording-id 只能包含字母和数字且不能为空")
+        args.recording_id = rid
+
     if not args.continuing:
         replace_existing_instance()
 
@@ -247,6 +259,7 @@ def main() -> None:
     config = Config(
         fps=args.fps,
         output_dir=Path(args.output),
+        recording_id=args.recording_id,
         video_quality=args.quality,
         x264_threads=max(1, args.x264_threads),
         audio_device=args.audio_device,
@@ -413,6 +426,8 @@ def main() -> None:
     else:
         print("  自动分段: 已关闭（单文件）")
     print(f"  输出目录: {config.output_dir.resolve()}")
+    if config.recording_id:
+        print(f"  录制 ID: {config.recording_id}")
     if not args.no_hotkey:
         print(f"  热键: {HOTKEY_LABEL}（{HOTKEY_HINT}）切换录制")
     if not args.no_overlay:
