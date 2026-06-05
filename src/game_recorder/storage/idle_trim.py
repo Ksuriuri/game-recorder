@@ -1,4 +1,4 @@
-"""Trim auto-stop tail from the last segment's mp4 + jsonl after idle/stuck/violent auto-stop."""
+"""Trim auto-stop tail from the last segment's mp4 + jsonl after auto-stop."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 def idle_tail_trim_frames(tail_duration_s: float, fps: int) -> int:
-    """Frames to remove from the end after idle, stuck, or violent auto-stop."""
+    """Frames to remove from the end after idle, stuck, violent, or focus-lost auto-stop."""
     if tail_duration_s <= 0:
         return 0
     return max(0, int(round(float(tail_duration_s) * max(1, fps))))

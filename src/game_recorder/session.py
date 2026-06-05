@@ -37,6 +37,8 @@ from game_recorder.capture.screen import ScreenCapture
 from game_recorder.capture.window_region import (
     CaptureTarget,
     get_foreground_window_title,
+    is_game_window_foreground,
+    is_recorder_ui_foreground,
     resolve_capture_target,
 )
 from game_recorder.config import Config, find_ffmpeg
@@ -51,11 +53,14 @@ logger = logging.getLogger(__name__)
 
 # Virtual keys for movement keys (character walk).
 _WASD_VKS: frozenset[int] = frozenset((0x57, 0x41, 0x53, 0x44))  # W A S D
-AutoStopReason = Literal["idle", "stuck", "forbidden_key", "violent"]
+AutoStopReason = Literal["idle", "stuck", "forbidden_key", "violent", "focus_lost"]
 AutoStopCallback = Callable[[AutoStopReason], None]
 
 # Per-second thresholds for violent-input detection (sustained ``violent_duration_s``).
 _VIOLENT_WINDOW_S = 1.0
+_FOCUS_POLL_S = 0.1
+_FOCUS_LOST_STABLE_POLLS = 3
+_FOCUS_WATCH_GRACE_S = 2.0
 _WASD_DOWN_PER_S = 5  # new WASD presses per second (ignore hold / key-repeat)
 _MOUSE_REVERSAL_PER_S = 10  # dx/dy sign flips per second (shake); smooth look rarely hits this
 
@@ -237,6 +242,7 @@ class Session:
         self._auto_stop_fired = False
         self._auto_stop_reason: AutoStopReason | None = None
         self._idle_thread: threading.Thread | None = None
+        self._focus_thread: threading.Thread | None = None
         self._violence: _ViolenceMonitor | None = None
         self._stop_finalized = False
         self._stop_kept = False
@@ -372,6 +378,20 @@ class Session:
                     "剧烈操作检测已启用：WASD 或鼠标高频晃动连续 %g 秒将自动停止",
                     violent_s,
                 )
+            target = self._capture_target
+            if (
+                target is not None
+                and (target.hwnd or target.title)
+                and target.source in ("foreground", "auto_foreground")
+            ):
+                self._focus_thread = threading.Thread(
+                    target=self._focus_watch_loop,
+                    args=(target.hwnd, target.title),
+                    name="focus-watch",
+                    daemon=True,
+                )
+                self._focus_thread.start()
+                logger.info("窗口失焦检测已启用：切换至其他窗口将自动停止")
 
         fg = self._capture_target.title if self._capture_target else get_foreground_window_title()
         encoder_name = self._encoder.encoder_name if self._encoder else "?"
@@ -420,6 +440,8 @@ class Session:
             trim_duration_s = float(self.config.idle_timeout_s)
         elif self._auto_stop_reason == "violent":
             trim_duration_s = float(self.config.violent_duration_s)
+        elif self._auto_stop_reason == "focus_lost":
+            trim_duration_s = float(self.config.focus_lost_trim_s)
         else:
             trim_duration_s = 0.0
         if trim_duration_s > 0 and self._segments_meta:
@@ -488,6 +510,7 @@ class Session:
             auto_stop_reason=self._auto_stop_reason,
             idle_timeout_s=float(self.config.idle_timeout_s),
             violent_duration_s=float(self.config.violent_duration_s),
+            focus_lost_trim_s=float(self.config.focus_lost_trim_s),
             idle_tail_trim_frames=idle_tail_trimmed,
         )
         meta.save(self._meta_path)
@@ -515,6 +538,7 @@ class Session:
             auto_stop_reason=self._auto_stop_reason,
             idle_timeout_s=self.config.idle_timeout_s,
             violent_duration_s=self.config.violent_duration_s,
+            focus_lost_trim_s=self.config.focus_lost_trim_s,
         )
 
     def _auto_stop_tail_deduct_s(self) -> float:
@@ -522,6 +546,8 @@ class Session:
             return float(self.config.idle_timeout_s)
         if self._auto_stop_reason == "violent":
             return float(self.config.violent_duration_s)
+        if self._auto_stop_reason == "focus_lost":
+            return float(self.config.focus_lost_trim_s)
         return 0.0
 
     def _discard_session(
@@ -703,6 +729,31 @@ class Session:
     def _wasd_held() -> bool:
         return bool(Session._read_wasd_state())
 
+    def _focus_watch_loop(self, hwnd: int | None, title: str) -> None:
+        """Stop when the captured game window loses foreground after it was focused once.
+
+        Grace period + ``armed`` avoid false triggers from overlay UI or from starting
+        recording before the game window has taken focus.
+        """
+        lost_streak = 0
+        armed = False
+        grace_until = time.monotonic() + _FOCUS_WATCH_GRACE_S
+        while not self._stop_event.wait(_FOCUS_POLL_S):
+            now = time.monotonic()
+            if is_game_window_foreground(hwnd=hwnd, title=title):
+                lost_streak = 0
+                if now >= grace_until:
+                    armed = True
+                continue
+            if is_recorder_ui_foreground():
+                continue
+            if not armed:
+                continue
+            lost_streak += 1
+            if lost_streak >= _FOCUS_LOST_STABLE_POLLS:
+                self._trigger_auto_stop("focus_lost")
+                return
+
     def _auto_stop_watch_loop(self, idle_s: float) -> None:
         while not self._stop_event.wait(0.5):
             now = time.monotonic()
@@ -740,6 +791,8 @@ class Session:
                 "检测到连续 %g 秒高频 WASD / 鼠标晃动，触发自动停止",
                 self.config.violent_duration_s,
             )
+        elif reason == "focus_lost":
+            logger.info("检测到游戏窗口失焦（切换至其他窗口），触发自动停止")
         else:
             logger.info("检测到非人物移动操作（按键或鼠标点击/滚轮），触发自动停止")
         self._on_auto_stop(reason)

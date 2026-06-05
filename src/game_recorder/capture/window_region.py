@@ -129,6 +129,14 @@ def _resolve_focus_target(*, hwnd: int | None = None, title: str = "") -> int | 
     return target
 
 
+_RECORDER_UI_TITLES = frozenset({"游戏录制状态"})
+
+
+def is_recorder_ui_foreground() -> bool:
+    """Return True when a recorder overlay / notice window owns foreground focus."""
+    return get_foreground_window_title() in _RECORDER_UI_TITLES
+
+
 def is_game_window_foreground(*, hwnd: int | None = None, title: str = "") -> bool:
     """Return True when the game window currently owns foreground focus."""
     target = _resolve_focus_target(hwnd=hwnd, title=title)

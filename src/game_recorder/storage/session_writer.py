@@ -41,13 +41,15 @@ class SessionMeta:
     total_input_events: int = 0
     segment_seconds: int = 0
     segments: list[SegmentMeta] = field(default_factory=list)
-    # Set when recording ends via auto-stop (``"idle"`` | ``"stuck"`` | ``"forbidden_key"`` | ``"violent"``).
+    # Set when recording ends via auto-stop (``"idle"`` | ``"stuck"`` | ``"forbidden_key"`` | ``"violent"`` | ``"focus_lost"``).
     auto_stop_reason: str | None = None
     # Snapshot of ``Config.idle_timeout_s`` for library effective-duration math.
     idle_timeout_s: float = 0.0
     # Snapshot of ``Config.violent_duration_s`` for library effective-duration math.
     violent_duration_s: float = 0.0
-    # Frames removed from the last segment mp4/jsonl after idle/stuck/violent auto-stop (0 = not trimmed).
+    # Snapshot of ``Config.focus_lost_trim_s`` for library effective-duration math.
+    focus_lost_trim_s: float = 0.0
+    # Frames removed from the last segment mp4/jsonl after auto-stop tail trim (0 = not trimmed).
     idle_tail_trim_frames: int = 0
 
     def save(self, path: Path) -> None:

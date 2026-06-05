@@ -82,12 +82,15 @@ def effective_duration_s(
     auto_stop_reason: str | None,
     idle_timeout_s: float,
     violent_duration_s: float = 0.0,
+    focus_lost_trim_s: float = 0.0,
 ) -> float:
     """Wall/video duration minus auto-stop tail (idle wait or violent-input window)."""
     if auto_stop_reason in ("idle", "stuck") and idle_timeout_s > 0:
         return max(0.0, wall_duration_s - float(idle_timeout_s))
     if auto_stop_reason == "violent" and violent_duration_s > 0:
         return max(0.0, wall_duration_s - float(violent_duration_s))
+    if auto_stop_reason == "focus_lost" and focus_lost_trim_s > 0:
+        return max(0.0, wall_duration_s - float(focus_lost_trim_s))
     return wall_duration_s
 
 
@@ -101,6 +104,7 @@ def session_library_duration_s(meta: SessionMeta) -> float:
         auto_stop_reason=meta.auto_stop_reason,
         idle_timeout_s=meta.idle_timeout_s,
         violent_duration_s=meta.violent_duration_s,
+        focus_lost_trim_s=meta.focus_lost_trim_s,
     )
 
 
@@ -140,6 +144,7 @@ def _totals_from_meta_raw(raw: dict, *, session_id_fallback: str) -> SessionLibr
             auto_stop_reason=raw.get("auto_stop_reason"),
             idle_timeout_s=float(raw.get("idle_timeout_s", 0.0)),
             violent_duration_s=float(raw.get("violent_duration_s", 0.0)),
+            focus_lost_trim_s=float(raw.get("focus_lost_trim_s", 0.0)),
         )
     sid = raw.get("session_id") or session_id_fallback
     return SessionLibraryEntry(

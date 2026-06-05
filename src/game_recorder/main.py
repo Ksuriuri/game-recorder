@@ -34,6 +34,7 @@ from game_recorder.hotkeys import (
     HOTKEY_SEQUENCE_TIMEOUT_SECONDS,
     VK_CAPSLOCK,
 )
+from game_recorder.capture.window_region import restore_window_focus
 from game_recorder.overlay import RecordingStatusOverlay
 from game_recorder.process_guard import replace_existing_instance
 from game_recorder.relaunch import (
@@ -283,6 +284,7 @@ def main() -> None:
         "stuck": "由于 WASD 按键状态长时间未变化且无鼠标移动，本次录制已自动结束。",
         "forbidden_key": "由于按下了非人物移动的按键或点击了鼠标，本次录制已自动结束。",
         "violent": "由于操作过于剧烈，本次录制已自动结束。",
+        "focus_lost": "由于切换到了其他窗口，本次录制已自动结束。",
     }
 
     def _restart_line() -> str:
@@ -332,6 +334,7 @@ def main() -> None:
         "stuck": "WASD 按键状态长时间未变化且无鼠标移动，自动停止录制 …",
         "forbidden_key": "按下了非人物移动的按键或点击了鼠标，自动停止录制 …",
         "violent": "操作过于剧烈（高频 WASD / 鼠标晃动），自动停止录制 …",
+        "focus_lost": "游戏窗口失焦（切换至其他窗口），自动停止录制 …",
     }
 
     def _stop_session(
@@ -394,14 +397,17 @@ def main() -> None:
         with session_lock:
             if session is None:
                 new_session = Session(config, on_auto_stop=_on_auto_stop)
-                if overlay is not None:
-                    overlay.set_recording(True)
                 try:
                     new_session.start()
                 except Exception:
                     if overlay is not None:
                         overlay.set_recording(False)
                     raise
+                target = new_session.capture_target
+                if overlay is not None:
+                    overlay.set_recording(True)
+                if target is not None and (target.hwnd or target.title):
+                    restore_window_focus(hwnd=target.hwnd, title=target.title)
                 session = new_session
                 print(f"\n>>> 开始录制  [{session.session_id}]")
                 if args.no_hotkey:
@@ -440,9 +446,10 @@ def main() -> None:
     if config.min_recording_duration_s > 0:
         print(
             f"  最短有效录制: {config.min_recording_duration_s:g} 秒"
-            "（不足则丢弃；空闲/僵滞停止时末尾裁剪后再计）"
+            "（不足则丢弃；空闲/僵滞/窗口切换停止时末尾裁剪后再计）"
         )
     print("  禁止操作: 非 WASD 按键或鼠标点击/滚轮将自动停止录制")
+    print("  窗口切换自动停止: 录制中切换至其他窗口将自动结束（末尾裁剪 1 秒）")
     if config.violent_duration_s > 0:
         print(
             f"  剧烈操作自动停止: WASD 或鼠标高频晃动连续"

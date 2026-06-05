@@ -52,6 +52,9 @@ class Config:
     # Stop when high-frequency WASD or mouse shaking lasts this many seconds. 0 = off.
     violent_duration_s: float = 1.0
 
+    # Trim this many seconds from the tail when auto-stopping due to window focus loss.
+    focus_lost_trim_s: float = 1.0
+
     # Discard the whole session on stop when shorter than this (seconds). 0 = off.
     min_recording_duration_s: float = 10.0
 
