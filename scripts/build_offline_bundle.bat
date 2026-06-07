@@ -144,6 +144,11 @@ REM  preserve permissions, but for our payload (binaries + scripts)
 REM  Windows doesn't need exec bits anyway.
 REM ----------------------------------------------------------------
 :step4_pack
+REM Keep root launchers in sync with scripts\ templates (install.bat does this too;
+REM --pack-only skips install, so sync here before zipping).
+copy /Y "%PROJECT_DIR%\scripts\run.bat" "%PROJECT_DIR%\run.bat" >nul
+copy /Y "%PROJECT_DIR%\scripts\run-console.bat" "%PROJECT_DIR%\run-console.bat" >nul
+
 echo.
 echo [4/4] 正在压缩打包 ...
 

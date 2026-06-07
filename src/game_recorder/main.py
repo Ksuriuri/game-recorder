@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import re
 import ctypes.wintypes as wt
 import logging
 import os
@@ -130,7 +131,7 @@ def main() -> None:
         "--recording-id",
         type=str,
         default=None,
-        help="录制 ID 前缀，用于会话文件夹与视频/操作日志文件名（仅字母和数字）",
+        help="录制 ID 前缀，用于会话文件夹与视频/操作日志文件名（字母、数字和连字符 -）",
     )
     parser.add_argument(
         "--quality",
@@ -205,8 +206,8 @@ def main() -> None:
 
     if args.recording_id is not None:
         rid = args.recording_id.strip()
-        if not rid or not rid.isalnum():
-            parser.error("--recording-id 只能包含字母和数字且不能为空")
+        if not rid or not re.fullmatch(r"[A-Za-z0-9-]+", rid):
+            parser.error("--recording-id 只能包含字母、数字和连字符 (-) 且不能为空")
         args.recording_id = rid
 
     if not args.continuing:

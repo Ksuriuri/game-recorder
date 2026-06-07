@@ -36,7 +36,7 @@ class Config:
     # screen: always capture the full primary output.
     capture_mode: str = "auto"
 
-    # Optional alphanumeric prefix for session folder and segment filenames.
+    # Optional prefix (letters, digits, hyphen) for session folder and segment filenames.
     recording_id: str | None = None
 
     # Session management
