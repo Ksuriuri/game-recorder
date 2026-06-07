@@ -21,7 +21,9 @@ Command = (
     | tuple[Literal["stop"]]
     | tuple[
         Literal["auto_stop_notice"],
-        Literal["idle", "stuck", "forbidden_key", "violent", "focus_lost"],
+        Literal[
+            "idle", "stuck", "forbidden_key", "violent", "focus_lost", "frame_drop"
+        ],
         str,
         str | None,
     ]
@@ -33,6 +35,10 @@ _AUTO_STOP_HEADLINES: dict[str, tuple[str, str]] = {
     "forbidden_key": ("检测到按下了非人物移动的按键或点击了鼠标", "本次录制已自动结束"),
     "violent": ("由于操作过于剧烈", "本次录制已自动结束"),
     "focus_lost": ("由于切换到了其他窗口", "本次录制已自动结束"),
+    "frame_drop": (
+        "由于检测到视频丢帧（编码跟不上）",
+        "本次录制已自动结束，数据已丢弃",
+    ),
 }
 
 GWL_EXSTYLE = -20
@@ -82,7 +88,9 @@ class RecordingStatusOverlay:
 
     def show_auto_stop_notice(
         self,
-        reason: Literal["idle", "stuck", "forbidden_key", "violent", "focus_lost"],
+        reason: Literal[
+            "idle", "stuck", "forbidden_key", "violent", "focus_lost", "frame_drop"
+        ],
         restart_line: str,
         extra_line: str | None = None,
     ) -> None:
@@ -173,7 +181,14 @@ class RecordingStatusOverlay:
                 notice_window = None
 
         def show_auto_stop_notice(
-            reason: Literal["idle", "stuck", "forbidden_key", "violent", "focus_lost"],
+            reason: Literal[
+                "idle",
+                "stuck",
+                "forbidden_key",
+                "violent",
+                "focus_lost",
+                "frame_drop",
+            ],
             restart_line: str,
             extra_line: str | None = None,
         ) -> None:

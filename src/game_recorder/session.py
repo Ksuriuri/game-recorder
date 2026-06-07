@@ -53,7 +53,9 @@ logger = logging.getLogger(__name__)
 
 # Virtual keys for movement keys (character walk).
 _WASD_VKS: frozenset[int] = frozenset((0x57, 0x41, 0x53, 0x44))  # W A S D
-AutoStopReason = Literal["idle", "stuck", "forbidden_key", "violent", "focus_lost"]
+AutoStopReason = Literal[
+    "idle", "stuck", "forbidden_key", "violent", "focus_lost", "frame_drop"
+]
 AutoStopCallback = Callable[[AutoStopReason], None]
 
 # Per-second thresholds for violent-input detection (sustained ``violent_duration_s``).
@@ -63,6 +65,47 @@ _FOCUS_LOST_STABLE_POLLS = 3
 _FOCUS_WATCH_GRACE_S = 2.0
 _WASD_DOWN_PER_S = 5  # new WASD presses per second (ignore hold / key-repeat)
 _MOUSE_REVERSAL_PER_S = 10  # dx/dy sign flips per second (shake); smooth look rarely hits this
+# Throttle repeated drop warnings while recording (first drop always logs immediately).
+_FRAME_DROP_LOG_INTERVAL_S = 5.0
+
+
+class _FrameDropTracker:
+    """Detect video frame drops when wall_frame_index − written_idx grows.
+
+    Each written frame advances ``idx`` by 1 while ``wall`` tracks real time × fps.
+    When the pipeline skips captured frames, ``wall − idx`` increases; the delta
+    between consecutive frames equals the number of dropped frames.
+    """
+
+    def __init__(self) -> None:
+        self.drop_count = 0
+        self.max_lag = 0
+        self._last_lag: int | None = None
+        self._last_log_at = 0.0
+
+    def observe(self, lag: int) -> int:
+        """Record one frame; return newly dropped frame count for this step."""
+        self.max_lag = max(self.max_lag, lag)
+        dropped = 0
+        if self._last_lag is not None and lag > self._last_lag:
+            dropped = lag - self._last_lag
+            self.drop_count += dropped
+        self._last_lag = lag
+        return dropped
+
+    @property
+    def final_lag(self) -> int:
+        return self._last_lag or 0
+
+    def should_log(self, dropped: int, now: float) -> bool:
+        if dropped <= 0:
+            return False
+        if self.drop_count == dropped:
+            return True
+        return now - self._last_log_at >= _FRAME_DROP_LOG_INTERVAL_S
+
+    def mark_logged(self, now: float) -> None:
+        self._last_log_at = now
 
 
 class _ViolenceMonitor:
@@ -234,6 +277,7 @@ class Session:
 
         # Per captured frame: wall_frame_index − dxcam idx (median → meta event_video_sync_offset).
         self._sync_wall_minus_idx: list[int] = []
+        self._frame_drop_tracker = _FrameDropTracker()
 
         # Auto-stop rules (WASD-only movement)
         self._last_movement_at: float = 0.0
@@ -275,6 +319,8 @@ class Session:
         self._auto_stop_reason = None
         self._stop_finalized = False
         self._stop_kept = False
+        self._sync_wall_minus_idx.clear()
+        self._frame_drop_tracker = _FrameDropTracker()
         violent_s = float(self.config.violent_duration_s)
         self._violence = (
             _ViolenceMonitor(violent_s, initial_wasd_held=self._wasd_state)
@@ -395,6 +441,13 @@ class Session:
 
         fg = self._capture_target.title if self._capture_target else get_foreground_window_title()
         encoder_name = self._encoder.encoder_name if self._encoder else "?"
+        if self.config.frame_drop_stop_after_s > 0:
+            logger.info(
+                "丢帧检测已启用：录制满 %.0f 秒后累计丢帧超过 %d 帧将自动停止并丢弃数据",
+                self.config.frame_drop_stop_after_s,
+                self.config.frame_drop_max_tolerated,
+            )
+
         logger.info(
             "会话已启动 — 编码器=%s，fps=%d，前台窗口=%r",
             encoder_name,
@@ -426,6 +479,22 @@ class Session:
         # Compute duration
         wall_duration_s = (time.perf_counter_ns() - self._t0_ns) / 1e9
         video_duration_s = self._frame_count / max(1, self.config.fps)
+
+        if self._auto_stop_reason == "frame_drop":
+            drop_count = self._frame_drop_tracker.drop_count
+            logger.info(
+                "会话 %s 因视频丢帧自动停止（累计 %d 帧，最大滞后 %d 帧），丢弃录制数据",
+                self._session_id,
+                drop_count,
+                self._frame_drop_tracker.max_lag,
+            )
+            try:
+                shutil.rmtree(self._session_dir)
+            except OSError as exc:
+                logger.warning("删除丢帧会话目录失败 %s：%s", self._session_dir, exc)
+            self._stop_finalized = True
+            self._stop_kept = False
+            return False
 
         min_s = float(self.config.min_recording_duration_s)
         effective_s = self._effective_recording_duration_s(wall_duration_s)
@@ -482,6 +551,16 @@ class Session:
                 len(self._sync_wall_minus_idx),
             )
 
+        drop_count = self._frame_drop_tracker.drop_count
+        if drop_count > 0:
+            logger.warning(
+                "本次录制共丢帧 %d 帧（最大滞后 %d 帧，结束时滞后 %d 帧）；"
+                "视频可能加速，音画/按键可能不同步",
+                drop_count,
+                self._frame_drop_tracker.max_lag,
+                self._frame_drop_tracker.final_lag,
+            )
+
         meta = SessionMeta(
             session_id=self._session_id,
             session_timestamp=self._session_timestamp,
@@ -512,6 +591,9 @@ class Session:
             violent_duration_s=float(self.config.violent_duration_s),
             focus_lost_trim_s=float(self.config.focus_lost_trim_s),
             idle_tail_trim_frames=idle_tail_trimmed,
+            frame_drop_count=drop_count,
+            max_frame_lag=self._frame_drop_tracker.max_lag,
+            final_frame_lag=self._frame_drop_tracker.final_lag,
         )
         meta.save(self._meta_path)
         try:
@@ -600,8 +682,21 @@ class Session:
                 * int(max(1, self.config.fps))
                 // 1_000_000_000
             )
+            lag = wall - idx
             if len(self._sync_wall_minus_idx) < 100_000:
-                self._sync_wall_minus_idx.append(wall - idx)
+                self._sync_wall_minus_idx.append(lag)
+
+            dropped = self._frame_drop_tracker.observe(lag)
+            now_mono = time.monotonic()
+            if self._frame_drop_tracker.should_log(dropped, now_mono):
+                self._frame_drop_tracker.mark_logged(now_mono)
+                logger.warning(
+                    "检测到视频丢帧：+%d 帧（累计 %d，当前滞后 %d 帧）；"
+                    "编码/写帧可能跟不上，音画与按键可能不同步",
+                    dropped,
+                    self._frame_drop_tracker.drop_count,
+                    lag,
+                )
 
             self._frame_count = idx + 1
 
@@ -630,6 +725,15 @@ class Session:
 
             if self._encoder is not None:
                 self._encoder.write_frame(frame_bytes)
+
+            if self.config.frame_drop_stop_after_s > 0:
+                elapsed_s = (time.perf_counter_ns() - self._t0_ns) / 1e9
+                if (
+                    elapsed_s >= self.config.frame_drop_stop_after_s
+                    and self._frame_drop_tracker.drop_count
+                    > max(0, self.config.frame_drop_max_tolerated)
+                ):
+                    self._trigger_auto_stop("frame_drop")
 
     def _on_action_event(self, event: dict) -> None:
         """Called by the input-hook thread for every keyboard / mouse event."""
@@ -793,8 +897,16 @@ class Session:
             )
         elif reason == "focus_lost":
             logger.info("检测到游戏窗口失焦（切换至其他窗口），触发自动停止")
-        else:
+        elif reason == "frame_drop":
+            logger.warning(
+                "录制 %.0f 秒后检测到视频丢帧（累计 %d 帧），触发自动停止",
+                self.config.frame_drop_stop_after_s,
+                self._frame_drop_tracker.drop_count,
+            )
+        elif reason == "forbidden_key":
             logger.info("检测到非人物移动操作（按键或鼠标点击/滚轮），触发自动停止")
+        else:
+            logger.info("触发自动停止（reason=%s）", reason)
         self._on_auto_stop(reason)
 
     # ── Segment management (must be called with _segment_lock held) ─────

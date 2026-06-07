@@ -41,7 +41,7 @@ class SessionMeta:
     total_input_events: int = 0
     segment_seconds: int = 0
     segments: list[SegmentMeta] = field(default_factory=list)
-    # Set when recording ends via auto-stop (``"idle"`` | ``"stuck"`` | ``"forbidden_key"`` | ``"violent"`` | ``"focus_lost"``).
+    # Set when recording ends via auto-stop (``"idle"`` | ``"stuck"`` | … | ``"frame_drop"``).
     auto_stop_reason: str | None = None
     # Snapshot of ``Config.idle_timeout_s`` for library effective-duration math.
     idle_timeout_s: float = 0.0
@@ -51,6 +51,10 @@ class SessionMeta:
     focus_lost_trim_s: float = 0.0
     # Frames removed from the last segment mp4/jsonl after auto-stop tail trim (0 = not trimmed).
     idle_tail_trim_frames: int = 0
+    # Video pipeline drop stats (wall−idx growth while recording); see Session._FrameDropTracker.
+    frame_drop_count: int = 0
+    max_frame_lag: int = 0
+    final_frame_lag: int = 0
 
     def save(self, path: Path) -> None:
         with open(path, "w", encoding="utf-8") as f:

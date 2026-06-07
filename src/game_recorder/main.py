@@ -191,6 +191,20 @@ def main() -> None:
             "则自动停止（默认：10，0 = 关闭这两项）"
         ),
     )
+    parser.add_argument(
+        "--frame-drop-stop-after",
+        type=float,
+        default=10.0,
+        help=(
+            "录制满 N 秒后若累计丢帧超过容忍上限则自动停止并丢弃数据（默认：10，0 = 关闭）"
+        ),
+    )
+    parser.add_argument(
+        "--frame-drop-max-tolerated",
+        type=int,
+        default=1,
+        help="累计允许丢帧数，超过后才触发自动停止（默认：1，即最多丢 1 帧）",
+    )
     parser.add_argument("-v", "--verbose", action="store_true", help="输出调试日志")
     parser.add_argument(
         "--list-audio-devices",
@@ -269,6 +283,8 @@ def main() -> None:
         segment_seconds=segment_seconds,
         capture_mode=args.capture_mode,
         idle_timeout_s=max(0.0, float(args.idle_timeout)),
+        frame_drop_stop_after_s=max(0.0, float(args.frame_drop_stop_after)),
+        frame_drop_max_tolerated=max(0, int(args.frame_drop_max_tolerated)),
     )
 
     session: Session | None = None
@@ -286,6 +302,7 @@ def main() -> None:
         "forbidden_key": "由于按下了非人物移动的按键或点击了鼠标，本次录制已自动结束。",
         "violent": "由于操作过于剧烈，本次录制已自动结束。",
         "focus_lost": "由于切换到了其他窗口，本次录制已自动结束。",
+        "frame_drop": "由于检测到视频丢帧（编码跟不上），本次录制已自动结束。",
     }
 
     def _restart_line() -> str:
@@ -297,7 +314,11 @@ def main() -> None:
 
     def _show_pending_auto_stop_notice(pending: PendingAutoStopNotice) -> None:
         extra: str | None = None
-        if pending.discarded_short:
+        if pending.reason == "frame_drop" and not pending.saved:
+            extra = (
+                "建议降低游戏画质/帧率，或关闭占用 CPU 的后台程序后再试"
+            )
+        elif pending.discarded_short:
             extra = (
                 f"本次有效时长不足 {config.min_recording_duration_s:g} 秒，数据已丢弃"
             )
@@ -336,6 +357,7 @@ def main() -> None:
         "forbidden_key": "按下了非人物移动的按键或点击了鼠标，自动停止录制 …",
         "violent": "操作过于剧烈（高频 WASD / 鼠标晃动），自动停止录制 …",
         "focus_lost": "游戏窗口失焦（切换至其他窗口），自动停止录制 …",
+        "frame_drop": "检测到视频丢帧（编码跟不上），自动停止录制 …",
     }
 
     def _stop_session(
@@ -455,6 +477,11 @@ def main() -> None:
         print(
             f"  剧烈操作自动停止: WASD 或鼠标高频晃动连续"
             f" {config.violent_duration_s:g} 秒"
+        )
+    if config.frame_drop_stop_after_s > 0:
+        print(
+            f"  丢帧自动停止: 录制满 {config.frame_drop_stop_after_s:g} 秒后"
+            f"累计丢帧超过 {config.frame_drop_max_tolerated} 帧将自动结束并丢弃数据"
         )
     print("  Ctrl+C 退出（无控制台时请用悬浮窗「退出」）")
     print("=" * 60)
