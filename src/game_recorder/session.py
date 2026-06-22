@@ -27,6 +27,7 @@ import shutil
 import statistics
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -75,15 +76,21 @@ class _FrameDropTracker:
     Each written frame advances ``idx`` by 1 while ``wall`` tracks real time × fps.
     When the pipeline skips captured frames, ``wall − idx`` increases; the delta
     between consecutive frames equals the number of dropped frames.
+
+    A sliding window tracks recent drops for auto-stop; mild drops trigger duplicate
+    frame padding elsewhere in Session to keep A/V aligned.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, window_s: float = 10.0) -> None:
+        self._window_s = max(0.0, window_s)
         self.drop_count = 0
         self.max_lag = 0
         self._last_lag: int | None = None
         self._last_log_at = 0.0
+        self._drop_events: deque[tuple[float, int]] = deque()
+        self._window_drop_count = 0
 
-    def observe(self, lag: int) -> int:
+    def observe(self, lag: int, now: float) -> int:
         """Record one frame; return newly dropped frame count for this step."""
         self.max_lag = max(self.max_lag, lag)
         dropped = 0
@@ -91,7 +98,18 @@ class _FrameDropTracker:
             dropped = lag - self._last_lag
             self.drop_count += dropped
         self._last_lag = lag
+        if dropped > 0 and self._window_s > 0:
+            self._drop_events.append((now, dropped))
+        if self._window_s > 0:
+            cutoff = now - self._window_s
+            while self._drop_events and self._drop_events[0][0] < cutoff:
+                self._drop_events.popleft()
+            self._window_drop_count = sum(d for _, d in self._drop_events)
         return dropped
+
+    @property
+    def window_drop_count(self) -> int:
+        return self._window_drop_count
 
     @property
     def final_lag(self) -> int:
@@ -278,6 +296,7 @@ class Session:
         # Per captured frame: wall_frame_index − dxcam idx (median → meta event_video_sync_offset).
         self._sync_wall_minus_idx: list[int] = []
         self._frame_drop_tracker = _FrameDropTracker()
+        self._last_frame_bytes: bytes | None = None
 
         # Auto-stop rules (WASD-only movement)
         self._last_movement_at: float = 0.0
@@ -320,7 +339,9 @@ class Session:
         self._stop_finalized = False
         self._stop_kept = False
         self._sync_wall_minus_idx.clear()
-        self._frame_drop_tracker = _FrameDropTracker()
+        window_s = float(self.config.frame_drop_stop_after_s)
+        self._frame_drop_tracker = _FrameDropTracker(window_s=window_s)
+        self._last_frame_bytes = None
         violent_s = float(self.config.violent_duration_s)
         self._violence = (
             _ViolenceMonitor(violent_s, initial_wasd_held=self._wasd_state)
@@ -443,7 +464,8 @@ class Session:
         encoder_name = self._encoder.encoder_name if self._encoder else "?"
         if self.config.frame_drop_stop_after_s > 0:
             logger.info(
-                "丢帧检测已启用：录制满 %.0f 秒后累计丢帧超过 %d 帧将自动停止并丢弃数据",
+                "丢帧检测已启用：%.0f 秒滑动窗口内丢帧超过 %d 帧将自动停止并裁尾；"
+                "窗口内丢帧将补写重复帧同步音画",
                 self.config.frame_drop_stop_after_s,
                 self.config.frame_drop_max_tolerated,
             )
@@ -481,20 +503,15 @@ class Session:
         video_duration_s = self._frame_count / max(1, self.config.fps)
 
         if self._auto_stop_reason == "frame_drop":
-            drop_count = self._frame_drop_tracker.drop_count
             logger.info(
-                "会话 %s 因视频丢帧自动停止（累计 %d 帧，最大滞后 %d 帧），丢弃录制数据",
+                "会话 %s 因视频丢帧自动停止（最近 %.0f 秒内 %d 帧，累计 %d 帧，"
+                "最大滞后 %d 帧）",
                 self._session_id,
-                drop_count,
+                self.config.frame_drop_stop_after_s,
+                self._frame_drop_tracker.window_drop_count,
+                self._frame_drop_tracker.drop_count,
                 self._frame_drop_tracker.max_lag,
             )
-            try:
-                shutil.rmtree(self._session_dir)
-            except OSError as exc:
-                logger.warning("删除丢帧会话目录失败 %s：%s", self._session_dir, exc)
-            self._stop_finalized = True
-            self._stop_kept = False
-            return False
 
         min_s = float(self.config.min_recording_duration_s)
         effective_s = self._effective_recording_duration_s(wall_duration_s)
@@ -511,6 +528,8 @@ class Session:
             trim_duration_s = float(self.config.violent_duration_s)
         elif self._auto_stop_reason == "focus_lost":
             trim_duration_s = float(self.config.focus_lost_trim_s)
+        elif self._auto_stop_reason == "frame_drop":
+            trim_duration_s = float(self.config.frame_drop_stop_after_s)
         else:
             trim_duration_s = 0.0
         if trim_duration_s > 0 and self._segments_meta:
@@ -686,8 +705,8 @@ class Session:
             if len(self._sync_wall_minus_idx) < 100_000:
                 self._sync_wall_minus_idx.append(lag)
 
-            dropped = self._frame_drop_tracker.observe(lag)
             now_mono = time.monotonic()
+            dropped = self._frame_drop_tracker.observe(lag, now_mono)
             if self._frame_drop_tracker.should_log(dropped, now_mono):
                 self._frame_drop_tracker.mark_logged(now_mono)
                 logger.warning(
@@ -724,16 +743,23 @@ class Session:
                 self._drain_pending_events_locked()
 
             if self._encoder is not None:
+                window_s = self.config.frame_drop_stop_after_s
+                if window_s > 0:
+                    max_tol = max(0, self.config.frame_drop_max_tolerated)
+                    if self._frame_drop_tracker.window_drop_count > max_tol:
+                        self._trigger_auto_stop("frame_drop")
+                    elif dropped > 0:
+                        pad_bytes = self._last_frame_bytes or frame_bytes
+                        for _ in range(dropped):
+                            self._encoder.write_frame(pad_bytes)
+                        logger.info(
+                            "补写 %d 重复帧以同步音画（窗口内丢帧 %d）",
+                            dropped,
+                            self._frame_drop_tracker.window_drop_count,
+                        )
                 self._encoder.write_frame(frame_bytes)
 
-            if self.config.frame_drop_stop_after_s > 0:
-                elapsed_s = (time.perf_counter_ns() - self._t0_ns) / 1e9
-                if (
-                    elapsed_s >= self.config.frame_drop_stop_after_s
-                    and self._frame_drop_tracker.drop_count
-                    > max(0, self.config.frame_drop_max_tolerated)
-                ):
-                    self._trigger_auto_stop("frame_drop")
+            self._last_frame_bytes = frame_bytes
 
     def _on_action_event(self, event: dict) -> None:
         """Called by the input-hook thread for every keyboard / mouse event."""
@@ -899,9 +925,10 @@ class Session:
             logger.info("检测到游戏窗口失焦（切换至其他窗口），触发自动停止")
         elif reason == "frame_drop":
             logger.warning(
-                "录制 %.0f 秒后检测到视频丢帧（累计 %d 帧），触发自动停止",
+                "最近 %.0f 秒内丢帧 %d 帧（超过上限 %d），触发自动停止",
                 self.config.frame_drop_stop_after_s,
-                self._frame_drop_tracker.drop_count,
+                self._frame_drop_tracker.window_drop_count,
+                self.config.frame_drop_max_tolerated,
             )
         elif reason == "forbidden_key":
             logger.info("检测到非人物移动操作（按键或鼠标点击/滚轮），触发自动停止")

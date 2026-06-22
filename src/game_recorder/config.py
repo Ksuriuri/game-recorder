@@ -55,11 +55,11 @@ class Config:
     # Trim this many seconds from the tail when auto-stopping due to window focus loss.
     focus_lost_trim_s: float = 1.0
 
-    # After this many seconds of recording, auto-stop when cumulative drops exceed the
-    # tolerance below. 0 disables the check (drops are still logged and written to meta.json).
+    # Sliding-window width (seconds) for frame-drop auto-stop and tail trim. 0 disables both
+    # (drops are still logged and written to meta.json).
     frame_drop_stop_after_s: float = 10.0
-    # Cumulative dropped frames allowed before auto-stop (inclusive). 1 = up to 1 drop OK.
-    frame_drop_max_tolerated: int = 1
+    # Max dropped frames allowed within the window before auto-stop (inclusive). 5 = up to 5 OK.
+    frame_drop_max_tolerated: int = 5
 
     # Discard the whole session on stop when shorter than this (seconds). 0 = off.
     min_recording_duration_s: float = 10.0

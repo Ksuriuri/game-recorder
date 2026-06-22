@@ -196,14 +196,15 @@ def main() -> None:
         type=float,
         default=10.0,
         help=(
-            "录制满 N 秒后若累计丢帧超过容忍上限则自动停止并丢弃数据（默认：10，0 = 关闭）"
+            "丢帧检测滑动窗口宽度（秒）：窗口内丢帧超过容忍上限则自动停止并裁尾；"
+            "窗口内轻度丢帧会补写重复帧同步音画（默认：10，0 = 关闭）"
         ),
     )
     parser.add_argument(
         "--frame-drop-max-tolerated",
         type=int,
-        default=1,
-        help="累计允许丢帧数，超过后才触发自动停止（默认：1，即最多丢 1 帧）",
+        default=5,
+        help="滑动窗口内允许丢帧数，超过后才触发自动停止（默认：5）",
     )
     parser.add_argument("-v", "--verbose", action="store_true", help="输出调试日志")
     parser.add_argument(
@@ -314,10 +315,17 @@ def main() -> None:
 
     def _show_pending_auto_stop_notice(pending: PendingAutoStopNotice) -> None:
         extra: str | None = None
-        if pending.reason == "frame_drop" and not pending.saved:
-            extra = (
-                "建议降低游戏画质/帧率，或关闭占用 CPU 的后台程序后再试"
-            )
+        if pending.reason == "frame_drop":
+            if pending.saved:
+                extra = f"最后 {config.frame_drop_stop_after_s:g} 秒已裁剪"
+            elif pending.discarded_short:
+                extra = (
+                    f"本次有效时长不足 {config.min_recording_duration_s:g} 秒，数据已丢弃"
+                )
+            else:
+                extra = (
+                    "建议降低游戏画质/帧率，或关闭占用 CPU 的后台程序后再试"
+                )
         elif pending.discarded_short:
             extra = (
                 f"本次有效时长不足 {config.min_recording_duration_s:g} 秒，数据已丢弃"
@@ -480,8 +488,9 @@ def main() -> None:
         )
     if config.frame_drop_stop_after_s > 0:
         print(
-            f"  丢帧自动停止: 录制满 {config.frame_drop_stop_after_s:g} 秒后"
-            f"累计丢帧超过 {config.frame_drop_max_tolerated} 帧将自动结束并丢弃数据"
+            f"  丢帧检测: {config.frame_drop_stop_after_s:g} 秒滑动窗口，"
+            f"窗口内丢帧超过 {config.frame_drop_max_tolerated} 帧自动停止并裁尾；"
+            f"轻度丢帧补写重复帧同步音画"
         )
     print("  Ctrl+C 退出（无控制台时请用悬浮窗「退出」）")
     print("=" * 60)

@@ -37,7 +37,7 @@ _AUTO_STOP_HEADLINES: dict[str, tuple[str, str]] = {
     "focus_lost": ("由于切换到了其他窗口", "本次录制已自动结束"),
     "frame_drop": (
         "由于检测到视频丢帧（编码跟不上）",
-        "本次录制已自动结束，数据已丢弃",
+        "本次录制已自动结束",
     ),
 }
 
