@@ -119,7 +119,7 @@ if errorlevel 1 (
 )
 
 REM Sanity check: must contain at least one wheel for each direct dep.
-for %%P in (numpy opencv_python_headless dxcam soundcard game_recorder) do (
+for %%P in (numpy opencv_python_headless dxcam soundcard modelscope game_recorder) do (
     dir /b "%WHEELS_DIR%\%%P-*.whl" >nul 2>&1 || (
         echo [错误] wheels\ 中未找到 %%P 的 wheel。打包将不可用。
         exit /b 1
