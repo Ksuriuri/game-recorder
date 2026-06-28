@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Upload session folders from recordings/ to a ModelScope dataset, skipping existing ones."""
+"""Upload session folders from the game-recorder recordings/ dir to ModelScope."""
 
 from __future__ import annotations
 
@@ -10,16 +10,21 @@ import sys
 from contextlib import contextmanager
 from pathlib import Path
 
-# Quiet modelscope log spam; keep tqdm progress bars on stderr.
 os.environ.setdefault("MODELSCOPE_LOG_LEVEL", str(logging.ERROR))
 
 DEFAULT_REPO_ID = "kusriri/world-game-data"
 MODELSCOPE_TOKEN = "ms-54fac99a-5958-42d4-879d-b9445227cb51"
 DEFAULT_SKIP_DIRS = frozenset({"overlay"})
+# Session folders are stored under this path in the ModelScope dataset repo.
+DATASET_RECORDINGS_DIR = "recordings"
 
 
-def _project_root() -> Path:
-    return Path(__file__).resolve().parent.parent
+def _pack_root() -> Path:
+    return Path(__file__).resolve().parent
+
+
+def _game_recorder_root() -> Path:
+    return _pack_root().parent
 
 
 def iter_session_dirs(recordings: Path, *, skip_dirs: set[str]) -> list[Path]:
@@ -44,7 +49,6 @@ def _entry_name(item: dict) -> str | None:
 
 
 def verify_write_access(api, repo_id: str, token: str) -> None:
-    """Fail fast when the token cannot upload to the dataset git repo."""
     import json
 
     url = f"{api.endpoint}/api/v1/repos/datasets/{repo_id}/info/lfs/objects/batch"
@@ -73,17 +77,20 @@ def verify_write_access(api, repo_id: str, token: str) -> None:
         raise PermissionError(f"无法写入数据集（HTTP {response.status_code}）：{msg}")
 
 
-def list_remote_top_folders(api, repo_id: str, token: str) -> set[str]:
+def list_remote_session_folders(
+    api, repo_id: str, token: str, *, dataset_dir: str = DATASET_RECORDINGS_DIR
+) -> set[str]:
     from modelscope.utils.constant import DEFAULT_DATASET_REVISION
 
     remote: set[str] = set()
     page = 1
     page_size = 100
+    root_path = f"/{dataset_dir.strip('/')}"
     while True:
         batch = api.get_dataset_files(
             repo_id=repo_id,
             revision=DEFAULT_DATASET_REVISION,
-            root_path="/",
+            root_path=root_path,
             recursive=False,
             page_number=page,
             page_size=page_size,
@@ -103,9 +110,12 @@ def list_remote_top_folders(api, repo_id: str, token: str) -> set[str]:
     return remote
 
 
+def remote_path_for_session(session_name: str, *, dataset_dir: str = DATASET_RECORDINGS_DIR) -> str:
+    return f"{dataset_dir.strip('/')}/{session_name}"
+
+
 @contextmanager
 def _suppress_upload_report():
-    """Hide modelscope's stdout Upload Report block; tqdm stays on stderr."""
     stream = sys.stdout
 
     class FilteredStdout:
@@ -142,32 +152,23 @@ def _suppress_upload_report():
 
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="将 recordings/ 下的 session 子文件夹上传到 ModelScope 数据集（已存在则跳过）。"
+        description="Upload session folders under recordings/ to ModelScope (skip if already on server)."
     )
     ap.add_argument(
         "recordings",
         type=Path,
         nargs="?",
-        default=_project_root() / "recordings",
-        help="recordings 根目录（默认：项目根目录/recordings）",
+        default=_game_recorder_root() / "recordings",
+        help="recordings root (default: ../recordings relative to this pack)",
     )
+    ap.add_argument("--repo-id", default=DEFAULT_REPO_ID)
     ap.add_argument(
-        "--repo-id",
-        default=DEFAULT_REPO_ID,
-        help=f"目标数据集 repo_id（默认：{DEFAULT_REPO_ID}）",
+        "--dataset-dir",
+        default=DATASET_RECORDINGS_DIR,
+        help=f"remote subdirectory in the dataset repo (default: {DATASET_RECORDINGS_DIR})",
     )
-    ap.add_argument(
-        "--skip-dir",
-        action="append",
-        default=[],
-        metavar="NAME",
-        help="跳过的子目录名（可重复，默认跳过 overlay）",
-    )
-    ap.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="仅列出将要上传/跳过的文件夹，不实际上传",
-    )
+    ap.add_argument("--skip-dir", action="append", default=[], metavar="NAME")
+    ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
     recordings = args.recordings.resolve()
@@ -186,7 +187,7 @@ def main() -> None:
     try:
         from modelscope.hub.api import HubApi
     except ImportError:
-        print("错误：未安装 modelscope。", file=sys.stderr)
+        print("错误：未安装 modelscope，请先运行 install.bat。", file=sys.stderr)
         sys.exit(1)
 
     api = HubApi()
@@ -194,7 +195,9 @@ def main() -> None:
 
     try:
         verify_write_access(api, args.repo_id, token)
-        remote_folders = list_remote_top_folders(api, args.repo_id, token)
+        remote_folders = list_remote_session_folders(
+            api, args.repo_id, token, dataset_dir=args.dataset_dir
+        )
     except PermissionError as exc:
         print(f"错误：{exc}", file=sys.stderr)
         sys.exit(1)
@@ -205,7 +208,7 @@ def main() -> None:
     to_upload = [d for d in local_dirs if d.name not in remote_folders]
     skipped = [d for d in local_dirs if d.name in remote_folders]
 
-    print(f"{args.repo_id}  上传 {len(to_upload)}  跳过 {len(skipped)}")
+    print(f"{args.repo_id}/{args.dataset_dir}  上传 {len(to_upload)}  跳过 {len(skipped)}")
     if skipped:
         print("跳过:", ", ".join(d.name for d in skipped))
 
@@ -219,13 +222,14 @@ def main() -> None:
     failed: list[str] = []
     for i, folder in enumerate(to_upload, start=1):
         name = folder.name
-        print(f"[{i}/{len(to_upload)}] {name}")
+        remote_path = remote_path_for_session(name, dataset_dir=args.dataset_dir)
+        print(f"[{i}/{len(to_upload)}] {remote_path}")
         try:
             with _suppress_upload_report():
                 api.upload_folder(
                     repo_id=args.repo_id,
                     folder_path=folder,
-                    path_in_repo=name,
+                    path_in_repo=remote_path,
                     repo_type="dataset",
                     token=token,
                     commit_message=f"upload session {name}",

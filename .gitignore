@@ -22,3 +22,7 @@ _zip_inspect/
 .DS_Store
 
 recordings/
+
+# ModelScope upload pack artifacts
+modelscope-upload/.venv/
+modelscope-upload-portable-*.zip

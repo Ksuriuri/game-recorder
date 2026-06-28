@@ -1,0 +1,42 @@
+ModelScope 录制数据上传包 - 使用说明
+====================================
+
+【解压位置】
+  将本 zip 解压到 game-recorder 文件夹的根目录。
+
+  正确示例（解压后应能看到 modelscope-upload 文件夹）：
+
+    D:\game-recorder\
+      install.bat
+      run.bat
+      recordings\          <-- 录制好的数据在这里
+      .tools\
+      .venv\
+      modelscope-upload\   <-- 本压缩包解压出来的文件夹
+        使用方式.txt       <-- 本文件
+        upload.bat         <-- 双击这个上传
+        ...
+
+  错误示例：
+    - 解压到桌面、下载文件夹（旁边没有 recordings 文件夹）
+    - 只解压出 modelscope-upload 里的文件，没有和 recordings 同级
+
+【运行哪个文件】
+  双击：modelscope-upload\upload.bat
+
+  作用：
+    1. 首次运行会自动安装上传所需环境（离线，不联网）
+    2. 读取上一级目录的 recordings\ 里各 session 文件夹
+    3. 上传到 ModelScope 数据集 kusriri/world-game-data 的 recordings/ 目录
+    4. 远程已有同名 session 则自动跳过
+
+【使用前请确认】
+  1. 本电脑已经安装过游戏录制器（根目录运行过 install.bat）
+  2. recordings\ 里已有要上传的 session 文件夹
+  3. 上传需要联网
+
+【其他文件说明】
+  upload.bat           一键安装 + 上传（日常使用这个）
+  install.bat          仅安装上传环境，不上传
+  upload_recordings.py 上传脚本，一般不用手动运行
+  wheels\              离线安装包，请勿删除
