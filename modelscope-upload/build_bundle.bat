@@ -13,6 +13,7 @@ set "UV_CACHE_DIR=%TOOLS_DIR%\uv-cache"
 set "UV_PYTHON_INSTALL_DIR=%TOOLS_DIR%\python"
 set "WHEELS_DIR=%PACK_DIR%\wheels"
 set "VENV_DIR=%PACK_DIR%\.venv"
+set "REQUIREMENTS=%PACK_DIR%\requirements.txt"
 
 if not exist "%UV_EXE%" (
     echo ERROR: Run install.bat in the game-recorder root first.
@@ -25,7 +26,11 @@ echo   Pack dir: %PACK_DIR%
 echo ============================================================
 echo.
 
-echo [1/3] Download modelscope wheels ...
+echo [1/3] Download pinned modelscope wheels ...
+if not exist "%REQUIREMENTS%" (
+    echo ERROR: Missing "%REQUIREMENTS%"
+    goto :fail
+)
 if exist "%WHEELS_DIR%" rmdir /s /q "%WHEELS_DIR%"
 mkdir "%WHEELS_DIR%"
 
@@ -39,7 +44,7 @@ if not defined MANAGED_PYTHON_EXE (
     goto :fail
 )
 
-"%MANAGED_PYTHON_EXE%" -m pip download modelscope -d "%WHEELS_DIR%"
+"%MANAGED_PYTHON_EXE%" -m pip download -r "%REQUIREMENTS%" -d "%WHEELS_DIR%"
 if errorlevel 1 goto :fail_wheels
 
 echo.

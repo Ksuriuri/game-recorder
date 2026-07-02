@@ -26,3 +26,11 @@ recordings/
 # ModelScope upload pack artifacts
 modelscope-upload/.venv/
 modelscope-upload-portable-*.zip
+
+# ModelScope sample pack artifacts
+modelscope-sample/.venv/
+modelscope-sample/.tools/
+modelscope-sample/.cache/
+modelscope-sample/wheels/
+modelscope-sample/data/
+modelscope-sample-portable-*.zip

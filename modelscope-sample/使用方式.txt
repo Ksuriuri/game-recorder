@@ -1,0 +1,104 @@
+ModelScope 数据工具包 - 使用说明
+================================
+
+【这是什么】
+  本文件夹包含两个工具：
+
+  1. sample.bat   — 从 ModelScope 按日期、录制人抽样下载视频（验收评测）
+  2. cleanup.bat  — 删除 ModelScope 上过小的 session（mp4 总大小 < 10MB）
+
+  抽样下载的视频保存在本文件夹内的 data\ 目录。
+
+【解压位置】
+  可解压到任意目录，无需安装 game-recorder 本体。
+
+  正确示例：
+
+    D:\modelscope-sample\
+      使用方式.txt            <-- 本文件
+      sample.bat              <-- 抽样下载
+      cleanup.bat             <-- 清理过小数据
+      install.bat
+      sample_recordings.py
+      cleanup_short_sessions.py
+      wheels\                 <-- 离线安装包（打包时生成）
+      .tools\                 <-- 便携 Python/uv（打包时生成）
+      data\                   <-- 抽样下载输出（运行时生成）
+      .cache\                 <-- 下载缓存（运行后自动清理）
+
+【运行前请确认】
+  1. sample.bat / cleanup.bat 首次运行会自动安装 modelscope（离线，用 wheels\ + .tools\）
+  2. 两个脚本都需要联网访问 ModelScope
+  3. cleanup.bat 还需要本机已安装 Git（含 Git LFS）
+     - 下载：https://git-scm.com/download/win
+     - 安装时勾选 Git LFS
+  4. 若 zip 内没有 wheels\ 或 .tools\，需在开发机运行 build_bundle.bat 重新打包
+
+================================================================
+一、抽样下载（sample.bat）
+================================================================
+
+【怎么用】
+  双击 sample.bat，按提示操作：
+    1. 输入日期，例如 20260702
+    2. 输入每位录制人抽样数量（1-20，回车默认 5）
+
+【会做什么】
+  1. 查找该日期下所有 session 文件夹
+  2. 按录制人分组，每人抽 N 条（不足 N 条则全下，N 默认 5）
+  3. 抽样时覆盖长、中、短各种时长
+  4. 显示当日视频总时长
+  5. 下载到 data\YYYYMMDD\录制人ID\session文件夹\
+     （session 文件夹内直接是 meta.json 和 mp4，不会再嵌套 recordings\）
+  6. 下载成功后自动删除 .cache\ 缓存
+
+【命令行（可选）】
+  sample.bat 20260702                    指定日期（仍提示输入抽样数）
+  sample.bat 20260702 --per-recorder 8   指定日期和每人抽 8 条
+  sample.bat 20260702 --dry-run          只看抽样计划，不下载
+
+================================================================
+二、清理过小数据（cleanup.bat）
+================================================================
+
+【干什么】
+  扫描 ModelScope 数据集 recordings/ 下所有 session，
+  若该文件夹内 mp4 总大小 < 10MB，则从 ModelScope 上删除整个 session 文件夹。
+
+【怎么用】
+  双击 cleanup.bat — 默认会直接删除（需联网 + Git）
+
+  建议首次先预览：
+    cleanup.bat --dry-run
+
+【命令行（可选）】
+  cleanup.bat --dry-run              仅预览，不删除
+  cleanup.bat --min-video-mb 5       自定义阈值（MB）
+
+================================================================
+三、其他文件说明
+================================================================
+
+  sample.bat                 一键安装 + 抽样下载
+  cleanup.bat                一键安装 + 清理过小 session
+  install.bat                仅安装 Python 环境，不执行业务
+  build_bundle.bat           制作离线 zip（开发机，需联网）
+  sample_recordings.py       抽样脚本本体
+  cleanup_short_sessions.py  清理脚本本体
+  data\                      抽样下载输出
+  .cache\                    下载过程中的临时缓存（成功后自动删）
+
+================================================================
+四、制作离线 zip（开发机）
+================================================================
+
+  1. 确保 game-recorder 根目录已运行过 install.bat
+  2. 双击 modelscope-sample\build_bundle.bat
+  3. 得到 game-recorder 根目录下的 modelscope-sample-portable-YYYYMMDD.zip
+  4. 在目标 Windows 电脑：
+       a. 解压 zip 到任意目录（如 D:\modelscope-sample\）
+       b. 双击 sample.bat 做抽样，或 cleanup.bat 做清理
+       c. 首次运行会自动创建 .venv\ 和 .cache\
+
+  zip 内已包含 wheels\、.tools\、两个 bat 及脚本，解压即可用。
+  cleanup.bat 仍需目标电脑自行安装 Git（含 LFS）。

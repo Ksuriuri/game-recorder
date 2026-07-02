@@ -1,0 +1,6 @@
+.venv/
+.tools/
+.cache/
+wheels/
+data/
+*.zip

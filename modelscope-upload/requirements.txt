@@ -1,0 +1,3 @@
+# Pinned for reproducible offline/online installs. Bump intentionally after testing.
+modelscope==1.38.0
+modelscope-hub==0.1.6

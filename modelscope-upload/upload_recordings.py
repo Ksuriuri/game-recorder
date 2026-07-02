@@ -17,6 +17,7 @@ MODELSCOPE_TOKEN = "ms-54fac99a-5958-42d4-879d-b9445227cb51"
 DEFAULT_SKIP_DIRS = frozenset({"overlay"})
 # Session folders are stored under this path in the ModelScope dataset repo.
 DATASET_RECORDINGS_DIR = "recordings"
+DEFAULT_MIN_VIDEO_MB = 10
 
 
 def _pack_root() -> Path:
@@ -51,17 +52,28 @@ def _entry_name(item: dict) -> str | None:
 def verify_write_access(api, repo_id: str, token: str) -> None:
     import json
 
-    url = f"{api.endpoint}/api/v1/repos/datasets/{repo_id}/info/lfs/objects/batch"
+    import requests
+
+    endpoint = getattr(api, "endpoint", None) or api._api._config.endpoint
+    url = f"{endpoint.rstrip('/')}/api/v1/repos/datasets/{repo_id}/info/lfs/objects/batch"
     payload = {
         "operation": "upload",
         "objects": [{"oid": "0" * 64, "size": 1}],
     }
-    cookies = api.get_cookies(access_token=token, cookies_required=True)
-    response = api.session.post(
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {token}",
+        "Cookie": f"m_session_id={token}",
+    }
+    api_headers = getattr(api, "headers", None) or {}
+    user_agent = api_headers.get("user-agent")
+    if user_agent:
+        headers["user-agent"] = user_agent
+    response = requests.post(
         url,
-        headers=api.builder_headers(api.headers),
+        headers=headers,
         data=json.dumps(payload),
-        cookies=cookies,
+        timeout=60,
     )
     if response.status_code == 404:
         raise PermissionError(
@@ -112,6 +124,14 @@ def list_remote_session_folders(
 
 def remote_path_for_session(session_name: str, *, dataset_dir: str = DATASET_RECORDINGS_DIR) -> str:
     return f"{dataset_dir.strip('/')}/{session_name}"
+
+
+def session_mp4_total_bytes(folder: Path) -> int:
+    return sum(path.stat().st_size for path in folder.glob("*.mp4") if path.is_file())
+
+
+def format_mib(size_bytes: int) -> str:
+    return f"{size_bytes / (1024 * 1024):.2f}MB"
 
 
 @contextmanager
@@ -168,6 +188,12 @@ def main() -> None:
         help=f"remote subdirectory in the dataset repo (default: {DATASET_RECORDINGS_DIR})",
     )
     ap.add_argument("--skip-dir", action="append", default=[], metavar="NAME")
+    ap.add_argument(
+        "--min-video-mb",
+        type=float,
+        default=DEFAULT_MIN_VIDEO_MB,
+        help=f"skip session when total mp4 size is below this threshold (default: {DEFAULT_MIN_VIDEO_MB})",
+    )
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -191,7 +217,7 @@ def main() -> None:
         sys.exit(1)
 
     api = HubApi()
-    api.login(access_token=token)
+    api.login(token)
 
     try:
         verify_write_access(api, args.repo_id, token)
@@ -206,11 +232,36 @@ def main() -> None:
         sys.exit(1)
 
     to_upload = [d for d in local_dirs if d.name not in remote_folders]
-    skipped = [d for d in local_dirs if d.name in remote_folders]
+    skipped_remote = [d for d in local_dirs if d.name in remote_folders]
 
-    print(f"{args.repo_id}/{args.dataset_dir}  上传 {len(to_upload)}  跳过 {len(skipped)}")
-    if skipped:
-        print("跳过:", ", ".join(d.name for d in skipped))
+    min_video_bytes = max(0, int(args.min_video_mb * 1024 * 1024))
+    too_small: list[tuple[Path, int]] = []
+    upload_candidates: list[Path] = []
+    for folder in to_upload:
+        mp4_bytes = session_mp4_total_bytes(folder)
+        if mp4_bytes < min_video_bytes:
+            too_small.append((folder, mp4_bytes))
+        else:
+            upload_candidates.append(folder)
+    to_upload = upload_candidates
+
+    print(
+        f"{args.repo_id}/{args.dataset_dir}  "
+        f"上传 {len(to_upload)}  "
+        f"跳过已存在 {len(skipped_remote)}  "
+        f"跳过过小 {len(too_small)}"
+    )
+    if skipped_remote:
+        print("跳过(已存在):", ", ".join(d.name for d in skipped_remote))
+    if too_small:
+        threshold = format_mib(min_video_bytes)
+        for folder, mp4_bytes in too_small:
+            if mp4_bytes <= 0:
+                print(f"跳过(无 mp4): {folder.name}")
+            else:
+                print(
+                    f"跳过(视频过小 {format_mib(mp4_bytes)} < {threshold}): {folder.name}"
+                )
 
     if not to_upload:
         return
