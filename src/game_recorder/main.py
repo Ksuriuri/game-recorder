@@ -304,6 +304,7 @@ def main() -> None:
         "violent": "由于操作过于剧烈，本次录制已自动结束。",
         "focus_lost": "由于切换到了其他窗口，本次录制已自动结束。",
         "frame_drop": "由于检测到视频丢帧（编码跟不上），本次录制已自动结束。",
+        "encoder_failed": "由于视频编码异常中断，本次录制已自动结束。",
     }
 
     def _restart_line() -> str:
@@ -325,6 +326,15 @@ def main() -> None:
             else:
                 extra = (
                     "建议降低游戏画质/帧率，或关闭占用 CPU 的后台程序后再试"
+                )
+        elif pending.reason == "encoder_failed":
+            extra = (
+                "编码可能只写入了开头极短一段；若反复出现，请检查系统音频设备或改用 --audio-device"
+            )
+            if pending.discarded_short:
+                extra = (
+                    f"本次有效时长不足 {config.min_recording_duration_s:g} 秒，数据已丢弃。"
+                    f"{extra}"
                 )
         elif pending.discarded_short:
             extra = (
@@ -366,6 +376,7 @@ def main() -> None:
         "violent": "操作过于剧烈（高频 WASD / 鼠标晃动），自动停止录制 …",
         "focus_lost": "游戏窗口失焦（切换至其他窗口），自动停止录制 …",
         "frame_drop": "检测到视频丢帧（编码跟不上），自动停止录制 …",
+        "encoder_failed": "视频编码进程异常退出，自动停止录制 …",
     }
 
     def _stop_session(

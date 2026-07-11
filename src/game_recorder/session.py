@@ -55,7 +55,7 @@ logger = logging.getLogger(__name__)
 # Virtual keys for movement keys (character walk).
 _WASD_VKS: frozenset[int] = frozenset((0x57, 0x41, 0x53, 0x44))  # W A S D
 AutoStopReason = Literal[
-    "idle", "stuck", "forbidden_key", "violent", "focus_lost", "frame_drop"
+    "idle", "stuck", "forbidden_key", "violent", "focus_lost", "frame_drop", "encoder_failed"
 ]
 AutoStopCallback = Callable[[AutoStopReason], None]
 
@@ -758,6 +758,12 @@ class Session:
                             self._frame_drop_tracker.window_drop_count,
                         )
                 self._encoder.write_frame(frame_bytes)
+                if (
+                    not self._stop_event.is_set()
+                    and self._on_auto_stop is not None
+                    and self._encoder.failed
+                ):
+                    self._trigger_auto_stop("encoder_failed")
 
             self._last_frame_bytes = frame_bytes
 
@@ -929,6 +935,11 @@ class Session:
                 self.config.frame_drop_stop_after_s,
                 self._frame_drop_tracker.window_drop_count,
                 self.config.frame_drop_max_tolerated,
+            )
+        elif reason == "encoder_failed":
+            logger.error(
+                "视频编码进程异常退出（可能为音频环回中断），触发自动停止；"
+                "请重新按热键开始录制"
             )
         elif reason == "forbidden_key":
             logger.info("检测到非人物移动操作（按键或鼠标点击/滚轮），触发自动停止")

@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 PENDING_NOTICE_FILENAME = ".pending_auto_stop.json"
 
 AutoStopReason = Literal[
-    "idle", "stuck", "forbidden_key", "violent", "focus_lost", "frame_drop"
+    "idle", "stuck", "forbidden_key", "violent", "focus_lost", "frame_drop", "encoder_failed"
 ]
 
 
@@ -59,6 +59,7 @@ def consume_pending_notice(output_dir: Path) -> PendingAutoStopNotice | None:
             "violent",
             "focus_lost",
             "frame_drop",
+            "encoder_failed",
         ):
             logger.warning("忽略无效的 pending notice：%r", reason)
             return None

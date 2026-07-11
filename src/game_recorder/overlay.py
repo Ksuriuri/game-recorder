@@ -22,7 +22,7 @@ Command = (
     | tuple[
         Literal["auto_stop_notice"],
         Literal[
-            "idle", "stuck", "forbidden_key", "violent", "focus_lost", "frame_drop"
+            "idle", "stuck", "forbidden_key", "violent", "focus_lost", "frame_drop", "encoder_failed"
         ],
         str,
         str | None,
@@ -37,6 +37,10 @@ _AUTO_STOP_HEADLINES: dict[str, tuple[str, str]] = {
     "focus_lost": ("由于切换到了其他窗口", "本次录制已自动结束"),
     "frame_drop": (
         "由于检测到视频丢帧（编码跟不上）",
+        "本次录制已自动结束",
+    ),
+    "encoder_failed": (
+        "由于视频编码异常中断",
         "本次录制已自动结束",
     ),
 }
@@ -188,6 +192,7 @@ class RecordingStatusOverlay:
                 "violent",
                 "focus_lost",
                 "frame_drop",
+                "encoder_failed",
             ],
             restart_line: str,
             extra_line: str | None = None,

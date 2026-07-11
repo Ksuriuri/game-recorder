@@ -226,6 +226,8 @@ class FFmpegEncoder:
         self._frame_size = 0
         self._ffmpeg_stderr = bytearray()
         self._stdin_broken_logged = False
+        self._intentional_stop = False
+        self._failed = False
         self._audio_source: str | None = None
 
         # Python soundcard-loopback pump (only set when that path is selected).
@@ -236,6 +238,11 @@ class FFmpegEncoder:
     @property
     def encoder_name(self) -> str:
         return self._encoder
+
+    @property
+    def failed(self) -> bool:
+        """True when FFmpeg exited unexpectedly while recording."""
+        return self._failed
 
     @property
     def audio_source(self) -> str | None:
@@ -249,8 +256,17 @@ class FFmpegEncoder:
         """
         return self._audio_source
 
+    def is_alive(self) -> bool:
+        """False when the child process has exited (excluding intentional stop())."""
+        if self._proc is None:
+            return False
+        return self._proc.poll() is None
+
     def start(self, width: int, height: int, output_path: Path) -> None:
         """Launch the FFmpeg subprocess."""
+        self._intentional_stop = False
+        self._failed = False
+        self._stdin_broken_logged = False
         self._frame_size = width * height * 3  # BGR24
 
         cfg = self.config
@@ -469,9 +485,23 @@ class FFmpegEncoder:
 
         threading.Thread(target=drain, name="ffmpeg-stderr", daemon=True).start()
 
+    def _mark_unexpected_exit(self, detail: str) -> None:
+        if self._intentional_stop or self._failed:
+            return
+        self._failed = True
+        logger.error("FFmpeg 编码进程异常退出：%s", detail)
+        self._dump_stderr()
+
     def write_frame(self, frame_bytes: bytes) -> None:
         """Write one raw BGR24 frame to the FFmpeg pipe."""
+        if self._intentional_stop:
+            return
         if self._proc is None or self._proc.stdin is None:
+            if not self._failed:
+                self._mark_unexpected_exit("进程或 stdin 不可用")
+            return
+        if self._proc.poll() is not None:
+            self._mark_unexpected_exit(f"returncode={self._proc.returncode}")
             return
         if len(frame_bytes) != self._frame_size:
             logger.warning(
@@ -488,13 +518,13 @@ class FFmpegEncoder:
         except (BrokenPipeError, OSError) as e:
             if not self._stdin_broken_logged:
                 self._stdin_broken_logged = True
-                logger.error("FFmpeg stdin 写入失败：%s", e)
-                self._dump_stderr()
+            self._mark_unexpected_exit(f"stdin 写入失败：{e}")
 
     def stop(self) -> None:
         """Gracefully close the pipe and wait for FFmpeg to finish."""
         if self._proc is None:
             return
+        self._intentional_stop = True
         try:
             if self._proc.stdin:
                 self._proc.stdin.close()
