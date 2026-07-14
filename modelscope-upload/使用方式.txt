@@ -28,7 +28,9 @@ ModelScope 录制数据上传包 - 使用说明
     1. 首次运行会自动安装上传所需环境（离线，不联网）
     2. 读取上一级目录的 recordings\ 里各 session 文件夹
     3. 上传到 ModelScope 数据集 kusriri/world-game-data 的 recordings/ 目录
-    4. 远程已有同名 session 则自动跳过
+    4. 同名 session 会先核对文件清单、大小和 SHA-256，确认完整才跳过
+       （只读取远程元数据，不会下载远程视频）
+    5. 遇到网络波动会自动重试；远程不完整的 session 会自动补传
 
 【使用前请确认】
   1. 本电脑已经安装过游戏录制器（根目录运行过 install.bat）

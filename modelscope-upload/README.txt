@@ -10,7 +10,9 @@ ModelScope 录制数据上传包
   双击 upload.bat
   - 首次会自动安装 modelscope（离线包用 wheels\，否则联网安装）
   - 上传 ../recordings/ 下各 session 到数据集内的 recordings/ 子目录
-  - 远程已有同名文件夹则跳过
+  - 同名 session 会先对比远程文件清单、大小和 SHA-256，完整才跳过
+  - 完整性检查只读取远程元数据，不下载远程视频
+  - 网络波动时自动重试；失败重开后也会补传不完整的 session
 
 目录结构（解压后）
 ------------------

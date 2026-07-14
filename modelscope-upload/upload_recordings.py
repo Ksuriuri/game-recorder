@@ -4,11 +4,15 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import logging
 import os
 import sys
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
+from time import sleep
+from typing import Callable, TypeVar
 
 os.environ.setdefault("MODELSCOPE_LOG_LEVEL", str(logging.ERROR))
 
@@ -18,6 +22,32 @@ DEFAULT_SKIP_DIRS = frozenset({"overlay"})
 # Session folders are stored under this path in the ModelScope dataset repo.
 DATASET_RECORDINGS_DIR = "recordings"
 DEFAULT_MIN_VIDEO_MB = 10
+DEFAULT_MAX_ATTEMPTS = 3
+DEFAULT_RETRY_DELAY_SECONDS = 5.0
+UPLOAD_INTERNAL_FILES = frozenset({".ms_upload_cache", ".ms_upload_progress"})
+UPLOAD_IGNORED_DIRS = frozenset({".git", ".cache"})
+
+T = TypeVar("T")
+
+
+@dataclass(frozen=True)
+class LocalFile:
+    path: Path
+    size: int
+    mtime_ns: int
+
+
+@dataclass(frozen=True)
+class RemoteFile:
+    size: int
+    sha256: str
+    in_check: bool
+
+
+@dataclass(frozen=True)
+class ManifestCheck:
+    complete: bool
+    detail: str
 
 
 def _pack_root() -> Path:
@@ -46,7 +76,33 @@ def _entry_name(item: dict) -> str | None:
     path = (item.get("Path") or item.get("Name") or "").strip().strip("/")
     if not path:
         return None
-    return path.split("/")[0]
+    return path.split("/")[-1]
+
+
+def call_with_retries(
+    operation: Callable[[], T],
+    *,
+    description: str,
+    max_attempts: int,
+    retry_delay: float,
+) -> T:
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return operation()
+        except PermissionError:
+            raise
+        except Exception as exc:
+            if attempt >= max_attempts:
+                raise
+            delay = retry_delay * (2 ** (attempt - 1))
+            print(
+                f"  {description}失败（{attempt}/{max_attempts}）：{exc}\n"
+                f"  {delay:g} 秒后重试...",
+                file=sys.stderr,
+                flush=True,
+            )
+            sleep(delay)
+    raise RuntimeError(f"{description}失败")
 
 
 def verify_write_access(api, repo_id: str, token: str) -> None:
@@ -75,7 +131,7 @@ def verify_write_access(api, repo_id: str, token: str) -> None:
         data=json.dumps(payload),
         timeout=60,
     )
-    if response.status_code == 404:
+    if response.status_code in {401, 403, 404}:
         raise PermissionError(
             "Token 对该数据集没有写入权限。\n"
             "请用 kusriri 账号在 https://modelscope.cn/my/myaccesstoken 创建带写入权限的 Token。"
@@ -86,7 +142,7 @@ def verify_write_access(api, repo_id: str, token: str) -> None:
             msg = body.get("Message") or response.text
         except Exception:
             msg = response.text
-        raise PermissionError(f"无法写入数据集（HTTP {response.status_code}）：{msg}")
+        raise RuntimeError(f"无法写入数据集（HTTP {response.status_code}）：{msg}")
 
 
 def list_remote_session_folders(
@@ -126,12 +182,250 @@ def remote_path_for_session(session_name: str, *, dataset_dir: str = DATASET_REC
     return f"{dataset_dir.strip('/')}/{session_name}"
 
 
+def list_remote_session_files(
+    api,
+    repo_id: str,
+    token: str,
+    session_name: str,
+    *,
+    dataset_dir: str = DATASET_RECORDINGS_DIR,
+) -> dict[str, RemoteFile]:
+    from modelscope.utils.constant import DEFAULT_DATASET_REVISION
+
+    dataset_dir = dataset_dir.strip("/")
+    session_root = f"{dataset_dir}/{session_name}"
+    root_path = f"/{session_root}"
+    prefix = f"{session_root}/"
+    remote: dict[str, RemoteFile] = {}
+    page = 1
+    page_size = 100
+
+    while True:
+        batch = api.get_dataset_files(
+            repo_id=repo_id,
+            revision=DEFAULT_DATASET_REVISION,
+            root_path=root_path,
+            recursive=True,
+            page_number=page,
+            page_size=page_size,
+            token=token,
+        )
+        if not batch:
+            break
+        for item in batch:
+            if item.get("Type") != "blob":
+                continue
+            path = (item.get("Path") or item.get("Name") or "").strip().strip("/")
+            if not path.startswith(prefix):
+                continue
+            relative_path = path[len(prefix) :]
+            if not relative_path:
+                continue
+            remote[relative_path] = RemoteFile(
+                size=int(item.get("Size") or 0),
+                sha256=str(item.get("Sha256") or "").strip().lower(),
+                in_check=bool(item.get("InCheck")),
+            )
+        if len(batch) < page_size:
+            break
+        page += 1
+    return remote
+
+
+def local_session_manifest(folder: Path) -> dict[str, LocalFile]:
+    manifest: dict[str, LocalFile] = {}
+    for path in sorted(folder.rglob("*")):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(folder)
+        if path.name in UPLOAD_INTERNAL_FILES:
+            continue
+        if any(part in UPLOAD_IGNORED_DIRS for part in relative.parts):
+            continue
+        stat = path.stat()
+        manifest[relative.as_posix()] = LocalFile(
+            path=path,
+            size=stat.st_size,
+            mtime_ns=stat.st_mtime_ns,
+        )
+    return manifest
+
+
+def _file_sha256(
+    local_file: LocalFile,
+    cache: dict[tuple[Path, int, int], str],
+) -> str:
+    key = (local_file.path, local_file.size, local_file.mtime_ns)
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+
+    digest = hashlib.sha256()
+    with local_file.path.open("rb") as stream:
+        while chunk := stream.read(4 * 1024 * 1024):
+            digest.update(chunk)
+    result = digest.hexdigest()
+    cache[key] = result
+    return result
+
+
+def _is_sha256(value: str) -> bool:
+    return len(value) == 64 and all(char in "0123456789abcdef" for char in value)
+
+
+def _short_path_list(paths: list[str], *, limit: int = 3) -> str:
+    shown = ", ".join(paths[:limit])
+    if len(paths) > limit:
+        shown += f" 等 {len(paths)} 个"
+    return shown
+
+
+def check_remote_manifest(
+    local: dict[str, LocalFile],
+    remote: dict[str, RemoteFile],
+    *,
+    verify_hashes: bool,
+    hash_cache: dict[tuple[Path, int, int], str],
+) -> ManifestCheck:
+    if not local:
+        return ManifestCheck(False, "本地文件夹为空")
+
+    missing = sorted(set(local) - set(remote))
+    pending: list[str] = []
+    size_mismatches: list[str] = []
+    unavailable_hashes: list[str] = []
+    hash_mismatches: list[str] = []
+
+    for relative_path, local_file in local.items():
+        remote_file = remote.get(relative_path)
+        if remote_file is None:
+            continue
+        if remote_file.in_check:
+            pending.append(relative_path)
+            continue
+        if local_file.size != remote_file.size:
+            size_mismatches.append(relative_path)
+            continue
+        if verify_hashes and not _is_sha256(remote_file.sha256):
+            unavailable_hashes.append(relative_path)
+            continue
+        if verify_hashes and _file_sha256(local_file, hash_cache) != remote_file.sha256:
+            hash_mismatches.append(relative_path)
+
+    problems: list[str] = []
+    if missing:
+        problems.append(f"缺少文件: {_short_path_list(missing)}")
+    if pending:
+        problems.append(f"服务器仍在校验: {_short_path_list(sorted(pending))}")
+    if size_mismatches:
+        problems.append(f"大小不一致: {_short_path_list(sorted(size_mismatches))}")
+    if unavailable_hashes:
+        problems.append(
+            f"服务器未提供 SHA-256: {_short_path_list(sorted(unavailable_hashes))}"
+        )
+    if hash_mismatches:
+        problems.append(f"SHA-256 不一致: {_short_path_list(sorted(hash_mismatches))}")
+    if problems:
+        return ManifestCheck(False, "；".join(problems))
+
+    hash_note = "、SHA-256" if verify_hashes else ""
+    return ManifestCheck(True, f"{len(local)} 个文件的名称、大小{hash_note}一致")
+
+
 def session_mp4_total_bytes(folder: Path) -> int:
     return sum(path.stat().st_size for path in folder.glob("*.mp4") if path.is_file())
 
 
 def format_mib(size_bytes: int) -> str:
     return f"{size_bytes / (1024 * 1024):.2f}MB"
+
+
+def upload_session_with_retries(
+    api,
+    *,
+    repo_id: str,
+    token: str,
+    dataset_dir: str,
+    folder: Path,
+    max_attempts: int,
+    retry_delay: float,
+    verify_hashes: bool,
+    hash_cache: dict[tuple[Path, int, int], str],
+) -> tuple[bool, str]:
+    name = folder.name
+    remote_path = remote_path_for_session(name, dataset_dir=dataset_dir)
+    last_detail = "未知错误"
+
+    for attempt in range(1, max_attempts + 1):
+        upload_error: Exception | None = None
+        if attempt > 1:
+            print(f"  开始第 {attempt}/{max_attempts} 次 session 上传尝试...", flush=True)
+        try:
+            with _suppress_upload_report():
+                api.upload_folder(
+                    repo_id=repo_id,
+                    folder_path=folder,
+                    path_in_repo=remote_path,
+                    repo_type="dataset",
+                    token=token,
+                    commit_message=f"upload session {name}",
+                    # The remote manifest is authoritative. A stale local SDK
+                    # cache must not hide files missing from the repository.
+                    use_cache=False,
+                )
+        except Exception as exc:
+            upload_error = exc
+
+        try:
+            remote_files = call_with_retries(
+                lambda: list_remote_session_files(
+                    api,
+                    repo_id,
+                    token,
+                    name,
+                    dataset_dir=dataset_dir,
+                ),
+                description=f"校验远程 session {name}",
+                max_attempts=max_attempts,
+                retry_delay=retry_delay,
+            )
+            local_files = local_session_manifest(folder)
+            check = check_remote_manifest(
+                local_files,
+                remote_files,
+                verify_hashes=verify_hashes,
+                hash_cache=hash_cache,
+            )
+        except PermissionError:
+            raise
+        except Exception as exc:
+            check = ManifestCheck(False, f"无法读取远程清单: {exc}")
+
+        if check.complete:
+            if upload_error is not None:
+                print(
+                    f"  上传调用虽报错，但远程校验已完整，按成功处理：{upload_error}",
+                    flush=True,
+                )
+            else:
+                print(f"  远程校验通过：{check.detail}", flush=True)
+            return True, check.detail
+
+        if upload_error is not None:
+            last_detail = f"{upload_error}；远程校验未通过（{check.detail}）"
+        else:
+            last_detail = f"上传结束但远程校验未通过（{check.detail}）"
+        print(
+            f"  第 {attempt}/{max_attempts} 次失败：{last_detail}",
+            file=sys.stderr,
+            flush=True,
+        )
+        if attempt < max_attempts:
+            delay = retry_delay * (2 ** (attempt - 1))
+            print(f"  {delay:g} 秒后重试整个 session...", flush=True)
+            sleep(delay)
+
+    return False, last_detail
 
 
 @contextmanager
@@ -172,7 +466,7 @@ def _suppress_upload_report():
 
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="Upload session folders under recordings/ to ModelScope (skip if already on server)."
+        description="Upload recordings/ sessions to ModelScope and verify completeness before skipping."
     )
     ap.add_argument(
         "recordings",
@@ -194,12 +488,35 @@ def main() -> None:
         default=DEFAULT_MIN_VIDEO_MB,
         help=f"skip session when total mp4 size is below this threshold (default: {DEFAULT_MIN_VIDEO_MB})",
     )
+    ap.add_argument(
+        "--max-attempts",
+        type=int,
+        default=DEFAULT_MAX_ATTEMPTS,
+        help=f"maximum attempts for network operations and each session (default: {DEFAULT_MAX_ATTEMPTS})",
+    )
+    ap.add_argument(
+        "--retry-delay",
+        type=float,
+        default=DEFAULT_RETRY_DELAY_SECONDS,
+        help=f"initial retry delay in seconds; doubles each attempt (default: {DEFAULT_RETRY_DELAY_SECONDS:g})",
+    )
+    ap.add_argument(
+        "--no-verify-hash",
+        action="store_true",
+        help="only compare remote file names and sizes; do not hash local files",
+    )
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
     recordings = args.recordings.resolve()
     if not recordings.is_dir():
         print(f"错误：找不到 recordings 目录：{recordings}", file=sys.stderr)
+        sys.exit(1)
+    if args.max_attempts < 1:
+        print("错误：--max-attempts 必须至少为 1。", file=sys.stderr)
+        sys.exit(1)
+    if args.retry_delay < 0:
+        print("错误：--retry-delay 不能小于 0。", file=sys.stderr)
         sys.exit(1)
 
     skip_dirs = set(DEFAULT_SKIP_DIRS) | set(args.skip_dir)
@@ -220,9 +537,19 @@ def main() -> None:
     api.login(token)
 
     try:
-        verify_write_access(api, args.repo_id, token)
-        remote_folders = list_remote_session_folders(
-            api, args.repo_id, token, dataset_dir=args.dataset_dir
+        call_with_retries(
+            lambda: verify_write_access(api, args.repo_id, token),
+            description="检查数据集写入权限",
+            max_attempts=args.max_attempts,
+            retry_delay=args.retry_delay,
+        )
+        remote_folders = call_with_retries(
+            lambda: list_remote_session_folders(
+                api, args.repo_id, token, dataset_dir=args.dataset_dir
+            ),
+            description="读取远程 session 列表",
+            max_attempts=args.max_attempts,
+            retry_delay=args.retry_delay,
         )
     except PermissionError as exc:
         print(f"错误：{exc}", file=sys.stderr)
@@ -231,28 +558,83 @@ def main() -> None:
         print(f"错误：{exc}", file=sys.stderr)
         sys.exit(1)
 
-    to_upload = [d for d in local_dirs if d.name not in remote_folders]
-    skipped_remote = [d for d in local_dirs if d.name in remote_folders]
-
     min_video_bytes = max(0, int(args.min_video_mb * 1024 * 1024))
     too_small: list[tuple[Path, int]] = []
-    upload_candidates: list[Path] = []
-    for folder in to_upload:
+    eligible_dirs: list[Path] = []
+    for folder in local_dirs:
         mp4_bytes = session_mp4_total_bytes(folder)
         if mp4_bytes < min_video_bytes:
             too_small.append((folder, mp4_bytes))
         else:
-            upload_candidates.append(folder)
-    to_upload = upload_candidates
+            eligible_dirs.append(folder)
+
+    verify_hashes = not args.no_verify_hash
+    hash_cache: dict[tuple[Path, int, int], str] = {}
+    skipped_remote: list[Path] = []
+    to_upload: list[Path] = []
+    incomplete_remote: list[tuple[Path, str]] = []
+    existing_dirs = [folder for folder in eligible_dirs if folder.name in remote_folders]
+
+    if existing_dirs:
+        checks = "文件名、大小和 SHA-256" if verify_hashes else "文件名和大小"
+        print(
+            f"正在校验 {len(existing_dirs)} 个远程同名 session 的{checks}"
+            "（只读取元数据，不下载远程视频）...",
+            flush=True,
+        )
+
+    existing_index = 0
+    for folder in eligible_dirs:
+        if folder.name not in remote_folders:
+            to_upload.append(folder)
+            continue
+
+        existing_index += 1
+        print(f"  [{existing_index}/{len(existing_dirs)}] {folder.name}", flush=True)
+        try:
+            remote_files = call_with_retries(
+                lambda folder=folder: list_remote_session_files(
+                    api,
+                    args.repo_id,
+                    token,
+                    folder.name,
+                    dataset_dir=args.dataset_dir,
+                ),
+                description=f"读取远程清单 {folder.name}",
+                max_attempts=args.max_attempts,
+                retry_delay=args.retry_delay,
+            )
+            check = check_remote_manifest(
+                local_session_manifest(folder),
+                remote_files,
+                verify_hashes=verify_hashes,
+                hash_cache=hash_cache,
+            )
+        except PermissionError as exc:
+            print(f"错误：{exc}", file=sys.stderr)
+            sys.exit(1)
+        except Exception as exc:
+            check = ManifestCheck(False, f"无法校验远程清单: {exc}")
+
+        if check.complete:
+            print(f"    完整，跳过：{check.detail}", flush=True)
+            skipped_remote.append(folder)
+        else:
+            print(f"    不完整，将重新上传：{check.detail}", flush=True)
+            incomplete_remote.append((folder, check.detail))
+            to_upload.append(folder)
 
     print(
         f"{args.repo_id}/{args.dataset_dir}  "
         f"上传 {len(to_upload)}  "
-        f"跳过已存在 {len(skipped_remote)}  "
+        f"跳过已完整 {len(skipped_remote)}  "
         f"跳过过小 {len(too_small)}"
     )
     if skipped_remote:
-        print("跳过(已存在):", ", ".join(d.name for d in skipped_remote))
+        print("跳过(远程完整):", ", ".join(d.name for d in skipped_remote))
+    if incomplete_remote:
+        for folder, detail in incomplete_remote:
+            print(f"重传(远程不完整): {folder.name} - {detail}")
     if too_small:
         threshold = format_mib(min_video_bytes)
         for folder, mp4_bytes in too_small:
@@ -276,15 +658,23 @@ def main() -> None:
         remote_path = remote_path_for_session(name, dataset_dir=args.dataset_dir)
         print(f"[{i}/{len(to_upload)}] {remote_path}")
         try:
-            with _suppress_upload_report():
-                api.upload_folder(
-                    repo_id=args.repo_id,
-                    folder_path=folder,
-                    path_in_repo=remote_path,
-                    repo_type="dataset",
-                    token=token,
-                    commit_message=f"upload session {name}",
-                )
+            success, detail = upload_session_with_retries(
+                api,
+                repo_id=args.repo_id,
+                token=token,
+                dataset_dir=args.dataset_dir,
+                folder=folder,
+                max_attempts=args.max_attempts,
+                retry_delay=args.retry_delay,
+                verify_hashes=verify_hashes,
+                hash_cache=hash_cache,
+            )
+            if not success:
+                print(f"  最终失败: {detail}", file=sys.stderr)
+                failed.append(name)
+        except PermissionError as exc:
+            print(f"  失败: {exc}", file=sys.stderr)
+            failed.append(name)
         except Exception as exc:
             print(f"  失败: {exc}", file=sys.stderr)
             failed.append(name)
