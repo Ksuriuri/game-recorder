@@ -1,0 +1,8 @@
+AppID
+YOUR_APP_ID
+AppKey
+YOUR_APP_KEY
+Secretkey
+YOUR_SECRET_KEY
+Signkey
+YOUR_SIGN_KEY
