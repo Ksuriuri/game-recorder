@@ -10,7 +10,7 @@ using GTA.Math;
 /// Samples GTA V gameplay-camera pose.
 ///
 /// Default mode (follow_recorder=true): watches active_session.json written by
-/// game-recorder. When a session starts, writes camera_raw.jsonl into that
+/// game-recorder. When a session starts, writes camera_raw_gta.jsonl into that
 /// session folder; when recording ends, stops. No manual F10 needed.
 ///
 /// Optional manual toggle still available if configured.
@@ -18,7 +18,7 @@ using GTA.Math;
 public class CameraPoseLogger : Script
 {
     private const string ConfigFileName = "camera_pose_logger.config.json";
-    private const string DefaultRawName = "camera_raw.jsonl";
+    private const string DefaultRawName = "camera_raw_gta.jsonl";
 
     private string _outputDir;
     private string _controlFile;

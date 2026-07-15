@@ -13,14 +13,14 @@ REM     1) Copy the zip onto a USB stick.
 REM     2) On the cafe PC, extract the zip into D:\game-recorder
 REM        (or any folder NOT on the system drive — see install.bat warning).
 REM     3) Double-click install.bat       (~10 s, no network).
-REM     4) Double-click run.bat           (start recording).
+REM     4) Double-click run.bat, then start GTA V or Black Myth: Wukong.
 REM
 REM   What goes into the zip:
 REM     .tools\          uv.exe + managed Python 3.11 + uv cache
 REM     ffmpeg\          BtbN gpl FFmpeg (NVENC + libx264 + dshow)
 REM     wheels\          pre-downloaded dependency wheels (numpy, opencv-headless,
 REM                      dxcam, soundcard, cffi, pycparser …)
-REM     src\, scripts\, gta-camera\, pyproject.toml
+REM     src\, scripts\, gta-camera\, wukong-camera\, pyproject.toml
 REM     根目录全部 *.bat / *.vbs / *.md / *.txt（install.bat、run.bat、录制操作手册.txt 等）
 REM
 REM   What is NOT shipped:
@@ -147,7 +147,15 @@ REM ----------------------------------------------------------------
 REM Keep root launchers in sync with scripts\ templates (install.bat does this too;
 REM --pack-only skips install, so sync here before zipping).
 copy /Y "%PROJECT_DIR%\scripts\run.bat" "%PROJECT_DIR%\run.bat" >nul
+if errorlevel 1 (
+    echo [错误] 缺少或无法复制 scripts\run.bat。
+    exit /b 1
+)
 copy /Y "%PROJECT_DIR%\scripts\run-console.bat" "%PROJECT_DIR%\run-console.bat" >nul
+if errorlevel 1 (
+    echo [错误] 缺少或无法复制 scripts\run-console.bat。
+    exit /b 1
+)
 
 echo.
 echo [4/4] 正在压缩打包 ...
@@ -161,7 +169,7 @@ REM Write to .tools\ first, then move — avoids Compress-Archive failing when a
 REM older portable zip in the project root is open in Explorer or the IDE.
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
     "$ErrorActionPreference='Stop';" ^
-    "$core = @('.tools','ffmpeg','wheels','src','scripts','gta-camera','pyproject.toml');" ^
+    "$core = @('.tools','ffmpeg','wheels','src','scripts','gta-camera','wukong-camera','pyproject.toml');" ^
     "$root = Get-ChildItem -LiteralPath '.' -File | Where-Object { $_.Extension -in @('.bat','.vbs','.md','.txt') } | ForEach-Object { $_.Name };" ^
     "$items = ($core + $root) | Select-Object -Unique | Where-Object { Test-Path $_ };" ^
     "Compress-Archive -Path $items -DestinationPath '%BUNDLE_TMP%' -CompressionLevel Optimal -Force"
@@ -190,13 +198,15 @@ echo.
 echo   网吧部署：
 echo     1. 将 zip 复制到目标 PC 的 D 盘，不要用 C 盘
 echo     2. 右键 - 全部提取到纯英文目录，如 D:\game-recorder
-echo     3. 双击 install.bat（离线重建环境；若提示输入 GTA 主目录请粘贴后回车）
-echo     4. 故事模式进 GTA，再双击 run.bat 录制；session 内应有 camera.jsonl
+echo     3. 双击 install.bat（离线重建环境；可自动发现或提示输入 GTA/黑神话目录）
+echo     4. 双击 run.bat 后再进入对应游戏录制；session 内应有 camera.jsonl
 echo.
 echo   注意：
 echo     - 目标机需已安装 GTA V；ScriptHookV 版本需匹配当前游戏版本
 echo     - 游戏大更新后若进故事模式报 Unknown game version，需更新
 echo       gta-camera\vendor\ScriptHookV\ 后再跑一次 gta-camera\install.bat
+echo     - 黑神话插件完全离线分发；安装/卸载时必须先关闭游戏，写入受保护目录
+echo       时会请求 UAC。版本不匹配时请先验证兼容性，不要盲目强制安装
 echo.
 echo   本机构建后：
 echo     .venv\ 已删除，zip 中不包含路径绑定的 venv。

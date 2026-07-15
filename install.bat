@@ -6,7 +6,7 @@ cd /d "%~dp0"
 set "PROJECT_DIR=%~dp0"
 if "%PROJECT_DIR:~-1%"=="\" set "PROJECT_DIR=%PROJECT_DIR:~0,-1%"
 
-REM ---- All paths are project-local, nothing goes to system drive ----
+REM ---- Runtime dependencies stay project-local; optional camera plugins write game dirs ----
 set "TOOLS_DIR=%PROJECT_DIR%\.tools"
 set "UV_DIR=%TOOLS_DIR%\uv"
 set "UV_EXE=%UV_DIR%\uv.exe"
@@ -43,7 +43,7 @@ if "%OFFLINE_MODE%"=="1" (
 ) else (
     echo   模式         : 在线  ^(将下载 uv / Python / FFmpeg / wheels^)
 )
-echo   ^(所有文件均在项目目录，不会写入系统盘用户目录。^)
+echo   ^(运行环境保存在项目目录；可选相机插件会写入对应游戏目录。^)
 echo ============================================================
 echo.
 
@@ -210,7 +210,9 @@ REM ============================================================
 REM  Install launch scripts (copy templates; avoid fragile echo generation)
 REM ============================================================
 copy /Y "%PROJECT_DIR%\scripts\run.bat" "%PROJECT_DIR%\run.bat" >nul
+if errorlevel 1 goto :fail_launchers
 copy /Y "%PROJECT_DIR%\scripts\run-console.bat" "%PROJECT_DIR%\run-console.bat" >nul
+if errorlevel 1 goto :fail_launchers
 
 REM ============================================================
 REM  Optional: GTA V camera pose logger (does not fail main install)
@@ -246,6 +248,41 @@ goto :gta_install_done
 
 :gta_install_done
 
+REM ============================================================
+REM  Optional: Black Myth: Wukong camera logger (does not fail main install)
+REM ============================================================
+echo.
+echo [可选] 正在尝试安装黑神话：悟空相机插件 …
+if defined GAME_RECORDER_SKIP_PAUSE (
+    if defined WUKONG_DIR (
+        "%VERIFY_PY%" "%PROJECT_DIR%\scripts\install_wukong_camera.py" --recordings-dir "%PROJECT_DIR%\recordings" --no-prompt --wukong-dir "%WUKONG_DIR%"
+    ) else (
+        "%VERIFY_PY%" "%PROJECT_DIR%\scripts\install_wukong_camera.py" --recordings-dir "%PROJECT_DIR%\recordings" --no-prompt
+    )
+) else (
+    if defined WUKONG_DIR (
+        "%VERIFY_PY%" "%PROJECT_DIR%\scripts\install_wukong_camera.py" --recordings-dir "%PROJECT_DIR%\recordings" --wukong-dir "%WUKONG_DIR%"
+    ) else (
+        "%VERIFY_PY%" "%PROJECT_DIR%\scripts\install_wukong_camera.py" --recordings-dir "%PROJECT_DIR%\recordings"
+    )
+)
+if errorlevel 4 goto :wukong_install_fail
+if errorlevel 3 goto :wukong_install_skip
+if errorlevel 1 goto :wukong_install_fail
+echo       [完成] 黑神话相机插件已安装，录制时会同步输出相机参数。
+goto :wukong_install_done
+
+:wukong_install_skip
+echo       [跳过] 未安装黑神话相机插件。需要时请再运行 wukong-camera\install.bat。
+goto :wukong_install_done
+
+:wukong_install_fail
+echo       [失败] 黑神话相机插件未装好，但不影响录制器主程序。
+echo              请关闭游戏后再运行 wukong-camera\install.bat。
+goto :wukong_install_done
+
+:wukong_install_done
+
 echo.
 echo ============================================================
 echo   安装完成！
@@ -255,6 +292,7 @@ echo   显示控制台    :  run-console.bat  或  run.bat --console
 echo   无热键模式    :  run.bat --no-hotkey
 echo   低延迟回退    :  run.bat --fps 20 --quality 28 --x264-threads 1
 echo   GTA 相机插件  :  gta-camera\install.bat
+echo   黑神话相机插件:  wukong-camera\install.bat
 echo ============================================================
 echo.
 call :wait_key
@@ -313,6 +351,12 @@ exit /b 1
 echo.
 echo [错误] 安装后无法导入 game_recorder。
 echo        若路径含中文，请改解压到纯英文目录 ^(如 D:\game-recorder^) 后删除 .venv 再运行本脚本。
+call :wait_key
+exit /b 1
+
+:fail_launchers
+echo.
+echo [错误] 无法生成 run.bat / run-console.bat，请确认 scripts 目录完整且项目目录可写。
 call :wait_key
 exit /b 1
 

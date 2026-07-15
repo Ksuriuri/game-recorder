@@ -1,0 +1,35 @@
+{
+  "schema": "wukong_camera_payload_manifest_v1",
+  "files": [
+    {
+      "path": "payload/dwmapi.dll",
+      "sha256": "df18da44d8926f4e09bbd555be1fe12807f07a3944d64cbc06fd1ecd1f58add7",
+      "bytes": 124928
+    },
+    {
+      "path": "payload/ue4ss/UE4SS.dll",
+      "sha256": "3d367758cf48dd20f8b0d0625a240c4898ec670454b857b1ee069bd40466a0be",
+      "bytes": 20108288
+    },
+    {
+      "path": "payload/ue4ss/UE4SS-settings.ini",
+      "sha256": "49b3d84a5fdf54b4187a42275e725cc2d797f9323d8614d0f9b93cab12eec465",
+      "bytes": 4826
+    },
+    {
+      "path": "payload/ue4ss/VTableLayout.ini",
+      "sha256": "604337b52bcd3045e1a83231ae9b42aa71ca2d42e92e3ba66b85eecff9600008",
+      "bytes": 17201
+    },
+    {
+      "path": "payload/ue4ss/Mods/mods.txt",
+      "sha256": "5aa7c93dab847428ba9eff0f4566e5ca4bdbc2344df57eff26eed284945264d7",
+      "bytes": 22
+    },
+    {
+      "path": "payload/ue4ss/Mods/CameraFrameLogger/Scripts/main.lua",
+      "sha256": "d8631986836fa70db28cd6f793723d280a00840065d6ac0ca1d1df6c60011a53",
+      "bytes": 30434
+    }
+  ]
+}

@@ -13,6 +13,7 @@ venv/
 ffmpeg/
 wheels/
 run.bat
+!scripts/run.bat
 game-recorder-portable-*.zip
 _test_cn_path/
 _zip_inspect/
@@ -23,6 +24,7 @@ _zip_inspect/
 
 recordings/
 .gta_camera/
+.wukong_camera/
 
 # ModelScope upload pack artifacts
 modelscope-upload/.venv/

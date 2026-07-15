@@ -8,6 +8,7 @@
 - **无边框游戏区域自动捕获**：默认 `--capture-mode auto`，按下热键开始录制时会优先捕获当前前台的大客户区窗口（适合 Borderless Windowed），识别不到合适窗口时自动回退整屏
 - **音频捕获**：默认走 **Python `soundcard` 包的 WASAPI Loopback**（抓当前 Windows 默认播放设备的混音），通过本机 TCP 把 PCM 喂给 FFmpeg，与视频在同一 FFmpeg 进程内 mux 实现天然同步。**零配置、不依赖 Stereo Mix、不需要装虚拟声卡、不需要管理员权限**，是网吧 / GTA 之类 shared-mode 游戏的标准录音通路。如果当前 FFmpeg 构建恰好带 `wasapi` indev（罕见），优先用单进程 WASAPI；都不行再回退到 DirectShow（Stereo Mix / VB-CABLE 等）
 - **键鼠捕获**：键盘和鼠标优先走 Win32 Raw Input，避免低级鼠标钩子影响游戏视角；Raw Input 不可用时键盘降级为 `GetAsyncKeyState` 轮询
+- **游戏相机同步**：默认同时发布 GTA V 与《黑神话：悟空》的相机会话信号；只会由当前已启动且已安装插件的游戏写数据，结束后按真实视频帧时间生成 `camera.jsonl`
 - **硬件编码**：自动检测 NVIDIA NVENC，使用 GPU 专用编码单元，不占用 CUDA 核心；无 NVENC 时回退到 `libx264 ultrafast`，默认限制 2 个 x264 线程，避免网吧机器上抢占游戏 CPU
 - **统一时钟**：所有数据流共享 `perf_counter_ns` 高精度 T0 基准，同步误差 < 1 帧（33ms）
 - **可选分段保存**：通过 `--segment-minutes N` 每隔 N 分钟落盘一对 `mp4 + jsonl` 文件（默认关闭，推荐保持关闭以获得无缝音视频；启用时段间会有约几百毫秒的空隙）
@@ -33,10 +34,11 @@
 3. 下载 FFmpeg（[BtbN gpl 构建](https://github.com/BtbN/FFmpeg-Builds)，约 140 MB，含 NVENC、libx264、DirectShow 等编码器/复用器）
 4. 创建 `.venv` 并 `uv pip install -e .`（`soundcard` 这个 Python 包就是默认音频通路的关键，pyproject.toml 里已经声明）
 5. 生成启动脚本 `run.bat`（默认无窗口后台运行；`--console` 显示终端；`--list-audio-devices` / `--no-overlay` 自动带控制台）
+6. 尝试发现并安装 GTA V / 黑神话相机插件；未安装对应游戏时只跳过，不影响录制器
 
 > **关于音频**：BtbN / 上游 win64 静态构建几乎都**没有编译 `wasapi` indev**，所以本工具的默认音频通路其实是 Python 端的 `soundcard` WASAPI loopback（抓默认扬声器混音 → s16le → 本机 TCP → FFmpeg）。这条路径不依赖 FFmpeg 构建带不带 wasapi、也不依赖 Stereo Mix 是否启用，是网吧场景能开箱跑通的关键。如果你换的 FFmpeg 构建恰好带 `wasapi` indev，会自动优先用单进程的 wasapi（一点 CPU 优化），但不是必须。
 
-**所有文件全部落在项目目录下，不占用系统盘**：
+**运行环境全部落在项目目录下**；可选相机插件会写入对应游戏目录：
 
 ```
 game-recorder/
@@ -48,7 +50,9 @@ game-recorder/
     └── uv-cache/          # wheel 缓存（UV_CACHE_DIR）
 ```
 
-卸载时直接删除整个项目目录即可，注册表 / `%LOCALAPPDATA%` / `%APPDATA%` 无任何残留。
+录制器本体直接删除项目目录即可。若安装过游戏相机插件，请先分别运行
+`gta-camera\install.bat` 文档中的手工清理步骤和 `wukong-camera\uninstall.bat`；
+安装器不写注册表、`%LOCALAPPDATA%` 或 `%APPDATA%`。
 
 ### 方式二：手动安装
 
@@ -92,6 +96,8 @@ game-recorder/
 ├── README.md
 ├── src/                        # 源码（run.bat 也会把 src 加入 PYTHONPATH 作兜底）
 ├── scripts/                    # build_offline_bundle.bat 等
+├── gta-camera/                 # GTA ScriptHook 相机插件与安装入口
+├── wukong-camera/              # 黑神话 UE4SS payload、安全安装/卸载入口
 ├── ffmpeg/bin/ffmpeg.exe       # ~140 MB，BtbN gpl 构建
 ├── wheels/                     # ~55 MB，所有 runtime 依赖 + 项目本体的 wheel
 │   ├── game_recorder-*.whl     # 离线 install 安装此项（勿仅用 editable）
@@ -113,7 +119,8 @@ game-recorder/
 3. 双击 `install.bat`：横幅出现 `模式 : 离线` 即说明检测到离线包；脚本会从 `wheels\` 安装 wheel 并重建 `.venv`，全程不碰网络，约 10 秒
 4. 双击 `run.bat` → 右上角悬浮窗出现 → **连按两次 Caps Lock（大写键）** 开始/停止录制 → 每录完一段程序会自动冷重启（约 1–2 秒）→ 结束时点悬浮窗 **退出** 完全退出
 
-整个 zip 自包含，不写注册表，不写 `%LOCALAPPDATA%` / `%APPDATA%`，卸载就是删目录。
+整个 zip 自包含，不写注册表、`%LOCALAPPDATA%` 或 `%APPDATA%`。删除项目目录前，
+若安装过黑神话插件请先运行 `wukong-camera\uninstall.bat` 恢复原有 UE4SS。
 
 > **更新源码后想重打包**：直接再跑一次 `scripts\build_offline_bundle.bat`，它会清掉旧的 `wheels\` 重新下，时间戳后缀也会更新到当天。
 
@@ -333,6 +340,8 @@ recordings/
   session_20260411_143022/
     20260411_143022_0_42130.mp4
     20260411_143022_0_42130.jsonl
+    frame_timestamps.jsonl
+    camera.jsonl                         # 安装并运行了唯一游戏相机插件时生成
     meta.json
 ```
 
@@ -410,6 +419,23 @@ recordings/
 
 - `auto_stop_reason`：`null` 为手动停止；`"idle"` / `"stuck"` / `"forbidden_key"` / `"violent"` 表示自动停止原因（影响累计有效时长的计算方式，见上文悬浮窗说明）。
 - `idle_tail_trim_frames`：空闲或僵滞自动停止后从末段裁掉的帧数；`> 0` 时累计时长直接按裁剪后的 `segments` 帧数计算。
+
+### camera.jsonl
+
+GTA 与黑神话插件默认都启用，但没有启动的游戏不会加载插件进程。录制结束时只接受
+一个有效相机来源；若两款游戏同时写出数据，`meta.camera.status` 会记为
+`"conflict"`，保留两份 raw 文件且不生成混合轨迹。
+
+黑神话位置从 UE 厘米转换为米，旋转顺序与 GTA 统一为
+`[pitch, roll, yaw]`。最终每行对应一个实际 MP4 帧：
+
+```jsonl
+{"t_unix_ms":1744364222034,"pos":[1.2,3.4,5.6],"rot":[-5.0,0.0,90.0],"fov":75.0,"frame":0,"t_capture_unix_ms":1744364222033.333,"dt_ms":0.667}
+```
+
+`frame` 与 `frame_timestamps.jsonl`、MP4 帧号一致；`dt_ms` 是所选相机样本时间减去
+该视频帧捕获时间。默认只保留 50ms 内的最近样本，超出窗口的帧不会写入
+`camera.jsonl`。可用 `--no-gta-camera` 或 `--no-wukong-camera` 单独禁用来源。
 
 ### library.json
 

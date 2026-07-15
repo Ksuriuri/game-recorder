@@ -88,13 +88,17 @@ def merge_legacy(
         camera_dir = gta_camera_dir(session_dir.parent)
 
     raw_in_session = session_dir / CAMERA_RAW_FILENAME
+    if not raw_in_session.is_file():
+        legacy_raw = session_dir / "camera_raw.jsonl"
+        if legacy_raw.is_file():
+            raw_in_session = legacy_raw
     if camera_log is None and raw_in_session.is_file():
         if dry_run:
             return {
                 "session_id": meta.get("session_id", session_dir.name),
                 "frames_matched": "?",
                 "frames_total": total_frames,
-                "camera_sources": [CAMERA_RAW_FILENAME],
+                "camera_sources": [raw_in_session.name],
                 "output": str(session_dir / "camera.jsonl"),
             }
         summary = finalize_session_camera(
@@ -108,7 +112,7 @@ def merge_legacy(
             "session_id": meta.get("session_id", session_dir.name),
             "frames_matched": (summary or {}).get("frames_matched", 0),
             "frames_total": total_frames,
-            "camera_sources": [CAMERA_RAW_FILENAME],
+            "camera_sources": [raw_in_session.name],
             "align": (summary or {}).get("align"),
             "output": str(session_dir / "camera.jsonl"),
         }
