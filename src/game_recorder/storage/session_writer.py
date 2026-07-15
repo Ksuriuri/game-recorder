@@ -27,7 +27,7 @@ class SessionMeta:
     start_epoch_ms: int = 0
     duration_s: float = 0.0
     fps: int = 30
-    # jsonl ``frame`` ≈ video capture idx + this (median of wall−idx per captured frame); see Session.
+    # jsonl ``frame`` ≈ encoded video frame + this (median wall−video index); see Session.
     event_video_sync_offset: int = 0
     resolution: list[int] = field(default_factory=lambda: [0, 0])
     encoder: str = ""
@@ -38,6 +38,12 @@ class SessionMeta:
     capture_source: str = "screen"
     capture_region: list[int] | None = None
     total_frames: int = 0
+    # Session-global sidecar: one record per encoded MP4 frame.
+    frame_timestamps_file: str = ""
+    frame_timestamps_schema: str = ""
+    frame_timestamps_clock: str = ""
+    captured_frames: int = 0
+    duplicate_frames: int = 0
     total_input_events: int = 0
     segment_seconds: int = 0
     segments: list[SegmentMeta] = field(default_factory=list)

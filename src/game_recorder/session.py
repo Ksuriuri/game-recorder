@@ -45,6 +45,13 @@ from game_recorder.capture.window_region import (
 from game_recorder.config import Config, find_ffmpeg
 from game_recorder.encoder.ffmpeg_pipe import FFmpegEncoder
 from game_recorder.storage.action_writer import ActionWriter
+from game_recorder.storage.frame_timestamp_writer import (
+    FRAME_TIMESTAMPS_CLOCK,
+    FRAME_TIMESTAMPS_FILENAME,
+    FRAME_TIMESTAMPS_SCHEMA,
+    FrameTimestampWriter,
+    trim_frame_timestamps,
+)
 from game_recorder.storage.idle_trim import apply_idle_tail_trim, idle_tail_trim_frames
 from game_recorder.hotkeys import HOTKEY_VKS
 from game_recorder.storage.library_index import add_session, effective_duration_s
@@ -248,6 +255,7 @@ class Session:
         self._session_dir.mkdir(parents=True, exist_ok=True)
 
         self._meta_path = self._session_dir / "meta.json"
+        self._frame_timestamps_path = self._session_dir / FRAME_TIMESTAMPS_FILENAME
 
         # Components (created on start)
         self._screen: ScreenCapture | None = None
@@ -275,6 +283,7 @@ class Session:
 
         self._encoder: FFmpegEncoder | None = None
         self._action_writer: ActionWriter | None = None
+        self._frame_timestamp_writer: FrameTimestampWriter | None = None
         self._segment_video_path: Path | None = None
         self._segment_actions_path: Path | None = None
 
@@ -283,7 +292,8 @@ class Session:
         self._pending_events: list[dict] = []
 
         # Per-segment & total stats
-        self._frame_count = 0  # global cumulative frame count (across segments)
+        self._frame_count = 0  # frames written to MP4 across all segments, including padding
+        self._duplicate_frame_count = 0
         self._segments_meta: list[SegmentMeta] = []
         self._segment_event_count: int = 0
 
@@ -293,10 +303,13 @@ class Session:
         self._encoder_name: str = ""
         self._audio_source: str | None = None  # events written to current segment
 
-        # Per captured frame: wall_frame_index − dxcam idx (median → meta event_video_sync_offset).
+        # Per captured frame: wall frame − encoded video frame (median → event sync offset).
         self._sync_wall_minus_idx: list[int] = []
         self._frame_drop_tracker = _FrameDropTracker()
         self._last_frame_bytes: bytes | None = None
+        self._last_frame_capture_perf_ns: int | None = None
+        self._last_source_frame: int | None = None
+        self._last_real_video_frame: int | None = None
 
         # Auto-stop rules (WASD-only movement)
         self._last_movement_at: float = 0.0
@@ -339,9 +352,15 @@ class Session:
         self._stop_finalized = False
         self._stop_kept = False
         self._sync_wall_minus_idx.clear()
+        self._frame_count = 0
+        self._duplicate_frame_count = 0
         window_s = float(self.config.frame_drop_stop_after_s)
         self._frame_drop_tracker = _FrameDropTracker(window_s=window_s)
         self._last_frame_bytes = None
+        self._last_frame_capture_perf_ns = None
+        self._last_source_frame = None
+        self._last_real_video_frame = None
+        self._frame_timestamp_writer = FrameTimestampWriter(self._frame_timestamps_path)
         violent_s = float(self.config.violent_duration_s)
         self._violence = (
             _ViolenceMonitor(violent_s, initial_wasd_held=self._wasd_state)
@@ -497,6 +516,12 @@ class Session:
         # Finalize the in-progress segment
         with self._segment_lock:
             self._close_segment_locked(actual_end_frame=self._frame_count)
+            if self._frame_timestamp_writer is not None:
+                try:
+                    self._frame_timestamp_writer.close()
+                except Exception as exc:
+                    logger.warning("关闭视频帧时间戳写入器时出错：%s", exc)
+                self._frame_timestamp_writer = None
 
         # Compute duration
         wall_duration_s = (time.perf_counter_ns() - self._t0_ns) / 1e9
@@ -546,6 +571,20 @@ class Session:
                 if idle_tail_trimmed > 0:
                     self._frame_count -= idle_tail_trimmed
                     video_duration_s = self._frame_count / max(1, self.config.fps)
+                    try:
+                        kept, duplicates = trim_frame_timestamps(
+                            self._frame_timestamps_path,
+                            max_frame_exclusive=self._frame_count,
+                        )
+                        self._duplicate_frame_count = duplicates
+                        if kept != self._frame_count:
+                            logger.warning(
+                                "视频帧时间戳数量 %d 与裁剪后视频帧数 %d 不一致",
+                                kept,
+                                self._frame_count,
+                            )
+                    except (OSError, ValueError, KeyError) as exc:
+                        logger.warning("裁剪视频帧时间戳失败：%s", exc)
 
         if min_s > 0 and video_duration_s < min_s:
             self._discard_session(
@@ -602,6 +641,11 @@ class Session:
                 else None
             ),
             total_frames=self._frame_count,
+            frame_timestamps_file=self._frame_timestamps_path.name,
+            frame_timestamps_schema=FRAME_TIMESTAMPS_SCHEMA,
+            frame_timestamps_clock=FRAME_TIMESTAMPS_CLOCK,
+            captured_frames=self._frame_count - self._duplicate_frame_count,
+            duplicate_frames=self._duplicate_frame_count,
             total_input_events=total_events,
             segment_seconds=int(self.config.segment_seconds),
             segments=self._segments_meta,
@@ -693,20 +737,23 @@ class Session:
 
     # ── Frame & event callbacks ──────────────────────────────────────────
 
-    def _on_frame(self, frame_bytes: bytes, idx: int, width: int, height: int) -> None:
+    def _on_frame(
+        self,
+        frame_bytes: bytes,
+        idx: int,
+        width: int,
+        height: int,
+        capture_perf_ns: int,
+    ) -> None:
         """Called by the screen-capture thread for every captured frame."""
         with self._segment_lock:
+            fps = int(max(1, self.config.fps))
             wall = int(
-                (time.perf_counter_ns() - self._t0_ns)
-                * int(max(1, self.config.fps))
-                // 1_000_000_000
+                (capture_perf_ns - self._t0_ns) * fps // 1_000_000_000
             )
-            lag = wall - idx
-            if len(self._sync_wall_minus_idx) < 100_000:
-                self._sync_wall_minus_idx.append(lag)
-
+            source_lag = wall - idx
             now_mono = time.monotonic()
-            dropped = self._frame_drop_tracker.observe(lag, now_mono)
+            dropped = self._frame_drop_tracker.observe(source_lag, now_mono)
             if self._frame_drop_tracker.should_log(dropped, now_mono):
                 self._frame_drop_tracker.mark_logged(now_mono)
                 logger.warning(
@@ -714,10 +761,41 @@ class Session:
                     "编码/写帧可能跟不上，音画与按键可能不同步",
                     dropped,
                     self._frame_drop_tracker.drop_count,
-                    lag,
+                    source_lag,
                 )
 
-            self._frame_count = idx + 1
+            if self._encoder is not None:
+                window_s = self.config.frame_drop_stop_after_s
+                if window_s > 0:
+                    max_tol = max(0, self.config.frame_drop_max_tolerated)
+                    if self._frame_drop_tracker.window_drop_count > max_tol:
+                        self._trigger_auto_stop("frame_drop")
+                    elif dropped > 0:
+                        last_frame_bytes = self._last_frame_bytes
+                        last_capture_perf_ns = self._last_frame_capture_perf_ns
+                        last_source_frame = self._last_source_frame
+                        last_real_video_frame = self._last_real_video_frame
+                        if (
+                            last_frame_bytes is not None
+                            and last_capture_perf_ns is not None
+                            and last_source_frame is not None
+                            and last_real_video_frame is not None
+                        ):
+                            for _ in range(dropped):
+                                self._write_encoded_frame_locked(
+                                    last_frame_bytes,
+                                    capture_perf_ns=last_capture_perf_ns,
+                                    source_frame=last_source_frame,
+                                    duplicate=True,
+                                    duplicate_of=last_real_video_frame,
+                                )
+                            logger.info(
+                                "补写 %d 重复帧以同步音画（窗口内丢帧 %d）",
+                                dropped,
+                                self._frame_drop_tracker.window_drop_count,
+                            )
+                        else:
+                            logger.warning("缺少上一真实帧，无法补写 %d 个重复帧", dropped)
 
             if (width, height) != (self._width, self._height):
                 logger.warning(
@@ -727,45 +805,84 @@ class Session:
                     width,
                     height,
                 )
-                self._close_segment_locked(actual_end_frame=idx)
+                self._close_segment_locked(actual_end_frame=self._frame_count)
                 self._width = width
                 self._height = height
-                self._open_segment_locked(start_frame=idx)
+                self._open_segment_locked(start_frame=self._frame_count)
                 self._drain_pending_events_locked()
 
-            # Rotate when this frame is the start of the next segment
-            if (
-                self._segment_planned_end is not None
-                and idx >= self._segment_planned_end
-            ):
-                self._close_segment_locked(actual_end_frame=idx)
-                self._open_segment_locked(start_frame=idx)
-                self._drain_pending_events_locked()
-
-            if self._encoder is not None:
-                window_s = self.config.frame_drop_stop_after_s
-                if window_s > 0:
-                    max_tol = max(0, self.config.frame_drop_max_tolerated)
-                    if self._frame_drop_tracker.window_drop_count > max_tol:
-                        self._trigger_auto_stop("frame_drop")
-                    elif dropped > 0:
-                        pad_bytes = self._last_frame_bytes or frame_bytes
-                        for _ in range(dropped):
-                            self._encoder.write_frame(pad_bytes)
-                        logger.info(
-                            "补写 %d 重复帧以同步音画（窗口内丢帧 %d）",
-                            dropped,
-                            self._frame_drop_tracker.window_drop_count,
-                        )
-                self._encoder.write_frame(frame_bytes)
+            actual_video_frame = self._write_encoded_frame_locked(
+                frame_bytes,
+                capture_perf_ns=capture_perf_ns,
+                source_frame=idx,
+                duplicate=False,
+            )
+            if actual_video_frame is not None:
+                if len(self._sync_wall_minus_idx) < 100_000:
+                    self._sync_wall_minus_idx.append(wall - actual_video_frame)
+                self._last_real_video_frame = actual_video_frame
                 if (
                     not self._stop_event.is_set()
                     and self._on_auto_stop is not None
+                    and self._encoder is not None
                     and self._encoder.failed
                 ):
                     self._trigger_auto_stop("encoder_failed")
 
             self._last_frame_bytes = frame_bytes
+            self._last_frame_capture_perf_ns = capture_perf_ns
+            self._last_source_frame = idx
+
+    def _write_encoded_frame_locked(
+        self,
+        frame_bytes: bytes,
+        *,
+        capture_perf_ns: int,
+        source_frame: int,
+        duplicate: bool,
+        duplicate_of: int | None = None,
+    ) -> int | None:
+        """Write one MP4 frame and its timestamp; caller holds ``_segment_lock``."""
+        if self._encoder is None:
+            return None
+
+        if (
+            self._segment_planned_end is not None
+            and self._frame_count >= self._segment_planned_end
+        ):
+            self._close_segment_locked(actual_end_frame=self._frame_count)
+            self._open_segment_locked(start_frame=self._frame_count)
+            self._drain_pending_events_locked()
+        if self._encoder is None:
+            return None
+
+        video_frame = self._frame_count
+        self._encoder.write_frame(frame_bytes)
+        if self._frame_timestamp_writer is not None:
+            capture_unix_ms = self._t0_epoch_ms + (
+                capture_perf_ns - self._t0_ns
+            ) / 1_000_000
+            try:
+                self._frame_timestamp_writer.write(
+                    frame=video_frame,
+                    capture_perf_ns=capture_perf_ns,
+                    capture_unix_ms=capture_unix_ms,
+                    source_frame=source_frame,
+                    duplicate=duplicate,
+                    duplicate_of=duplicate_of,
+                )
+            except (OSError, ValueError) as exc:
+                logger.error("写入视频帧时间戳失败：%s", exc)
+                try:
+                    self._frame_timestamp_writer.close()
+                except OSError:
+                    pass
+                self._frame_timestamp_writer = None
+
+        self._frame_count += 1
+        if duplicate:
+            self._duplicate_frame_count += 1
+        return video_frame
 
     def _on_action_event(self, event: dict) -> None:
         """Called by the input-hook thread for every keyboard / mouse event."""

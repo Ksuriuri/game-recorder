@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-FrameCallback = Callable[[bytes, int, int, int], None]
+FrameCallback = Callable[[bytes, int, int, int, int], None]
 
 
 @dataclass(frozen=True)
@@ -53,8 +53,9 @@ class ScreenCapture:
     fps:
         Target capture frame rate.
     on_frame:
-        ``(frame_bytes, frame_index, width, height) -> None`` called for every captured frame.
-        *frame_bytes* is raw BGR24 pixel data.
+        ``(frame_bytes, frame_index, width, height, capture_perf_ns) -> None``
+        called for every captured frame. *frame_bytes* is raw BGR24 pixel data;
+        *capture_perf_ns* is sampled immediately after DXcam returns the frame.
     """
 
     def __init__(
@@ -106,6 +107,7 @@ class ScreenCapture:
             while not stop_event.is_set():
                 frame: np.ndarray | None = self._camera.get_latest_frame()
                 if frame is not None:
+                    capture_perf_ns = time.perf_counter_ns()
                     height, width = frame.shape[:2]
                     if width != self._width or height != self._height:
                         source_size = (width, height)
@@ -136,6 +138,7 @@ class ScreenCapture:
                         frame_idx,
                         width,
                         height,
+                        capture_perf_ns,
                     )
                     frame_idx += 1
                 else:

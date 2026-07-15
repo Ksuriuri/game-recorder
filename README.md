@@ -464,10 +464,17 @@ recordings/
   session_20260411_143022/
     20260411_143022_0_42130.mp4      # 原片（不动）
     20260411_143022_0_42130.jsonl
+    frame_timestamps.jsonl            # 每个 MP4 编码帧的捕获时间戳
     meta.json
   overlay/                            # 后处理输出目录
     20260411_143022_0_42130.mp4      # 带 HUD 的版本（同名）
 ```
+
+`frame_timestamps.jsonl` 使用实际 MP4 帧号（从 0 连续递增）。正常帧记录
+`t_capture_unix_ms`、`t_capture_perf_ns` 和 DXcam `source_frame`；轻度丢帧补写的
+重复帧还会记录 `duplicate: true` 与 `duplicate_of`。`meta.json` 中的
+`captured_frames`、`duplicate_frames` 与 `total_frames` 分别表示真实帧数、补帧数和
+MP4 总帧数。
 
 > **性能提示**：后处理为 **CPU 逐帧解码 + 重编码**，不使用 GPU；多个视频 **顺序** 处理。10 小时素材整体可能需要数小时到十几小时，建议挂机或过夜跑 `overlay_all_recording_inputs.bat`；可先用 `overlay_sample_recording_inputs.bat` 估时。
 
