@@ -1,0 +1,14 @@
+GTA 相机插件（维护说明）
+========================
+
+录制员只需在 install.bat / gta-camera\install.bat 里按提示输入 GTA 主目录。
+脚本会自动拷贝：
+
+  gta-camera\vendor\ScriptHookV\     →  GTA 根目录（ScriptHookV.dll + dinput8.dll）
+  gta-camera\vendor\ScriptHookVDotNet\ → GTA 根目录
+  gta-camera\dist\CameraPoseLogger.dll → GTA\scripts\
+
+游戏大更新后若进故事模式报 Unknown game version：
+  1. 从官网下最新 ScriptHookV
+  2. 用新的 ScriptHookV.dll、dinput8.dll 覆盖 gta-camera\vendor\ScriptHookV\
+  3. 再跑一次 gta-camera\install.bat

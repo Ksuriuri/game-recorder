@@ -1,0 +1,2 @@
+v3.7.0-nightly.175
+https://github.com/scripthookvdotnet/scripthookvdotnet-nightly/releases/download/v3.7.0-nightly.175/ScriptHookVDotNet-v3.7.0-nightly.175.zip

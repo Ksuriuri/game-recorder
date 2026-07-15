@@ -68,6 +68,9 @@ def iter_session_dirs(recordings: Path, *, skip_dirs: set[str]) -> list[Path]:
         name = path.name
         if name in skip_dirs or name.startswith("."):
             continue
+        # Real sessions always have meta.json (skip unrelated folders).
+        if not (path / "meta.json").is_file():
+            continue
         out.append(path.resolve())
     return out
 

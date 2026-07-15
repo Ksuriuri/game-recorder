@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <RootNamespace>CameraPoseLogger</RootNamespace>
+    <AssemblyName>CameraPoseLogger</AssemblyName>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <!-- Point at your GTA V install (folder that contains ScriptHookVDotNet3.dll). -->
+    <GtaVDir Condition="'$(GtaVDir)' == ''">$(GTAV_DIR)</GtaVDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="ScriptHookVDotNet3">
+      <HintPath>$(GtaVDir)\ScriptHookVDotNet3.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <Target Name="WarnMissingGtaDir" BeforeTargets="ResolveAssemblyReferences">
+    <Warning
+      Condition="'$(GtaVDir)' == '' Or !Exists('$(GtaVDir)\ScriptHookVDotNet3.dll')"
+      Text="Set GTAV_DIR or pass -p:GtaVDir=... to your GTA V folder (must contain ScriptHookVDotNet3.dll)." />
+  </Target>
+</Project>

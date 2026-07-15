@@ -1,0 +1,2 @@
+ScriptHookV_3889.0_1158.13
+Files: ScriptHookV.dll + dinput8.dll

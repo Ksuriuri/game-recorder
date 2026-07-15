@@ -20,7 +20,7 @@ REM     .tools\          uv.exe + managed Python 3.11 + uv cache
 REM     ffmpeg\          BtbN gpl FFmpeg (NVENC + libx264 + dshow)
 REM     wheels\          pre-downloaded dependency wheels (numpy, opencv-headless,
 REM                      dxcam, soundcard, cffi, pycparser …)
-REM     src\, pyproject.toml, scripts\
+REM     src\, scripts\, gta-camera\, pyproject.toml
 REM     根目录全部 *.bat / *.vbs / *.md / *.txt（install.bat、run.bat、录制操作手册.txt 等）
 REM
 REM   What is NOT shipped:
@@ -161,7 +161,7 @@ REM Write to .tools\ first, then move — avoids Compress-Archive failing when a
 REM older portable zip in the project root is open in Explorer or the IDE.
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
     "$ErrorActionPreference='Stop';" ^
-    "$core = @('.tools','ffmpeg','wheels','src','scripts','pyproject.toml');" ^
+    "$core = @('.tools','ffmpeg','wheels','src','scripts','gta-camera','pyproject.toml');" ^
     "$root = Get-ChildItem -LiteralPath '.' -File | Where-Object { $_.Extension -in @('.bat','.vbs','.md','.txt') } | ForEach-Object { $_.Name };" ^
     "$items = ($core + $root) | Select-Object -Unique | Where-Object { Test-Path $_ };" ^
     "Compress-Archive -Path $items -DestinationPath '%BUNDLE_TMP%' -CompressionLevel Optimal -Force"
@@ -190,8 +190,13 @@ echo.
 echo   网吧部署：
 echo     1. 将 zip 复制到目标 PC 的 D 盘，不要用 C 盘
 echo     2. 右键 - 全部提取到纯英文目录，如 D:\game-recorder
-echo     3. 双击 install.bat，约 10 秒，无需联网
-echo     4. 双击 run.bat，连按两次大写键切换录制，悬浮窗点「退出」结束
+echo     3. 双击 install.bat（离线重建环境；若提示输入 GTA 主目录请粘贴后回车）
+echo     4. 故事模式进 GTA，再双击 run.bat 录制；session 内应有 camera.jsonl
+echo.
+echo   注意：
+echo     - 目标机需已安装 GTA V；ScriptHookV 版本需匹配当前游戏版本
+echo     - 游戏大更新后若进故事模式报 Unknown game version，需更新
+echo       gta-camera\vendor\ScriptHookV\ 后再跑一次 gta-camera\install.bat
 echo.
 echo   本机构建后：
 echo     .venv\ 已删除，zip 中不包含路径绑定的 venv。

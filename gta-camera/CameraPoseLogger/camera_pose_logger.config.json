@@ -1,0 +1,10 @@
+{
+  "output_dir": "E:/workspace/game-recorder/.gta_camera",
+  "control_file": "E:/workspace/game-recorder/.gta_camera/active_session.json",
+  "follow_recorder": true,
+  "sample_hz": 30,
+  "toggle_key": "none",
+  "flush_key": "F9",
+  "include_matrix": true,
+  "include_player": true
+}

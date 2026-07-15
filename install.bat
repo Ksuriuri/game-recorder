@@ -212,6 +212,40 @@ REM ============================================================
 copy /Y "%PROJECT_DIR%\scripts\run.bat" "%PROJECT_DIR%\run.bat" >nul
 copy /Y "%PROJECT_DIR%\scripts\run-console.bat" "%PROJECT_DIR%\run-console.bat" >nul
 
+REM ============================================================
+REM  Optional: GTA V camera pose logger (does not fail main install)
+REM ============================================================
+echo.
+echo [可选] 正在尝试安装 GTA 相机轨迹插件 …
+if defined GAME_RECORDER_SKIP_PAUSE (
+    if defined GTAV_DIR (
+        "%VERIFY_PY%" "%PROJECT_DIR%\scripts\install_gta_camera.py" --recordings-dir "%PROJECT_DIR%\recordings" --no-prompt --gta-dir "%GTAV_DIR%"
+    ) else (
+        "%VERIFY_PY%" "%PROJECT_DIR%\scripts\install_gta_camera.py" --recordings-dir "%PROJECT_DIR%\recordings" --no-prompt
+    )
+) else (
+    if defined GTAV_DIR (
+        "%VERIFY_PY%" "%PROJECT_DIR%\scripts\install_gta_camera.py" --recordings-dir "%PROJECT_DIR%\recordings" --gta-dir "%GTAV_DIR%"
+    ) else (
+        "%VERIFY_PY%" "%PROJECT_DIR%\scripts\install_gta_camera.py" --recordings-dir "%PROJECT_DIR%\recordings"
+    )
+)
+if errorlevel 4 goto :gta_install_fail
+if errorlevel 3 goto :gta_install_skip
+if errorlevel 1 goto :gta_install_fail
+echo       [完成] GTA 相机插件已安装，进故事模式录制即可采集相机参数。
+goto :gta_install_done
+
+:gta_install_skip
+echo       [跳过] 未安装 GTA 相机插件。需要相机时请再运行 gta-camera\install.bat 并输入 GTA 主目录。
+goto :gta_install_done
+
+:gta_install_fail
+echo       [失败] GTA 相机插件未装好。请再运行 gta-camera\install.bat 并输入 GTA 主目录。
+goto :gta_install_done
+
+:gta_install_done
+
 echo.
 echo ============================================================
 echo   安装完成！
@@ -220,6 +254,7 @@ echo   开始录制      :  run.bat
 echo   显示控制台    :  run-console.bat  或  run.bat --console
 echo   无热键模式    :  run.bat --no-hotkey
 echo   低延迟回退    :  run.bat --fps 20 --quality 28 --x264-threads 1
+echo   GTA 相机插件  :  gta-camera\install.bat
 echo ============================================================
 echo.
 call :wait_key

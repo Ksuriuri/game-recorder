@@ -64,6 +64,10 @@ class Config:
     # Discard the whole session on stop when shorter than this (seconds). 0 = off.
     min_recording_duration_s: float = 10.0
 
+    # GTA ScriptHook camera pose: publish active_session.json so the in-game
+    # plugin writes camera_raw.jsonl; on stop align into camera.jsonl.
+    gta_camera_sync: bool = True
+
     def __post_init__(self) -> None:
         self.output_dir = Path(self.output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)

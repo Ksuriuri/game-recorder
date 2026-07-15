@@ -29,6 +29,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
@@ -44,6 +45,11 @@ from game_recorder.capture.window_region import (
 )
 from game_recorder.config import Config, find_ffmpeg
 from game_recorder.encoder.ffmpeg_pipe import FFmpegEncoder
+from game_recorder.gta_camera import (
+    clear_active_session,
+    finalize_session_camera,
+    publish_active_session,
+)
 from game_recorder.storage.action_writer import ActionWriter
 from game_recorder.storage.frame_timestamp_writer import (
     FRAME_TIMESTAMPS_CLOCK,
@@ -344,6 +350,17 @@ class Session:
         # Shared clock epoch
         self._t0_ns = time.perf_counter_ns()
         self._t0_epoch_ms = int(time.time() * 1000)
+        if self.config.gta_camera_sync:
+            try:
+                publish_active_session(
+                    self.config.output_dir,
+                    session_id=self._session_id,
+                    session_dir=self._session_dir,
+                    start_epoch_ms=self._t0_epoch_ms,
+                    fps=self.config.fps,
+                )
+            except Exception as exc:
+                logger.warning("发布 GTA 相机同步信号失败：%s", exc)
         self._last_movement_at = time.monotonic()
         self._last_input_change_at = time.monotonic()
         self._wasd_state = self._read_wasd_state()
@@ -505,6 +522,13 @@ class Session:
             return self._stop_kept
 
         logger.info("正在停止会话 %s …", self._session_id)
+        if self.config.gta_camera_sync:
+            try:
+                clear_active_session(self.config.output_dir)
+            except Exception as exc:
+                logger.warning("清除 GTA 相机同步信号失败：%s", exc)
+            # Give the in-game plugin time to see idle and close camera_raw.jsonl
+            time.sleep(0.35)
         self._stop_event.set()
 
         # Wait for capture threads to drain
@@ -659,6 +683,21 @@ class Session:
             final_frame_lag=self._frame_drop_tracker.final_lag,
         )
         meta.save(self._meta_path)
+        if self.config.gta_camera_sync:
+            try:
+                cam = finalize_session_camera(
+                    self._session_dir,
+                    asdict(meta),
+                    wait_raw_s=0.6,
+                )
+                if cam:
+                    logger.info(
+                        "GTA 相机轨迹：匹配 %d/%d 帧 → camera.jsonl",
+                        cam.get("frames_matched", 0),
+                        self._frame_count,
+                    )
+            except Exception as exc:
+                logger.warning("对齐 GTA 相机轨迹失败：%s", exc)
         try:
             add_session(self.config.output_dir, meta)
         except Exception as exc:
