@@ -213,6 +213,11 @@ def main() -> None:
         help="禁用 GTA 相机位姿同步（不写 active_session.json / camera.jsonl）",
     )
     parser.add_argument(
+        "--no-rdr2-camera",
+        action="store_true",
+        help="禁用荒野大镖客：救赎 2 相机位姿同步",
+    )
+    parser.add_argument(
         "--no-wukong-camera",
         action="store_true",
         help="禁用黑神话：悟空相机位姿同步",
@@ -297,6 +302,7 @@ def main() -> None:
         frame_drop_stop_after_s=max(0.0, float(args.frame_drop_stop_after)),
         frame_drop_max_tolerated=max(0, int(args.frame_drop_max_tolerated)),
         gta_camera_sync=not bool(args.no_gta_camera),
+        rdr2_camera_sync=not bool(args.no_rdr2_camera),
         wukong_camera_sync=not bool(args.no_wukong_camera),
     )
 

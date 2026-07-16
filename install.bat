@@ -249,6 +249,40 @@ goto :gta_install_done
 :gta_install_done
 
 REM ============================================================
+REM  Optional: RDR2 camera logger (does not fail main install)
+REM ============================================================
+echo.
+echo [可选] 正在尝试安装 RDR2 相机轨迹插件 …
+if defined GAME_RECORDER_SKIP_PAUSE (
+    if defined RDR2_DIR (
+        "%VERIFY_PY%" "%PROJECT_DIR%\scripts\install_rdr2_camera.py" --recordings-dir "%PROJECT_DIR%\recordings" --no-prompt --rdr2-dir "%RDR2_DIR%"
+    ) else (
+        "%VERIFY_PY%" "%PROJECT_DIR%\scripts\install_rdr2_camera.py" --recordings-dir "%PROJECT_DIR%\recordings" --no-prompt
+    )
+) else (
+    if defined RDR2_DIR (
+        "%VERIFY_PY%" "%PROJECT_DIR%\scripts\install_rdr2_camera.py" --recordings-dir "%PROJECT_DIR%\recordings" --rdr2-dir "%RDR2_DIR%"
+    ) else (
+        "%VERIFY_PY%" "%PROJECT_DIR%\scripts\install_rdr2_camera.py" --recordings-dir "%PROJECT_DIR%\recordings"
+    )
+)
+if errorlevel 4 goto :rdr2_install_fail
+if errorlevel 3 goto :rdr2_install_skip
+if errorlevel 1 goto :rdr2_install_fail
+echo       [完成] RDR2 相机插件已安装，进 Story Mode 录制即可采集相机参数。
+goto :rdr2_install_done
+
+:rdr2_install_skip
+echo       [跳过] 未安装 RDR2 相机插件。需要时请运行 rdr2-camera\install.bat。
+goto :rdr2_install_done
+
+:rdr2_install_fail
+echo       [失败] RDR2 相机插件未装好，但不影响录制器主程序；请关闭游戏后重试 rdr2-camera\install.bat
+goto :rdr2_install_done
+
+:rdr2_install_done
+
+REM ============================================================
 REM  Optional: Black Myth: Wukong camera logger (does not fail main install)
 REM ============================================================
 echo.
@@ -291,6 +325,7 @@ echo   显示控制台    :  run-console.bat  或  run.bat --console
 echo   无热键模式    :  run.bat --no-hotkey
 echo   低延迟回退    :  run.bat --fps 20 --quality 28 --x264-threads 1
 echo   GTA 相机插件  :  gta-camera\install.bat
+echo   RDR2 相机插件 :  rdr2-camera\install.bat
 echo   黑神话相机插件:  wukong-camera\install.bat
 echo ============================================================
 echo.

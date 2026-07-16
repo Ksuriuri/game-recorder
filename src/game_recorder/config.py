@@ -67,6 +67,7 @@ class Config:
     # In-game camera plugins: publish source-specific active_session.json files,
     # then select and align the one source that produced samples.
     gta_camera_sync: bool = True
+    rdr2_camera_sync: bool = True
     wukong_camera_sync: bool = True
 
     def __post_init__(self) -> None:

@@ -45,6 +45,7 @@ from game_recorder.capture.window_region import (
 )
 from game_recorder.camera_sync import (
     GTA_CAMERA_SOURCE,
+    RDR2_CAMERA_SOURCE,
     WUKONG_CAMERA_SOURCE,
     CameraSource,
     clear_active_session,
@@ -90,6 +91,8 @@ def _enabled_camera_sources(config: Config) -> tuple[CameraSource, ...]:
     sources: list[CameraSource] = []
     if config.gta_camera_sync:
         sources.append(GTA_CAMERA_SOURCE)
+    if config.rdr2_camera_sync:
+        sources.append(RDR2_CAMERA_SOURCE)
     if config.wukong_camera_sync:
         sources.append(WUKONG_CAMERA_SOURCE)
     return tuple(sources)
