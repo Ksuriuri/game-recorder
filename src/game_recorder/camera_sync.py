@@ -35,7 +35,7 @@ GTA_CAMERA_SOURCE = CameraSource(
     raw_filename="camera_raw_gta.jsonl",
     legacy_raw_filenames=("camera_raw.jsonl",),
     source="gta_scripthook_gameplay_cam",
-    schema="gta_camera_v1",
+    schema="gta_camera_v2",
 )
 
 WUKONG_CAMERA_SOURCE = CameraSource(
@@ -43,7 +43,7 @@ WUKONG_CAMERA_SOURCE = CameraSource(
     control_dirname=".wukong_camera",
     raw_filename="camera_raw_wukong.jsonl",
     source="wukong_ue4ss_camera_cache",
-    schema="wukong_camera_v1",
+    schema="wukong_camera_v2",
     requires_windows_qpc=True,
 )
 
@@ -308,6 +308,25 @@ def _save_meta(session_dir: Path, meta: dict[str, Any]) -> None:
         f.write("\n")
 
 
+def _geometry_contract(header: dict[str, Any]) -> dict[str, Any]:
+    """Return self-describing camera coordinate metadata from a raw header."""
+    keys = (
+        "world_units",
+        "camera_to_world_translation_units",
+        "matrix_layout",
+        "matrix_vector_convention",
+        "world_axes",
+        "camera_axes",
+        "camera_to_world_source",
+        "world_to_clip_source",
+        "world_to_clip_input_units",
+        "sample_policy",
+        "fov_axis",
+        "projection_source",
+    )
+    return {key: header[key] for key in keys if key in header}
+
+
 def finalize_session_cameras(
     session_dir: Path,
     meta: dict[str, Any],
@@ -488,6 +507,9 @@ def finalize_session_cameras(
         "align": align_mode,
         "follow_recorder": True,
     }
+    geometry = _geometry_contract(header)
+    if geometry:
+        summary["geometry"] = geometry
     if frame_times:
         summary["frame_timestamps_file"] = timestamp_path.name
     if ignored_raw_files:

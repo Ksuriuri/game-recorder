@@ -94,7 +94,7 @@ class AlignSamplesTests(unittest.TestCase):
 
 
 class FinalizeCameraTests(unittest.TestCase):
-    def test_wukong_source_writes_gta_compatible_basic_records(self) -> None:
+    def test_wukong_v2_source_preserves_pose_and_projection_matrices(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             session_dir = Path(temporary)
             meta = _base_meta()
@@ -110,23 +110,31 @@ class FinalizeCameraTests(unittest.TestCase):
                 [
                     {
                         "type": "header",
-                        "schema": "wukong_camera_v1",
-                        "units": "game_world_meters_deg",
-                        "rot_order": "pitch_roll_yaw_deg",
+                        "schema": "wukong_camera_v2",
+                        "camera_to_world_translation_units": "meters",
+                        "matrix_layout": "row_major",
+                        "matrix_vector_convention": "row_vector",
+                        "world_axes": "x_forward_y_right_z_up",
+                        "camera_axes": "x_forward_y_right_z_up",
+                        "camera_to_world_source": "camera_cache_pov_rotation",
+                        "world_to_clip_source": "gse_engine_func_lib",
+                        "world_to_clip_input_units": "centimeters",
                     },
                     {
                         "type": "sample",
                         "t_unix_ms": 1_001,
-                        "pos": [1.0, 2.0, 3.0],
-                        "rot": [10.0, 20.0, 30.0],
-                        "fov": 75.0,
+                        "camera_to_world": list(range(16)),
+                        "world_to_clip": list(range(16, 32)),
+                        "projection_mode": 0,
+                        "viewport_px": [1920, 1080],
                     },
                     {
                         "type": "sample",
                         "t_unix_ms": 1_034,
-                        "pos": [1.1, 2.1, 3.1],
-                        "rot": [11.0, 21.0, 31.0],
-                        "fov": 76.0,
+                        "camera_to_world": list(range(32, 48)),
+                        "world_to_clip": list(range(48, 64)),
+                        "projection_mode": 0,
+                        "viewport_px": [1920, 1080],
                     },
                 ],
             )
@@ -153,16 +161,71 @@ class FinalizeCameraTests(unittest.TestCase):
                 set(output[0]),
                 {
                     "t_unix_ms",
-                    "pos",
-                    "rot",
-                    "fov",
+                    "camera_to_world",
+                    "world_to_clip",
+                    "projection_mode",
+                    "viewport_px",
                     "frame",
                     "t_capture_unix_ms",
                     "dt_ms",
                 },
             )
+            self.assertEqual(len(output[0]["camera_to_world"]), 16)
+            self.assertEqual(len(output[0]["world_to_clip"]), 16)
             saved_meta = json.loads((session_dir / "meta.json").read_text())
-            self.assertEqual(saved_meta["camera"]["schema"], "wukong_camera_v1")
+            self.assertEqual(saved_meta["camera"]["schema"], "wukong_camera_v2")
+            self.assertEqual(
+                saved_meta["camera"]["geometry"],
+                {
+                    "camera_to_world_translation_units": "meters",
+                    "matrix_layout": "row_major",
+                    "matrix_vector_convention": "row_vector",
+                    "world_axes": "x_forward_y_right_z_up",
+                    "camera_axes": "x_forward_y_right_z_up",
+                    "camera_to_world_source": "camera_cache_pov_rotation",
+                    "world_to_clip_source": "gse_engine_func_lib",
+                    "world_to_clip_input_units": "centimeters",
+                },
+            )
+
+    def test_wukong_v2_projection_fallback_preserves_camera_pose(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            session_dir = Path(temporary)
+            meta = _base_meta(total_frames=1)
+            _write_jsonl(
+                session_dir / "frame_timestamps.jsonl",
+                [{"frame": 0, "t_capture_unix_ms": 1_000.0}],
+            )
+            _write_jsonl(
+                session_dir / WUKONG_CAMERA_SOURCE.raw_filename,
+                [
+                    {"type": "header", "schema": "wukong_camera_v2"},
+                    {
+                        "type": "sample",
+                        "t_unix_ms": 1_000,
+                        "camera_to_world": list(range(16)),
+                        "projection_mode": 0,
+                        "projection_status": "unavailable",
+                    },
+                ],
+            )
+
+            summary = finalize_session_cameras(
+                session_dir,
+                meta,
+                (WUKONG_CAMERA_SOURCE,),
+                wait_raw_s=0,
+                keep_raw=True,
+            )
+
+            self.assertIsNotNone(summary)
+            output = [
+                json.loads(line)
+                for line in (session_dir / "camera.jsonl").read_text().splitlines()
+            ]
+            self.assertEqual(output[0]["camera_to_world"], list(range(16)))
+            self.assertEqual(output[0]["projection_status"], "unavailable")
+            self.assertNotIn("world_to_clip", output[0])
 
     def test_two_sources_are_reported_as_conflict_and_raw_is_retained(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -26,8 +26,6 @@ public class CameraPoseLogger : Script
     private bool _followRecorder = true;
     private Keys? _toggleKey = null; // null = disabled (default when following)
     private Keys _flushKey = Keys.F9;
-    private bool _includeMatrix = true;
-    private bool _includePlayer = true;
 
     private bool _recording;
     private StreamWriter _writer;
@@ -241,14 +239,21 @@ public class CameraPoseLogger : Script
 
             var header = new StringBuilder(320);
             header.Append("{\"type\":\"header\"");
-            header.Append(",\"schema\":\"gta_camera_v1\"");
+            header.Append(",\"schema\":\"gta_camera_v2\"");
             header.Append(",\"start_unix_ms\":").Append(_segmentStartUnixMs);
             header.Append(",\"sample_hz\":").Append(
                 _sampleHz.ToString("0.###", CultureInfo.InvariantCulture)
             );
             header.Append(",\"session_id\":\"").Append(EscapeJson(_activeSessionId)).Append('"');
-            header.Append(",\"units\":\"gta_world_meters_deg\"");
-            header.Append(",\"rot_order\":\"pitch_roll_yaw_deg\"");
+            header.Append(",\"world_units\":\"meters\"");
+            header.Append(",\"matrix_layout\":\"row_major\"");
+            header.Append(",\"matrix_vector_convention\":\"row_vector\"");
+            header.Append(",\"world_axes\":\"x_right_y_forward_z_up\"");
+            header.Append(",\"camera_axes\":\"x_right_y_forward_z_up\"");
+            header.Append(",\"camera_to_world_source\":\"gameplay_camera_matrix\"");
+            header.Append(",\"sample_policy\":\"gameplay_camera_rendering_only\"");
+            header.Append(",\"fov_axis\":\"vertical\"");
+            header.Append(",\"projection_source\":\"gameplay_fov_plus_render_resolution\"");
             header.Append('}');
             _writer.WriteLine(header.ToString());
             _writer.Flush();
@@ -304,50 +309,52 @@ public class CameraPoseLogger : Script
 
     private void WriteSample(DateTime utcNow)
     {
-        var unixMs = ToUnixMs(utcNow);
-        var pos = GameplayCamera.Position;
-        var rot = GameplayCamera.Rotation;
-        var fov = GameplayCamera.FieldOfView;
-
-        var sb = new StringBuilder(384);
-        sb.Append("{\"type\":\"sample\"");
-        sb.Append(",\"t_unix_ms\":").Append(unixMs);
-        AppendVec3(sb, "pos", pos);
-        AppendVec3(sb, "rot", rot);
-        sb.Append(",\"fov\":").Append(FormatFloat(fov));
-
-        if (_includeMatrix)
-        {
-            // Do NOT call GET_GAMEPLAY_CAM_MATRIX via a raw hash cast — truncating
-            // 0x814C9E6433E1A3BF to int becomes 0x33E1A3BF and ScriptHookV fatals with
-            // "Can't find native". Prefer SHVDN API vectors instead.
-            try
-            {
-                AppendVec3(sb, "forward", GameplayCamera.Direction);
-            }
-            catch
-            {
-                // Direction unavailable on some builds — pos/rot/fov are enough.
-            }
-        }
-
-        if (_includePlayer && Game.Player != null && Game.Player.Character != null)
-        {
-            var ped = Game.Player.Character;
-            AppendVec3(sb, "player_pos", ped.Position);
-            sb.Append(",\"player_heading\":").Append(FormatFloat(ped.Heading));
-        }
-
-        var rendering = false;
+        // GameplayCamera.Matrix is a camera-to-world transform. It must only be
+        // recorded while the gameplay director is rendering; otherwise it can
+        // describe a dormant follow/aim camera rather than the captured frame.
+        bool rendering;
         try
         {
             rendering = GameplayCamera.IsRendering;
         }
         catch
         {
-            rendering = true;
+            return;
         }
-        sb.Append(",\"cam_rendering\":").Append(rendering ? "true" : "false");
+        if (!rendering)
+        {
+            return;
+        }
+
+        var unixMs = ToUnixMs(utcNow);
+        Matrix cameraToWorld;
+        float verticalFov;
+        System.Drawing.Size resolution;
+        try
+        {
+            cameraToWorld = GameplayCamera.Matrix;
+            verticalFov = GameplayCamera.FieldOfView;
+            resolution = GTA.UI.Screen.Resolution;
+        }
+        catch
+        {
+            return;
+        }
+        if (resolution.Width <= 0 || resolution.Height <= 0)
+        {
+            return;
+        }
+
+        var sb = new StringBuilder(384);
+        sb.Append("{\"type\":\"sample\"");
+        sb.Append(",\"t_unix_ms\":").Append(unixMs);
+        AppendMatrix(sb, "camera_to_world", cameraToWorld);
+        sb.Append(",\"fov_vertical_deg\":").Append(FormatFloat(verticalFov));
+        sb.Append(",\"viewport_px\":[")
+            .Append(resolution.Width)
+            .Append(',')
+            .Append(resolution.Height)
+            .Append(']');
         sb.Append('}');
 
         _writer.WriteLine(sb.ToString());
@@ -441,17 +448,6 @@ public class CameraPoseLogger : Script
                 }
             }
 
-            var includeMatrix = ExtractJsonBool(text, "include_matrix");
-            if (includeMatrix.HasValue)
-            {
-                _includeMatrix = includeMatrix.Value;
-            }
-
-            var includePlayer = ExtractJsonBool(text, "include_player");
-            if (includePlayer.HasValue)
-            {
-                _includePlayer = includePlayer.Value;
-            }
         }
         catch (Exception ex)
         {
@@ -490,9 +486,7 @@ public class CameraPoseLogger : Script
                 + "  \"follow_recorder\": true,\n"
                 + "  \"sample_hz\": 30,\n"
                 + "  \"toggle_key\": \"none\",\n"
-                + "  \"flush_key\": \"F9\",\n"
-                + "  \"include_matrix\": true,\n"
-                + "  \"include_player\": true\n"
+                + "  \"flush_key\": \"F9\"\n"
                 + "}\n";
             File.WriteAllText(path, body, Encoding.UTF8);
         }
@@ -528,12 +522,25 @@ public class CameraPoseLogger : Script
         return (long)(utc - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds;
     }
 
-    private static void AppendVec3(StringBuilder sb, string key, Vector3 v)
+    private static void AppendMatrix(StringBuilder sb, string key, Matrix matrix)
     {
         sb.Append(",\"").Append(key).Append("\":[");
-        sb.Append(FormatFloat(v.X)).Append(',');
-        sb.Append(FormatFloat(v.Y)).Append(',');
-        sb.Append(FormatFloat(v.Z)).Append(']');
+        sb.Append(FormatFloat(matrix.M11)).Append(',');
+        sb.Append(FormatFloat(matrix.M12)).Append(',');
+        sb.Append(FormatFloat(matrix.M13)).Append(',');
+        sb.Append(FormatFloat(matrix.M14)).Append(',');
+        sb.Append(FormatFloat(matrix.M21)).Append(',');
+        sb.Append(FormatFloat(matrix.M22)).Append(',');
+        sb.Append(FormatFloat(matrix.M23)).Append(',');
+        sb.Append(FormatFloat(matrix.M24)).Append(',');
+        sb.Append(FormatFloat(matrix.M31)).Append(',');
+        sb.Append(FormatFloat(matrix.M32)).Append(',');
+        sb.Append(FormatFloat(matrix.M33)).Append(',');
+        sb.Append(FormatFloat(matrix.M34)).Append(',');
+        sb.Append(FormatFloat(matrix.M41)).Append(',');
+        sb.Append(FormatFloat(matrix.M42)).Append(',');
+        sb.Append(FormatFloat(matrix.M43)).Append(',');
+        sb.Append(FormatFloat(matrix.M44)).Append(']');
     }
 
     private static string FormatFloat(float v)
@@ -643,35 +650,6 @@ public class CameraPoseLogger : Script
         )
         {
             return v;
-        }
-        return null;
-    }
-
-    private static bool? ExtractJsonBool(string json, string key)
-    {
-        var needle = "\"" + key + "\"";
-        var i = json.IndexOf(needle, StringComparison.OrdinalIgnoreCase);
-        if (i < 0)
-        {
-            return null;
-        }
-        i = json.IndexOf(':', i + needle.Length);
-        if (i < 0)
-        {
-            return null;
-        }
-        i++;
-        while (i < json.Length && char.IsWhiteSpace(json[i]))
-        {
-            i++;
-        }
-        if (json.IndexOf("true", i, StringComparison.OrdinalIgnoreCase) == i)
-        {
-            return true;
-        }
-        if (json.IndexOf("false", i, StringComparison.OrdinalIgnoreCase) == i)
-        {
-            return false;
         }
         return null;
     }

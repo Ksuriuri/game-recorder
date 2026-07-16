@@ -23,6 +23,7 @@ sys.path.insert(0, str(_ROOT / "src"))
 from game_recorder.gta_camera import (  # noqa: E402
     CAMERA_RAW_FILENAME,
     FRAME_TIMESTAMPS_FILENAME,
+    GTA_CAMERA_SOURCE,
     align_samples_to_frames,
     finalize_session_camera,
     gta_camera_dir,
@@ -127,10 +128,12 @@ def merge_legacy(
 
     all_samples = []
     sources = []
+    raw_headers = []
     for path in logs:
-        samples, _ = iter_camera_samples(path)
+        samples, header = iter_camera_samples(path)
         all_samples.extend(samples)
         sources.append(path.name)
+        raw_headers.append(header)
     all_samples.sort(key=lambda s: s.t_unix_ms)
 
     ts_name = meta.get("frame_timestamps_file") or FRAME_TIMESTAMPS_FILENAME
@@ -168,9 +171,10 @@ def merge_legacy(
         for rec in records:
             f.write(json.dumps(rec, ensure_ascii=False, separators=(",", ":")))
             f.write("\n")
+    schemas = {header.get("schema") for header in raw_headers if header.get("schema")}
     cam_meta = {
         "source": "gta_scripthook_gameplay_cam",
-        "schema": "gta_camera_v1",
+        "schema": schemas.pop() if len(schemas) == 1 else GTA_CAMERA_SOURCE.schema,
         "file": "camera.jsonl",
         "raw_logs": sources,
         "sample_count_raw": len(all_samples),
@@ -179,6 +183,22 @@ def merge_legacy(
         "max_dt_ms": max_dt_ms,
         "align": align_mode,
     }
+    if len(raw_headers) == 1:
+        header = raw_headers[0]
+        geometry_keys = (
+            "world_units",
+            "matrix_layout",
+            "matrix_vector_convention",
+            "world_axes",
+            "camera_axes",
+            "camera_to_world_source",
+            "sample_policy",
+            "fov_axis",
+            "projection_source",
+        )
+        geometry = {key: header[key] for key in geometry_keys if key in header}
+        if geometry:
+            cam_meta["geometry"] = geometry
     if frame_times:
         cam_meta["frame_timestamps_file"] = ts_path.name
     meta["camera"] = cam_meta

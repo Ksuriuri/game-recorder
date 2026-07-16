@@ -402,7 +402,7 @@ class WukongInstallerTests(unittest.TestCase):
                 ).exists()
             )
 
-    def test_lua_payload_contains_required_basic_schema_contract(self) -> None:
+    def test_lua_payload_contains_required_v2_matrix_schema_contract(self) -> None:
         lua_path = (
             PROJECT_ROOT
             / "wukong-camera"
@@ -415,14 +415,15 @@ class WukongInstallerTests(unittest.TestCase):
         )
         source = lua_path.read_text(encoding="utf-8")
 
-        self.assertIn('"wukong_camera_v1"', source)
-        self.assertIn('"game_world_meters_deg"', source)
-        self.assertIn('"pitch_roll_yaw_deg"', source)
-        self.assertIn("camera.x / 100.0", source)
-        self.assertIn("camera.pitch", source)
-        self.assertIn("camera.roll", source)
-        self.assertIn("camera.yaw", source)
-        self.assertNotIn("view_projection", source)
+        self.assertIn('"wukong_camera_v2"', source)
+        self.assertIn('"camera_to_world_translation_units":"meters"', source)
+        self.assertIn('"world_to_clip_input_units":"centimeters"', source)
+        self.assertIn('"matrix_layout":"row_major"', source)
+        self.assertIn('"camera_to_world"', source)
+        self.assertIn('"world_to_clip"', source)
+        self.assertIn("GetPlayerViewProjectionMatrix", source)
+        self.assertIn("GetViewportSize", source)
+        self.assertNotIn("GetPlayerViewProjectionMatrixInv", source)
         self.assertNotIn("camera_frames.csv", source)
 
 

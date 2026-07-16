@@ -453,8 +453,6 @@ def write_config(gta: Path, recordings_root: Path) -> Path:
         "sample_hz": 30,
         "toggle_key": "none",
         "flush_key": "F9",
-        "include_matrix": True,
-        "include_player": True,
     }
     path = scripts / "camera_pose_logger.config.json"
     path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")

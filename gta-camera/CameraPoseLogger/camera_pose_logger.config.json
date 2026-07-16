@@ -4,7 +4,5 @@
   "follow_recorder": true,
   "sample_hz": 30,
   "toggle_key": "none",
-  "flush_key": "F9",
-  "include_matrix": true,
-  "include_player": true
+  "flush_key": "F9"
 }

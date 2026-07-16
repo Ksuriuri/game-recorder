@@ -14,6 +14,8 @@ local last_control_error = nil
 
 local cached_camera_manager = nil
 local cached_kismet_system_library = nil
+local cached_engine_func_lib = nil
+local cached_player_controller = nil
 local active_session = nil
 local desired_control = nil
 local desired_stop_reason = "idle"
@@ -485,6 +487,169 @@ local function get_camera_manager()
     return nil
 end
 
+local MATRIX_PLANES = { "XPlane", "YPlane", "ZPlane", "WPlane" }
+local MATRIX_COMPONENTS = { "X", "Y", "Z", "W" }
+
+local function matrix_values(matrix)
+    if matrix == nil then
+        return nil
+    end
+
+    local values = {}
+    for _, plane_name in ipairs(MATRIX_PLANES) do
+        local plane_ok, plane = pcall(function()
+            return matrix[plane_name]
+        end)
+        if not plane_ok or plane == nil then
+            return nil
+        end
+        for _, component_name in ipairs(MATRIX_COMPONENTS) do
+            local component_ok, component = pcall(function()
+                return plane[component_name]
+            end)
+            local value = component_ok and get_number(component, nil) or nil
+            if not is_finite_number(value) then
+                return nil
+            end
+            values[#values + 1] = value
+        end
+    end
+    return values
+end
+
+local function json_number_array(values)
+    local fields = {}
+    for _, value in ipairs(values) do
+        local formatted = format_number(value)
+        if formatted == nil then
+            return nil
+        end
+        fields[#fields + 1] = formatted
+    end
+    return "[" .. table.concat(fields, ",") .. "]"
+end
+
+local function get_engine_func_lib()
+    if is_valid(cached_engine_func_lib) then
+        return cached_engine_func_lib
+    end
+
+    local ok, object = pcall(
+        StaticFindObject,
+        "/Script/UnrealExtent.Default__GSE_EngineFuncLib"
+    )
+    if ok and is_valid(object) then
+        cached_engine_func_lib = object
+        log("Wukong GSE_EngineFuncLib found")
+        return object
+    end
+    cached_engine_func_lib = nil
+    return nil
+end
+
+local function get_player_controller(camera_manager)
+    if is_valid(cached_player_controller) then
+        return cached_player_controller
+    end
+
+    local class_names = {
+        "BP_B1PlayerController_C",
+        "BGP_PlayerControllerB1",
+        "BGP_PlayerControllerCS",
+        "BGPPlayerController"
+    }
+    for _, class_name in ipairs(class_names) do
+        local ok, object = pcall(FindFirstOf, class_name)
+        if ok and is_valid(object) then
+            cached_player_controller = object
+            log("Player controller found: " .. class_name)
+            return object
+        end
+    end
+
+    local ok, object = pcall(function()
+        return camera_manager:GetOwningPlayerController()
+    end)
+    if ok and is_valid(object) then
+        cached_player_controller = object
+        log("Player controller found from camera manager")
+        return object
+    end
+    cached_player_controller = nil
+    return nil
+end
+
+local function get_viewport_size(camera_manager)
+    local controller = get_player_controller(camera_manager)
+    if controller == nil then
+        return nil, nil
+    end
+
+    local size_x = {}
+    local size_y = {}
+    local ok = pcall(function()
+        controller:GetViewportSize(size_x, size_y)
+    end)
+    if not ok then
+        return nil, nil
+    end
+
+    local width = get_number(size_x.SizeX, nil)
+    local height = get_number(size_y.SizeY, nil)
+    if not is_finite_number(width)
+        or not is_finite_number(height)
+        or width <= 0
+        or height <= 0 then
+        return nil, nil
+    end
+    return round_integer(width), round_integer(height)
+end
+
+local function get_world_to_clip(camera_manager)
+    local engine_func_lib = get_engine_func_lib()
+    local controller = get_player_controller(camera_manager)
+    if engine_func_lib == nil or controller == nil then
+        return nil
+    end
+
+    local ok, matrix = pcall(function()
+        return engine_func_lib:GetPlayerViewProjectionMatrix(controller)
+    end)
+    if not ok then
+        return nil
+    end
+    return matrix_values(matrix)
+end
+
+local function camera_to_world_values(camera)
+    -- UE FRotator convention: local X is forward, Y is right, Z is up.
+    -- The returned row-major matrix maps UE camera-local row vectors to world.
+    local pitch = math.rad(camera.pitch)
+    local yaw = math.rad(camera.yaw)
+    local roll = math.rad(camera.roll)
+    local sp, cp = math.sin(pitch), math.cos(pitch)
+    local sy, cy = math.sin(yaw), math.cos(yaw)
+    local sr, cr = math.sin(roll), math.cos(roll)
+
+    local forward = { cp * cy, cp * sy, sp }
+    local right = {
+        sr * sp * cy - cr * sy,
+        sr * sp * sy + cr * cy,
+        -sr * cp
+    }
+    local up = {
+        -(cr * sp * cy + sr * sy),
+        cy * sr - cr * sp * sy,
+        cr * cp
+    }
+    return {
+        forward[1], forward[2], forward[3], 0.0,
+        right[1], right[2], right[3], 0.0,
+        up[1], up[2], up[3], 0.0,
+        camera.x / 100.0, camera.y / 100.0, camera.z / 100.0, 1.0
+    }
+end
+
 local function read_camera_cache(camera_manager)
     local ok, camera = pcall(function()
         local cache = camera_manager.CameraCachePrivate
@@ -507,7 +672,7 @@ local function read_camera_cache(camera_manager)
             pitch = get_number(rotation.Pitch, nil),
             roll = get_number(rotation.Roll, nil),
             yaw = get_number(rotation.Yaw, nil),
-            fov = get_number(pov.FOV, nil)
+            projection_mode = get_number(pov.ProjectionMode, 0)
         }
     end)
     if not ok or camera == nil then
@@ -515,7 +680,7 @@ local function read_camera_cache(camera_manager)
     end
 
     for _, field in ipairs({
-        "timestamp", "x", "y", "z", "pitch", "roll", "yaw", "fov"
+        "timestamp", "x", "y", "z", "pitch", "roll", "yaw", "projection_mode"
     }) do
         if not is_finite_number(camera[field]) then
             return nil
@@ -634,31 +799,41 @@ local function sample_camera(session)
         session.anchor_unix_ms
             + (platform_now - session.anchor_platform_seconds) * 1000.0
     )
-    local values = {
-        format_integer(t_unix_ms),
-        format_number(camera.x / 100.0),
-        format_number(camera.y / 100.0),
-        format_number(camera.z / 100.0),
-        format_number(camera.pitch),
-        format_number(camera.roll),
-        format_number(camera.yaw),
-        format_number(camera.fov)
-    }
-    for _, value in ipairs(values) do
-        if value == nil then
-            return
-        end
+    local t_formatted = format_integer(t_unix_ms)
+    local camera_to_world = json_number_array(camera_to_world_values(camera))
+    if t_formatted == nil or camera_to_world == nil then
+        return
     end
 
     local line = '{"type":"sample","t_unix_ms":'
-        .. values[1]
-        .. ',"pos":['
-        .. values[2] .. "," .. values[3] .. "," .. values[4]
-        .. '],"rot":['
-        .. values[5] .. "," .. values[6] .. "," .. values[7]
-        .. '],"fov":'
-        .. values[8]
-        .. "}"
+        .. t_formatted
+        .. ',"camera_to_world":'
+        .. camera_to_world
+        .. ',"projection_mode":'
+        .. format_integer(camera.projection_mode)
+
+    local world_to_clip = get_world_to_clip(camera_manager)
+    if world_to_clip ~= nil then
+        local world_to_clip_json = json_number_array(world_to_clip)
+        if world_to_clip_json ~= nil then
+            line = line .. ',"world_to_clip":' .. world_to_clip_json
+        else
+            line = line .. ',"projection_status":"unavailable"'
+        end
+    else
+        line = line .. ',"projection_status":"unavailable"'
+    end
+
+    local viewport_width, viewport_height = get_viewport_size(camera_manager)
+    if viewport_width ~= nil and viewport_height ~= nil then
+        line = line
+            .. ',"viewport_px":['
+            .. format_integer(viewport_width)
+            .. ","
+            .. format_integer(viewport_height)
+            .. "]"
+    end
+    line = line .. "}"
 
     local write_ok, write_error = write_line(session.file, line)
     if not write_ok then
@@ -749,15 +924,21 @@ local function start_session(control)
     end
 
     local anchor_unix_ms = round_integer(control.qpc_anchor_unix_ms)
-    local header = '{"type":"header","schema":"wukong_camera_v1"'
+    local header = '{"type":"header","schema":"wukong_camera_v2"'
         .. ',"start_unix_ms":'
         .. format_integer(anchor_unix_ms)
         .. ',"sample_hz":'
         .. format_number(control.sample_hz)
         .. ',"session_id":'
         .. json_string(control.session_id)
-        .. ',"units":"game_world_meters_deg"'
-        .. ',"rot_order":"pitch_roll_yaw_deg"'
+        .. ',"camera_to_world_translation_units":"meters"'
+        .. ',"matrix_layout":"row_major"'
+        .. ',"matrix_vector_convention":"row_vector"'
+        .. ',"world_axes":"x_forward_y_right_z_up"'
+        .. ',"camera_axes":"x_forward_y_right_z_up"'
+        .. ',"camera_to_world_source":"camera_cache_pov_rotation"'
+        .. ',"world_to_clip_source":"gse_engine_func_lib"'
+        .. ',"world_to_clip_input_units":"centimeters"'
         .. ',"clock":"windows_qpc_via_ue_platform_time"}'
     local header_ok, header_error = write_line(output_file, header)
     if not header_ok then

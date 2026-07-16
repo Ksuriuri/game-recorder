@@ -71,9 +71,26 @@ return { control_file = "D:/game-recorder-parent/.wukong_camera/active_session.j
 
 插件在 idle 状态下只以 100 ms 周期读取 control JSON。进入 `recording` 后，它会覆盖写
 `session_dir/raw_file`（默认 `camera_raw_wukong.jsonl`），输出
-`wukong_camera_v1` JSONL；录制结束后 game-recorder 会将其同步整理为 session 内的
-`camera.jsonl`。每条 sample 只包含 Unix 毫秒时间、米制位置、
-`[pitch, roll, yaw]` 欧拉角和 FOV。
+`wukong_camera_v2` JSONL；录制结束后 game-recorder 会将其同步整理为 session 内的
+`camera.jsonl`。
+
+每条 sample 始终包含：
+
+- `camera_to_world`：16 个 row-major 值的 4×4 矩阵。它将 UE 相机局部行向量坐标
+  变换到世界坐标；世界和相机轴均为 `X forward / Y right / Z up`，平移单位为米。
+- `projection_mode`：UE 的投影模式枚举。
+
+能调用游戏专用 `GSE_EngineFuncLib` 时，sample 还包含：
+
+- `world_to_clip`：引擎直接返回的、row-major 的 4×4 World-to-Clip 矩阵。
+- `viewport_px`：对应投影的游戏视口 `[width, height]`。
+
+`world_to_clip` 保持引擎原样，因此它的世界点输入单位是 UE 厘米；要与米制 C2W 或
+米制世界点结合时，先将位置乘以 100。每个 raw header 都明确记录这两种单位。
+
+`world_to_clip` 不可用时仍会保留精确外参，并以
+`projection_status: "unavailable"` 标识降级；不会写入可由矩阵求逆得到的 inverse-VP，
+也不重复写入已包含在外参中的位置、欧拉角或轴向量。
 
 完整 Windows 场景验收步骤见 `WINDOWS_VALIDATION.md`。
 
