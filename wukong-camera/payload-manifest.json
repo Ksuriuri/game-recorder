@@ -28,8 +28,8 @@
     },
     {
       "path": "payload/ue4ss/Mods/CameraFrameLogger/Scripts/main.lua",
-      "sha256": "73979691f4d58534c2d6bd35b1e709b24ed00b8a5768c659a132306d858240c0",
-      "bytes": 36052
+      "sha256": "f8e919300ad4b2f12469baf885a1f8058085e04082ef604ec5d11f970a257bc1",
+      "bytes": 35346
     }
   ]
 }

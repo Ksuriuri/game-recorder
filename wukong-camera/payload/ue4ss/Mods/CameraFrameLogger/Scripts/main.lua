@@ -1,7 +1,5 @@
-local CONTROL_POLL_MS = 100
+local CONTROL_POLL_MS = 10
 local FLUSH_EVERY_N_SAMPLES = 30
-local CLOCK_COMPATIBILITY_WINDOW_SECONDS = 600.0
-local UE_PLATFORM_QPC_BIAS_SECONDS = 16777216.0
 local DEFAULT_RAW_FILE = "camera_raw_wukong.jsonl"
 
 local win64_dir = nil
@@ -13,7 +11,6 @@ local control_missing_reported = false
 local last_control_error = nil
 
 local cached_camera_manager = nil
-local cached_kismet_system_library = nil
 local cached_engine_func_lib = nil
 local cached_player_controller = nil
 local active_session = nil
@@ -21,6 +18,9 @@ local desired_control = nil
 local desired_stop_reason = "idle"
 local transition_pending = false
 local rejected_session_key = nil
+local retryable_session_key = nil
+local retryable_session_poll_count = 0
+local CLOCK_RETRY_POLLS = 10
 
 local JSON_NULL = {}
 
@@ -432,35 +432,13 @@ local function load_config()
     return true
 end
 
-local function get_kismet_system_library()
-    if is_valid(cached_kismet_system_library) then
-        return cached_kismet_system_library
-    end
-
-    local ok, object = pcall(
-        StaticFindObject,
-        "/Script/Engine.Default__KismetSystemLibrary"
-    )
-    if ok and is_valid(object) then
-        cached_kismet_system_library = object
-        return object
-    end
-    cached_kismet_system_library = nil
-    return nil
-end
-
-local function get_platform_time_seconds()
-    local system_library = get_kismet_system_library()
-    if system_library == nil then
-        return nil, "Default__KismetSystemLibrary was not found"
-    end
-
-    local ok, value = pcall(function()
-        return system_library:GetPlatformTimeSeconds()
-    end)
-    value = get_number(value, nil)
+local function get_capture_clock_seconds()
+    -- On Windows, Lua os.clock() is backed by the CRT monotonic process clock.
+    -- It avoids UE4SS UObject/UFunction bindings, which are unavailable in this
+    -- packaged build. A 10 ms control poll bounds start-anchor skew.
+    local ok, value = pcall(os.clock)
     if not ok or not is_finite_number(value) then
-        return nil, "GetPlatformTimeSeconds failed"
+        return nil, "Lua os.clock() was unavailable"
     end
     return value
 end
@@ -724,7 +702,7 @@ local function close_session(reason)
     active_session = nil
 
     local end_unix_ms = session.last_t_unix_ms or session.anchor_unix_ms
-    local platform_now = get_platform_time_seconds()
+    local platform_now = get_capture_clock_seconds()
     if is_finite_number(platform_now) then
         end_unix_ms = round_integer(
             session.anchor_unix_ms
@@ -763,7 +741,7 @@ local function sample_camera(session)
         return
     end
 
-    local platform_now, clock_error = get_platform_time_seconds()
+    local platform_now, clock_error = get_capture_clock_seconds()
     if platform_now == nil then
         log("Stopping session because platform time failed: " .. clock_error)
         close_session("clock_error")
@@ -887,34 +865,13 @@ local function start_sampling_loop(session)
 end
 
 local function start_session(control)
-    local platform_now, clock_error = get_platform_time_seconds()
+    local platform_now, clock_error = get_capture_clock_seconds()
     if platform_now == nil then
-        log("Session rejected: " .. clock_error)
-        return false
+        log("Session start delayed: " .. clock_error .. "; will retry")
+        return false, true
     end
 
-    local raw_candidate = control.qpc_anchor_seconds
-    local biased_candidate = raw_candidate + UE_PLATFORM_QPC_BIAS_SECONDS
-    local raw_difference = math.abs(platform_now - raw_candidate)
-    local biased_difference = math.abs(platform_now - biased_candidate)
-    local anchor_platform_seconds = raw_candidate
-    local clock_difference = raw_difference
-    if biased_difference < raw_difference then
-        anchor_platform_seconds = biased_candidate
-        clock_difference = biased_difference
-    end
-
-    if clock_difference > CLOCK_COMPATIBILITY_WINDOW_SECONDS then
-        log(
-            string.format(
-                "Session rejected: incompatible platform clock "
-                    .. "(nearest QPC anchor differs by %.3f seconds; limit %.0f)",
-                clock_difference,
-                CLOCK_COMPATIBILITY_WINDOW_SECONDS
-            )
-        )
-        return false
-    end
+    local anchor_platform_seconds = platform_now
 
     local output_path = join_path(control.session_dir, control.raw_file)
     local output_file, open_error = io.open(output_path, "w")
@@ -939,7 +896,7 @@ local function start_session(control)
         .. ',"camera_to_world_source":"camera_cache_pov_rotation"'
         .. ',"world_to_clip_source":"gse_engine_func_lib"'
         .. ',"world_to_clip_input_units":"centimeters"'
-        .. ',"clock":"windows_qpc_via_ue_platform_time"}'
+        .. ',"clock":"lua_os_clock_anchored_to_recorder_qpc"}'
     local header_ok, header_error = write_line(output_file, header)
     if not header_ok then
         pcall(function()
@@ -979,7 +936,7 @@ local function start_session(control)
             .. control.session_id
             .. " -> "
             .. output_path
-            .. string.format(" (clock delta %.3f seconds)", clock_difference)
+            .. " (clock: Lua os.clock)"
     )
     return true
 end
@@ -988,6 +945,8 @@ local function reconcile_desired_state()
     local control = desired_control
     if control == nil then
         rejected_session_key = nil
+        retryable_session_key = nil
+        retryable_session_poll_count = 0
         if active_session ~= nil then
             close_session(desired_stop_reason)
         end
@@ -998,8 +957,23 @@ local function reconcile_desired_state()
         close_session("session_switched")
     end
 
-    if active_session == nil and rejected_session_key ~= control._session_key then
-        if not start_session(control) then
+    if active_session == nil then
+        if rejected_session_key == control._session_key then
+            return
+        end
+        if retryable_session_key == control._session_key then
+            retryable_session_poll_count = retryable_session_poll_count + 1
+            if retryable_session_poll_count < CLOCK_RETRY_POLLS then
+                return
+            end
+            retryable_session_key = nil
+            retryable_session_poll_count = 0
+        end
+        local started, retryable = start_session(control)
+        if not started and retryable then
+            retryable_session_key = control._session_key
+            retryable_session_poll_count = 0
+        elseif not started then
             rejected_session_key = control._session_key
         end
     end
