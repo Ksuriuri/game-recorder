@@ -68,6 +68,7 @@ class Config:
     # then select and align the one source that produced samples.
     gta_camera_sync: bool = True
     wukong_camera_sync: bool = True
+    cp2077_camera_sync: bool = True
 
     def __post_init__(self) -> None:
         self.output_dir = Path(self.output_dir)

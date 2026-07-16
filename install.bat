@@ -282,6 +282,40 @@ goto :wukong_install_done
 
 :wukong_install_done
 
+REM ============================================================
+REM  Optional: Cyberpunk 2077 camera logger (does not fail main install)
+REM ============================================================
+echo.
+echo [可选] 正在尝试安装赛博朋克 2077 相机插件 …
+if defined GAME_RECORDER_SKIP_PAUSE (
+    if defined CP2077_DIR (
+        "%VERIFY_PY%" "%PROJECT_DIR%\scripts\install_cp2077_camera.py" --recordings-dir "%PROJECT_DIR%\recordings" --no-prompt --cp2077-dir "%CP2077_DIR%"
+    ) else (
+        "%VERIFY_PY%" "%PROJECT_DIR%\scripts\install_cp2077_camera.py" --recordings-dir "%PROJECT_DIR%\recordings" --no-prompt
+    )
+) else (
+    if defined CP2077_DIR (
+        "%VERIFY_PY%" "%PROJECT_DIR%\scripts\install_cp2077_camera.py" --recordings-dir "%PROJECT_DIR%\recordings" --cp2077-dir "%CP2077_DIR%"
+    ) else (
+        "%VERIFY_PY%" "%PROJECT_DIR%\scripts\install_cp2077_camera.py" --recordings-dir "%PROJECT_DIR%\recordings"
+    )
+)
+if errorlevel 4 goto :cp2077_install_fail
+if errorlevel 3 goto :cp2077_install_skip
+if errorlevel 1 goto :cp2077_install_fail
+echo       [完成] 赛博朋克 2077 相机插件已安装，录制时会同步输出相机参数。
+goto :cp2077_install_done
+
+:cp2077_install_skip
+echo       [跳过] 未安装赛博朋克 2077 相机插件。需要时请再运行 cp2077-camera\install.bat。
+goto :cp2077_install_done
+
+:cp2077_install_fail
+echo       [失败] 赛博朋克 2077 相机插件未装好，但不影响录制器主程序；请设置 CP2077_DIR 或重试 cp2077-camera\install.bat
+goto :cp2077_install_done
+
+:cp2077_install_done
+
 echo.
 echo ============================================================
 echo   安装完成！
@@ -292,6 +326,7 @@ echo   无热键模式    :  run.bat --no-hotkey
 echo   低延迟回退    :  run.bat --fps 20 --quality 28 --x264-threads 1
 echo   GTA 相机插件  :  gta-camera\install.bat
 echo   黑神话相机插件:  wukong-camera\install.bat
+echo   赛博朋克相机  :  cp2077-camera\install.bat
 echo ============================================================
 echo.
 call :wait_key

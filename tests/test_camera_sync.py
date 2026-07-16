@@ -10,10 +10,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from game_recorder.camera_sync import (
+    CP2077_CAMERA_SOURCE,
     GTA_CAMERA_SOURCE,
     WUKONG_CAMERA_SOURCE,
     CameraSample,
     FrameCaptureTime,
+    active_session_path,
     align_samples_to_frames,
     finalize_session_cameras,
 )
@@ -94,6 +96,64 @@ class AlignSamplesTests(unittest.TestCase):
 
 
 class FinalizeCameraTests(unittest.TestCase):
+    def test_cp2077_reads_control_and_raw_from_cet_sandbox(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            recordings_dir = root / "recordings"
+            session_dir = recordings_dir / "session_test"
+            session_dir.mkdir(parents=True)
+            mod_dir = root / "CameraFrameLogger"
+            mod_dir.mkdir()
+            state_dir = root / CP2077_CAMERA_SOURCE.control_dirname
+            state_dir.mkdir()
+            (state_dir / "install.json").write_text(
+                json.dumps({"mod_dir": str(mod_dir)}),
+                encoding="utf-8",
+            )
+            _write_jsonl(
+                session_dir / "frame_timestamps.jsonl",
+                [{"frame": 0, "t_capture_unix_ms": 1_000.0}],
+            )
+            _write_jsonl(
+                mod_dir / CP2077_CAMERA_SOURCE.raw_filename,
+                [
+                    {"type": "header", "schema": "cp2077_camera_v2"},
+                    {
+                        "type": "sample",
+                        "t_unix_ms": 1_000,
+                        "camera_to_world": list(range(16)),
+                        "intrinsic": {
+                            "fx": 1000,
+                            "fy": 1000,
+                            "cx": 960,
+                            "cy": 540,
+                        },
+                    },
+                ],
+            )
+
+            self.assertEqual(
+                active_session_path(recordings_dir, CP2077_CAMERA_SOURCE),
+                mod_dir / "active_session.json",
+            )
+            summary = finalize_session_cameras(
+                session_dir,
+                _base_meta(total_frames=1),
+                (CP2077_CAMERA_SOURCE,),
+                wait_raw_s=0,
+                keep_raw=True,
+            )
+
+            self.assertIsNotNone(summary)
+            assert summary is not None
+            self.assertEqual(summary["status"], "aligned")
+            self.assertEqual(summary["source"], CP2077_CAMERA_SOURCE.source)
+            output = [
+                json.loads(line)
+                for line in (session_dir / "camera.jsonl").read_text().splitlines()
+            ]
+            self.assertEqual(output[0]["intrinsic"]["fx"], 1000)
+
     def test_wukong_v2_source_preserves_pose_and_projection_matrices(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             session_dir = Path(temporary)

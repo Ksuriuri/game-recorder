@@ -20,7 +20,7 @@ REM     .tools\          uv.exe + managed Python 3.11 + uv cache
 REM     ffmpeg\          BtbN gpl FFmpeg (NVENC + libx264 + dshow)
 REM     wheels\          pre-downloaded dependency wheels (numpy, opencv-headless,
 REM                      dxcam, soundcard, cffi, pycparser …)
-REM     src\, scripts\, gta-camera\, wukong-camera\, pyproject.toml
+REM     src\, scripts\, gta-camera\, wukong-camera\, cp2077-camera\, pyproject.toml
 REM     根目录全部 *.bat / *.vbs / *.md / *.txt（install.bat、run.bat、录制操作手册.txt 等）
 REM
 REM   What is NOT shipped:
@@ -79,6 +79,20 @@ if errorlevel 1 (
 
 if not exist "%UV_EXE%"           goto :missing_uv
 if not exist "%VENV_DIR%\Scripts\python.exe" goto :missing_venv
+
+echo.
+echo [1b/4] 正在预下载赛博朋克 2077 相机依赖 ^(RED4ext + CET^) ...
+"%VENV_DIR%\Scripts\python.exe" "%PROJECT_DIR%\scripts\install_cp2077_camera.py" --prefetch-deps
+if errorlevel 1 (
+    echo [警告] CP2077 依赖预下载失败；离线包中赛博朋克相机可能无法一键安装。
+) else (
+    if exist "%PROJECT_DIR%\.tools\cp2077-camera-cache\red4ext-1.30.0.zip" (
+        copy /Y "%PROJECT_DIR%\.tools\cp2077-camera-cache\red4ext-1.30.0.zip" "%PROJECT_DIR%\cp2077-camera\vendor\RED4ext\" >nul
+    )
+    if exist "%PROJECT_DIR%\.tools\cp2077-camera-cache\cet_1.37.1.zip" (
+        copy /Y "%PROJECT_DIR%\.tools\cp2077-camera-cache\cet_1.37.1.zip" "%PROJECT_DIR%\cp2077-camera\vendor\CET\" >nul
+    )
+)
 
 REM ----------------------------------------------------------------
 REM  Step 2: Pre-download every runtime wheel into wheels\ so the

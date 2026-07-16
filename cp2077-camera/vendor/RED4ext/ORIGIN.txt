@@ -1,0 +1,3 @@
+RED4ext — https://github.com/WopsS/RED4ext
+Installed automatically by scripts/install_cp2077_camera.py when not vendored locally.
+Place red4ext-*.zip (non-symbols) in this folder for offline installs.

@@ -27,6 +27,7 @@ class CameraSource:
     schema: str
     legacy_raw_filenames: tuple[str, ...] = ()
     requires_windows_qpc: bool = False
+    sandbox_install_filename: str | None = None
 
 
 GTA_CAMERA_SOURCE = CameraSource(
@@ -47,6 +48,15 @@ WUKONG_CAMERA_SOURCE = CameraSource(
     requires_windows_qpc=True,
 )
 
+CP2077_CAMERA_SOURCE = CameraSource(
+    key="cp2077",
+    control_dirname=".cp2077_camera",
+    raw_filename="camera_raw_cp2077.jsonl",
+    source="cp2077_cet_camera_logger",
+    schema="cp2077_camera_v2",
+    sandbox_install_filename="install.json",
+)
+
 
 @dataclass
 class CameraSample:
@@ -63,8 +73,26 @@ class FrameCaptureTime:
 
 
 def camera_control_dir(output_dir: Path, source: CameraSource) -> Path:
-    """Return a source's control directory next to the recordings root."""
-    return Path(output_dir).resolve().parent / source.control_dirname
+    """Return the directory a game's plugin can access for control and raw data."""
+    state_dir = Path(output_dir).resolve().parent / source.control_dirname
+    if source.sandbox_install_filename is None:
+        return state_dir
+
+    install_path = state_dir / source.sandbox_install_filename
+    try:
+        install = json.loads(install_path.read_text(encoding="utf-8"))
+        mod_dir_value = install["mod_dir"]
+    except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            f"{source.key} 相机安装状态不可用，请重新运行 install.bat：{install_path}"
+        ) from exc
+    if not isinstance(mod_dir_value, str) or not mod_dir_value:
+        raise RuntimeError(f"{source.key} 相机安装状态缺少 mod_dir：{install_path}")
+
+    mod_dir = Path(mod_dir_value)
+    if not mod_dir.is_dir():
+        raise RuntimeError(f"{source.key} 相机插件目录不存在：{mod_dir}")
+    return mod_dir
 
 
 def active_session_path(output_dir: Path, source: CameraSource) -> Path:
@@ -295,10 +323,20 @@ def _raw_path_for_source(
     session_dir: Path,
     source: CameraSource,
 ) -> Path | None:
-    for filename in (source.raw_filename, *source.legacy_raw_filenames):
+    filenames = (source.raw_filename, *source.legacy_raw_filenames)
+    for filename in filenames:
         candidate = session_dir / filename
         if candidate.is_file():
             return candidate
+    if source.sandbox_install_filename is not None:
+        try:
+            sandbox_dir = camera_control_dir(session_dir.parent, source)
+        except RuntimeError:
+            return None
+        for filename in filenames:
+            candidate = sandbox_dir / filename
+            if candidate.is_file():
+                return candidate
     return None
 
 

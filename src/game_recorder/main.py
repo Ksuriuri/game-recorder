@@ -218,6 +218,11 @@ def main() -> None:
         help="禁用黑神话：悟空相机位姿同步",
     )
     parser.add_argument(
+        "--no-cp2077-camera",
+        action="store_true",
+        help="禁用赛博朋克 2077 相机位姿同步",
+    )
+    parser.add_argument(
         "--list-audio-devices",
         action="store_true",
         help="列出 --audio-device 可用的 DirectShow 设备名，并显示 WASAPI 支持情况后退出",
@@ -298,6 +303,7 @@ def main() -> None:
         frame_drop_max_tolerated=max(0, int(args.frame_drop_max_tolerated)),
         gta_camera_sync=not bool(args.no_gta_camera),
         wukong_camera_sync=not bool(args.no_wukong_camera),
+        cp2077_camera_sync=not bool(args.no_cp2077_camera),
     )
 
     session: Session | None = None
