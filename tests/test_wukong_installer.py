@@ -14,6 +14,27 @@ import uninstall_wukong_camera as uninstaller
 
 
 class WukongInstallerTests(unittest.TestCase):
+    def test_crlf_conversion_is_accepted_only_when_manifest_hash_matches(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "mods.txt"
+            canonical = b"CameraFrameLogger : 1\n"
+            source.write_bytes(canonical.replace(b"\n", b"\r\n"))
+
+            normalized = installer._canonical_payload_bytes(
+                source,
+                expected_bytes=len(canonical),
+                expected_sha=installer._sha256_bytes(canonical),
+            )
+
+            self.assertEqual(normalized, canonical)
+            self.assertIsNone(
+                installer._canonical_payload_bytes(
+                    source,
+                    expected_bytes=len(canonical),
+                    expected_sha="0" * 64,
+                )
+            )
+
     def test_bundled_manifest_matches_payload(self) -> None:
         files, version = installer.load_and_verify_manifest()
 

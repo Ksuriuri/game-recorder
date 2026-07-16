@@ -58,6 +58,7 @@ class PayloadFile:
     destination_relative: Path
     byte_count: int
     sha256: str
+    install_bytes: bytes | None = None
 
 
 @dataclass(frozen=True)
@@ -76,6 +77,32 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _canonical_payload_bytes(
+    source: Path,
+    *,
+    expected_bytes: int,
+    expected_sha: str,
+) -> bytes | None:
+    """Accept only a line-ending variant that canonicalizes to the manifest."""
+    if source.suffix.casefold() not in {".ini", ".lua", ".txt"}:
+        return None
+    raw = source.read_bytes()
+    lf = raw.replace(b"\r\n", b"\n")
+    crlf = lf.replace(b"\n", b"\r\n")
+    for candidate in (lf, crlf):
+        if (
+            candidate != raw
+            and len(candidate) == expected_bytes
+            and _sha256_bytes(candidate).casefold() == expected_sha.casefold()
+        ):
+            return candidate
+    return None
 
 
 def _is_within(path: Path, parent: Path) -> bool:
@@ -432,17 +459,24 @@ def load_and_verify_manifest() -> tuple[list[PayloadFile], str]:
         seen_destinations.add(destination_key)
 
         actual_bytes = source.stat().st_size
-        if actual_bytes != expected_bytes:
-            raise InstallerError(
-                f"payload 字节数不符：{manifest_path}，"
-                f"期望 {expected_bytes}，实际 {actual_bytes}"
-            )
         actual_sha = _sha256(source)
-        if actual_sha.casefold() != expected_sha.casefold():
-            raise InstallerError(
-                f"payload SHA256 不符：{manifest_path}，"
-                f"期望 {expected_sha.lower()}，实际 {actual_sha}"
+        install_bytes: bytes | None = None
+        if (
+            actual_bytes != expected_bytes
+            or actual_sha.casefold() != expected_sha.casefold()
+        ):
+            install_bytes = _canonical_payload_bytes(
+                source,
+                expected_bytes=expected_bytes,
+                expected_sha=expected_sha,
             )
+            if install_bytes is None:
+                raise InstallerError(
+                    f"payload 校验失败：{manifest_path}，"
+                    f"期望 {expected_bytes} bytes / {expected_sha.lower()}，"
+                    f"实际 {actual_bytes} bytes / {actual_sha}"
+                )
+            _print(f"[修复] 已规范化 payload 文本换行：{manifest_path}")
         payload_files.append(
             PayloadFile(
                 manifest_path=manifest_path,
@@ -450,6 +484,7 @@ def load_and_verify_manifest() -> tuple[list[PayloadFile], str]:
                 destination_relative=destination_relative,
                 byte_count=expected_bytes,
                 sha256=expected_sha.lower(),
+                install_bytes=install_bytes,
             )
         )
 
@@ -457,9 +492,16 @@ def load_and_verify_manifest() -> tuple[list[PayloadFile], str]:
     return payload_files, f"{schema}:{manifest_digest[:16]}"
 
 
-def _merge_mods_txt(destination: Path, source: Path) -> None:
+def _merge_mods_txt(
+    destination: Path,
+    source: Path,
+    install_bytes: bytes | None = None,
+) -> None:
     if not destination.exists():
-        shutil.copy2(source, destination)
+        if install_bytes is None:
+            shutil.copy2(source, destination)
+        else:
+            destination.write_bytes(install_bytes)
         return
     try:
         lines = destination.read_text(encoding="utf-8-sig").splitlines()
@@ -1406,7 +1448,13 @@ def install(
                 )
             destination.parent.mkdir(parents=True, exist_ok=True)
             if payload_file.destination_relative == MODS_TXT_RELATIVE:
-                _merge_mods_txt(destination, payload_file.source)
+                _merge_mods_txt(
+                    destination,
+                    payload_file.source,
+                    payload_file.install_bytes,
+                )
+            elif payload_file.install_bytes is not None:
+                destination.write_bytes(payload_file.install_bytes)
             else:
                 shutil.copy2(payload_file.source, destination)
 

@@ -277,8 +277,7 @@ echo       [跳过] 未安装黑神话相机插件。需要时请再运行 wukon
 goto :wukong_install_done
 
 :wukong_install_fail
-echo       [失败] 黑神话相机插件未装好，但不影响录制器主程序。
-echo              请关闭游戏后再运行 wukong-camera\install.bat。
+echo       [失败] 黑神话相机插件未装好，但不影响录制器主程序；请关闭游戏后重试 wukong-camera\install.bat
 goto :wukong_install_done
 
 :wukong_install_done

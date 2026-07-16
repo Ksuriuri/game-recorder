@@ -40,6 +40,8 @@ wukong-camera\uninstall.bat --wukong-dir "D:\SteamLibrary\steamapps\common\Black
 安装前会校验 payload 每个文件的字节数和 SHA256，安装后再校验一次。首次安装时，
 如果 Win64 已有 `dwmapi.dll` 或 `ue4ss`，会完整备份到游戏根目录下的
 `.game_recorder_wukong_camera`。升级始终保留这份首次安装前备份。
+若 Git 在 Windows checkout 时只把受管文本的 LF 转成 CRLF，安装器会先规范化换行；
+只有规范化后字节数和 SHA256 与 manifest 完全一致才继续，其他内容变化仍会拒绝。
 已有 `Mods/mods.txt` 会保留其他模组条目，只更新 `CameraFrameLogger : 1`，不会整表覆盖。
 旧版 UE4SS 的 `xinput1_3.dll` 加载器与本包的 `dwmapi.dll` 不能共存；安装器会将其
 一并事务备份并暂时移除，卸载时原样恢复。
