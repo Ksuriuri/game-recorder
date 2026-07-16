@@ -786,7 +786,11 @@ def _fsync_directory(path: Path) -> None:
 
 
 def _fsync_file(path: Path) -> None:
-    with path.open("rb") as stream:
+    # Windows rejects os.fsync() on a read-only CRT file descriptor. Opening
+    # in append mode supplies the writable handle FlushFileBuffers requires
+    # without truncating or otherwise changing the copied snapshot file.
+    mode = "ab" if os.name == "nt" else "rb"
+    with path.open(mode) as stream:
         os.fsync(stream.fileno())
 
 
