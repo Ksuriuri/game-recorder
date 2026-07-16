@@ -39,6 +39,14 @@ GTA_CAMERA_SOURCE = CameraSource(
     schema="gta_camera_v2",
 )
 
+RDR2_CAMERA_SOURCE = CameraSource(
+    key="rdr2",
+    control_dirname=".rdr2_camera",
+    raw_filename="camera_raw_rdr2.jsonl",
+    source="rdr2_scripthook_final_rendered_cam",
+    schema="rdr2_camera_v1",
+)
+
 WUKONG_CAMERA_SOURCE = CameraSource(
     key="wukong",
     control_dirname=".wukong_camera",

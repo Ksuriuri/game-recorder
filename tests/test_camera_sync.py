@@ -12,6 +12,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 from game_recorder.camera_sync import (
     CP2077_CAMERA_SOURCE,
     GTA_CAMERA_SOURCE,
+    RDR2_CAMERA_SOURCE,
     WUKONG_CAMERA_SOURCE,
     CameraSample,
     FrameCaptureTime,
@@ -287,6 +288,78 @@ class FinalizeCameraTests(unittest.TestCase):
             self.assertEqual(output[0]["projection_status"], "unavailable")
             self.assertNotIn("world_to_clip", output[0])
 
+    def test_rdr2_source_finalizes_independently_with_geometry(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            session_dir = Path(temporary)
+            meta = _base_meta(total_frames=1)
+            _write_jsonl(
+                session_dir / "frame_timestamps.jsonl",
+                [{"frame": 0, "t_capture_unix_ms": 1_000.0}],
+            )
+            matrix = [float(value) for value in range(16)]
+            _write_jsonl(
+                session_dir / RDR2_CAMERA_SOURCE.raw_filename,
+                [
+                    {
+                        "type": "header",
+                        "schema": "rdr2_camera_v1",
+                        "world_units": "meters",
+                        "camera_to_world_translation_units": "meters",
+                        "matrix_layout": "row_major",
+                        "matrix_vector_convention": "row_vector",
+                        "world_axes": "x_right_y_forward_z_up",
+                        "camera_axes": "x_right_y_forward_z_up",
+                        "camera_to_world_source": "final_rendered_cam_coord_rot_order_2",
+                        "sample_policy": "final_rendered_camera",
+                        "fov_axis": "vertical",
+                        "projection_source": "final_rendered_cam_fov_plus_client_rect",
+                    },
+                    {
+                        "type": "sample",
+                        "t_unix_ms": 1_001,
+                        "camera_to_world": matrix,
+                        "fov_vertical_deg": 68.0,
+                        "viewport_px": [2560, 1440],
+                    },
+                ],
+            )
+
+            summary = finalize_session_cameras(
+                session_dir,
+                meta,
+                (RDR2_CAMERA_SOURCE,),
+                wait_raw_s=0,
+                keep_raw=True,
+            )
+
+            self.assertIsNotNone(summary)
+            assert summary is not None
+            self.assertEqual(summary["status"], "aligned")
+            self.assertEqual(summary["source"], RDR2_CAMERA_SOURCE.source)
+            self.assertEqual(summary["schema"], RDR2_CAMERA_SOURCE.schema)
+            output = [
+                json.loads(line)
+                for line in (session_dir / "camera.jsonl").read_text().splitlines()
+            ]
+            self.assertEqual(output[0]["camera_to_world"], matrix)
+            self.assertEqual(output[0]["fov_vertical_deg"], 68.0)
+            self.assertEqual(output[0]["viewport_px"], [2560, 1440])
+            self.assertEqual(
+                summary["geometry"],
+                {
+                    "world_units": "meters",
+                    "camera_to_world_translation_units": "meters",
+                    "matrix_layout": "row_major",
+                    "matrix_vector_convention": "row_vector",
+                    "world_axes": "x_right_y_forward_z_up",
+                    "camera_axes": "x_right_y_forward_z_up",
+                    "camera_to_world_source": "final_rendered_cam_coord_rot_order_2",
+                    "sample_policy": "final_rendered_camera",
+                    "fov_axis": "vertical",
+                    "projection_source": "final_rendered_cam_fov_plus_client_rect",
+                },
+            )
+
     def test_two_sources_are_reported_as_conflict_and_raw_is_retained(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             session_dir = Path(temporary)
@@ -311,6 +384,46 @@ class FinalizeCameraTests(unittest.TestCase):
             self.assertFalse((session_dir / "camera.jsonl").exists())
             self.assertTrue((session_dir / GTA_CAMERA_SOURCE.raw_filename).exists())
             self.assertTrue((session_dir / WUKONG_CAMERA_SOURCE.raw_filename).exists())
+
+    def test_three_sources_are_reported_as_conflict(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            session_dir = Path(temporary)
+            meta = _base_meta(total_frames=1)
+            sources = (
+                GTA_CAMERA_SOURCE,
+                RDR2_CAMERA_SOURCE,
+                WUKONG_CAMERA_SOURCE,
+            )
+            for source in sources:
+                _write_jsonl(
+                    session_dir / source.raw_filename,
+                    [
+                        {"type": "header", "schema": source.schema},
+                        {"type": "sample", "t_unix_ms": 1_000, "fov": 70},
+                    ],
+                )
+
+            summary = finalize_session_cameras(
+                session_dir,
+                meta,
+                sources,
+                wait_raw_s=0,
+            )
+
+            self.assertIsNotNone(summary)
+            assert summary is not None
+            self.assertEqual(summary["status"], "conflict")
+            self.assertEqual(
+                summary["sources"],
+                [source.source for source in sources],
+            )
+            self.assertEqual(
+                summary["raw_files"],
+                [source.raw_filename for source in sources],
+            )
+            self.assertFalse((session_dir / "camera.jsonl").exists())
+            for source in sources:
+                self.assertTrue((session_dir / source.raw_filename).exists())
 
     def test_empty_second_source_does_not_block_valid_source(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

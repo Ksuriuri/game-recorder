@@ -1,0 +1,5 @@
+{
+  "control_file": "%USERPROFILE%/Documents/game-recorder/.rdr2_camera/active_session.json",
+  "poll_interval_ms": 100,
+  "flush_every_samples": 30
+}

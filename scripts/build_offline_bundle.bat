@@ -20,7 +20,7 @@ REM     .tools\          uv.exe + managed Python 3.11 + uv cache
 REM     ffmpeg\          BtbN gpl FFmpeg (NVENC + libx264 + dshow)
 REM     wheels\          pre-downloaded dependency wheels (numpy, opencv-headless,
 REM                      dxcam, soundcard, cffi, pycparser …)
-REM     src\, scripts\, gta-camera\, wukong-camera\, cp2077-camera\, pyproject.toml
+REM     src\, scripts\, gta-camera\, rdr2-camera\, wukong-camera\, cp2077-camera\, pyproject.toml
 REM     根目录全部 *.bat / *.vbs / *.md / *.txt（install.bat、run.bat、录制操作手册.txt 等）
 REM
 REM   What is NOT shipped:
@@ -183,7 +183,7 @@ REM Write to .tools\ first, then move — avoids Compress-Archive failing when a
 REM older portable zip in the project root is open in Explorer or the IDE.
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
     "$ErrorActionPreference='Stop';" ^
-    "$core = @('.tools','ffmpeg','wheels','src','scripts','gta-camera','wukong-camera','pyproject.toml');" ^
+    "$core = @('.tools','ffmpeg','wheels','src','scripts','gta-camera','rdr2-camera','wukong-camera','cp2077-camera','pyproject.toml');" ^
     "$root = Get-ChildItem -LiteralPath '.' -File | Where-Object { $_.Extension -in @('.bat','.vbs','.md','.txt') } | ForEach-Object { $_.Name };" ^
     "$items = ($core + $root) | Select-Object -Unique | Where-Object { Test-Path $_ };" ^
     "Compress-Archive -Path $items -DestinationPath '%BUNDLE_TMP%' -CompressionLevel Optimal -Force"
