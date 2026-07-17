@@ -225,7 +225,7 @@ def main() -> None:
     parser.add_argument(
         "--no-cp2077-camera",
         action="store_true",
-        help="禁用赛博朋克 2077 相机位姿同步",
+        help="禁用赛博朋克 2077 相机位姿、内外参与 Camera Z-depth 同步",
     )
     parser.add_argument(
         "--list-audio-devices",

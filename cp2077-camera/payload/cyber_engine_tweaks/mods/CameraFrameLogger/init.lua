@@ -16,6 +16,7 @@ local desired_stop_reason = "idle"
 local transition_pending = false
 local rejected_session_key = nil
 local control_poll_accum_seconds = 0.0
+local active_camera_transform = nil
 
 local JSON_NULL = {}
 
@@ -144,6 +145,10 @@ end
 
 local function cross(ax, ay, az, bx, by, bz)
     return ay * bz - az * by, az * bx - ax * bz, ax * by - ay * bx
+end
+
+local function dot(ax, ay, az, bx, by, bz)
+    return ax * bx + ay * by + az * bz
 end
 
 local function parse_control_json(text)
@@ -455,6 +460,98 @@ local function camera_to_world_values(player)
     }
 end
 
+local function create_camera_transform()
+    local ok, transform = pcall(function()
+        if NewObject ~= nil then
+            return NewObject("Transform")
+        end
+        return Transform.new()
+    end)
+    if ok then
+        return transform
+    end
+    return nil
+end
+
+local function get_active_camera_geometry()
+    local ok_system, camera_system = pcall(function()
+        return Game.GetCameraSystem()
+    end)
+    if not ok_system or camera_system == nil then
+        return nil
+    end
+
+    if active_camera_transform == nil then
+        active_camera_transform = create_camera_transform()
+    end
+    if active_camera_transform == nil then
+        return nil
+    end
+
+    local ok_transform, valid = pcall(function()
+        return camera_system:GetActiveCameraWorldTransform(active_camera_transform)
+    end)
+    if not ok_transform or valid ~= true then
+        return nil
+    end
+
+    local px, py, pz = vector_components(active_camera_transform.position)
+    local rx, ry, rz = vector_components(call_method(camera_system, "GetActiveCameraRight"))
+    local ux, uy, uz = vector_components(call_method(camera_system, "GetActiveCameraUp"))
+    local fx, fy, fz = vector_components(call_method(camera_system, "GetActiveCameraForward"))
+    if px == nil or rx == nil or ux == nil or fx == nil then
+        return nil
+    end
+
+    fx, fy, fz = normalize3(fx, fy, fz)
+    ux, uy, uz = normalize3(ux, uy, uz)
+    if fx == nil or ux == nil then
+        return nil
+    end
+    rx, ry, rz = cross(fx, fy, fz, ux, uy, uz)
+    rx, ry, rz = normalize3(rx, ry, rz)
+    if rx == nil then
+        return nil
+    end
+    ux, uy, uz = cross(rx, ry, rz, fx, fy, fz)
+    ux, uy, uz = normalize3(ux, uy, uz)
+    if ux == nil then
+        return nil
+    end
+
+    local dx, dy, dz = -ux, -uy, -uz
+    local camera_to_world = {
+        rx, dx, fx, px,
+        ry, dy, fy, py,
+        rz, dz, fz, pz,
+        0.0, 0.0, 0.0, 1.0
+    }
+    local tx = -dot(rx, ry, rz, px, py, pz)
+    local ty = -dot(dx, dy, dz, px, py, pz)
+    local tz = -dot(fx, fy, fz, px, py, pz)
+    local world_to_camera = {
+        rx, ry, rz, tx,
+        dx, dy, dz, ty,
+        fx, fy, fz, tz,
+        0.0, 0.0, 0.0, 1.0
+    }
+    return {
+        camera_system = camera_system,
+        camera_to_world = camera_to_world,
+        world_to_camera = world_to_camera,
+        position_world = {px, py, pz},
+        right_world = {rx, ry, rz},
+        up_world = {ux, uy, uz},
+        forward_world = {fx, fy, fz},
+        rotation_world_to_camera = {
+            rx, ry, rz,
+            dx, dy, dz,
+            fx, fy, fz
+        },
+        translation_world_to_camera = {tx, ty, tz}
+    }
+end
+
 local function get_viewport_px()
     local ok, width, height = pcall(function()
         return GetDisplayResolution()
@@ -498,21 +595,30 @@ local function get_camera_mode(player)
     return "player"
 end
 
-local function get_fov_degrees(player, camera_mode, viewport_width, viewport_height)
+local function get_fov_degrees(camera_system, player, camera_mode, viewport_width, viewport_height)
     local fov_axis = "horizontal"
     local fov_source = "graphics_settings"
     local fov_value = nil
 
-    local ok, settings_value = pcall(function()
-        local settings = Game.GetSettingsSystem()
-        local var = settings:GetVar("/graphics/basic/FieldOfView")
-        return var:GetValue()
-    end)
-    if ok and is_finite_number(settings_value) then
-        fov_value = settings_value
+    local active_fov = get_number(call_method(camera_system, "GetActiveCameraFOV"), nil)
+    if active_fov ~= nil and active_fov > 1.0 and active_fov < 179.0 then
+        fov_value = active_fov
+        fov_axis = "vertical"
+        fov_source = "GetActiveCameraFOV"
     end
 
-    if camera_mode == "vehicle" then
+    if fov_value == nil then
+        local ok, settings_value = pcall(function()
+            local settings = Game.GetSettingsSystem()
+            local var = settings:GetVar("/graphics/basic/FieldOfView")
+            return var:GetValue()
+        end)
+        if ok and is_finite_number(settings_value) then
+            fov_value = settings_value
+        end
+    end
+
+    if fov_source ~= "GetActiveCameraFOV" and camera_mode == "vehicle" then
         fov_axis = "vertical"
         local vehicle = get_mounted_vehicle(player)
         local camera = vehicle and call_method(vehicle, "GetCameraComponent") or nil
@@ -521,7 +627,7 @@ local function get_fov_degrees(player, camera_mode, viewport_width, viewport_hei
             fov_value = internal_fov
             fov_source = "vehicle_camera_internal"
         end
-    else
+    elseif fov_source ~= "GetActiveCameraFOV" then
         local fpp = call_method(player, "GetFPPCameraComponent")
         local internal_fov = fpp and get_number(call_method(fpp, "GetFOV"), nil) or nil
         if internal_fov ~= nil and camera_mode == "fpp" then
@@ -590,6 +696,23 @@ local function build_world_to_clip(width, height, hfov_deg, vfov_deg, near_plane
     }
 end
 
+local function build_world_to_pixel(intrinsic, world_to_camera)
+    local fx, fy = intrinsic.fx, intrinsic.fy
+    local cx, cy = intrinsic.cx, intrinsic.cy
+    local t = world_to_camera
+    return {
+        fx * t[1] + cx * t[9],
+        fx * t[2] + cx * t[10],
+        fx * t[3] + cx * t[11],
+        fx * t[4] + cx * t[12],
+        fy * t[5] + cy * t[9],
+        fy * t[6] + cy * t[10],
+        fy * t[7] + cy * t[11],
+        fy * t[8] + cy * t[12],
+        t[9], t[10], t[11], t[12]
+    }
+end
+
 local function close_session(reason)
     local session = active_session
     if session == nil then
@@ -642,15 +765,11 @@ local function sample_camera(session, delta_time)
         session.next_sample_seconds
         + (periods + 1) * session.sample_period_seconds
 
+    local geometry = get_active_camera_geometry()
+    if geometry == nil then
+        return
+    end
     local player = get_player()
-    if player == nil then
-        return
-    end
-
-    local matrix_values = camera_to_world_values(player)
-    if matrix_values == nil then
-        return
-    end
 
     local viewport_width, viewport_height = get_viewport_px()
     if viewport_width == nil or viewport_height == nil then
@@ -659,27 +778,22 @@ local function sample_camera(session, delta_time)
 
     local camera_mode = get_camera_mode(player)
     local hfov_deg, vfov_deg, fov_axis, fov_source = get_fov_degrees(
+        geometry.camera_system,
         player,
         camera_mode,
         viewport_width,
         viewport_height
     )
     local intrinsic = build_intrinsic(viewport_width, viewport_height, hfov_deg, vfov_deg)
-    local world_to_clip = build_world_to_clip(
-        viewport_width,
-        viewport_height,
-        hfov_deg,
-        vfov_deg,
-        session.near_plane,
-        session.far_plane
-    )
+    local world_to_pixel = build_world_to_pixel(intrinsic, geometry.world_to_camera)
 
     local t_unix_ms = round_integer(
         session.anchor_unix_ms + session.elapsed_seconds * 1000.0
     )
-    local camera_to_world = json_number_array(matrix_values)
-    local world_to_clip_json = world_to_clip and json_number_array(world_to_clip) or nil
-    if camera_to_world == nil then
+    local camera_to_world = json_number_array(geometry.camera_to_world)
+    local world_to_camera = json_number_array(geometry.world_to_camera)
+    local world_to_pixel_json = json_number_array(world_to_pixel)
+    if camera_to_world == nil or world_to_camera == nil or world_to_pixel_json == nil then
         return
     end
 
@@ -687,6 +801,20 @@ local function sample_camera(session, delta_time)
         .. format_integer(t_unix_ms)
         .. ',"camera_to_world":'
         .. camera_to_world
+        .. ',"world_to_camera":'
+        .. world_to_camera
+        .. ',"camera_position_world":'
+        .. json_number_array(geometry.position_world)
+        .. ',"camera_right_world":'
+        .. json_number_array(geometry.right_world)
+        .. ',"camera_up_world":'
+        .. json_number_array(geometry.up_world)
+        .. ',"camera_forward_world":'
+        .. json_number_array(geometry.forward_world)
+        .. ',"rotation_world_to_camera":'
+        .. json_number_array(geometry.rotation_world_to_camera)
+        .. ',"translation_world_to_camera":'
+        .. json_number_array(geometry.translation_world_to_camera)
         .. ',"fov_horizontal_deg":'
         .. format_number(hfov_deg)
         .. ',"fov_vertical_deg":'
@@ -718,11 +846,7 @@ local function sample_camera(session, delta_time)
         .. ',"far_plane":'
         .. format_number(session.far_plane)
 
-    if world_to_clip_json ~= nil then
-        line = line .. ',"world_to_clip":' .. world_to_clip_json
-    else
-        line = line .. ',"projection_status":"unavailable"'
-    end
+    line = line .. ',"world_to_pixel":' .. world_to_pixel_json
     line = line .. "}"
 
     local write_ok, write_error = write_line(session.file, line)
@@ -795,24 +919,24 @@ local function start_session(control)
             and control.updated_at_ms
             or control.start_epoch_ms
     )
-    local header = '{"type":"header","schema":"cp2077_camera_v2"'
+    local header = '{"type":"header","schema":"cp2077_camera_v3"'
         .. ',"start_unix_ms":'
         .. format_integer(anchor_unix_ms)
         .. ',"sample_hz":'
         .. format_number(control.sample_hz)
         .. ',"session_id":'
         .. json_string(control.session_id)
+        .. ',"world_units":"meters"'
         .. ',"camera_to_world_translation_units":"meters"'
         .. ',"matrix_layout":"row_major"'
-        .. ',"matrix_vector_convention":"row_vector"'
-        .. ',"world_axes":"x_right_y_up_z_forward"'
-        .. ',"camera_axes":"x_forward_y_right_z_up"'
-        .. ',"camera_to_world_source":"player_world_axes"'
-        .. ',"world_to_clip_source":"derived_perspective"'
-        .. ',"world_to_clip_input_units":"meters"'
-        .. ',"fov_axis_default":"horizontal_on_foot"'
-        .. ',"projection_source":"intrinsic_fov_viewport"'
-        .. ',"sample_policy":"player_present_only"'
+        .. ',"matrix_vector_convention":"column_vector"'
+        .. ',"world_axes":"x_game_y_game_z_up"'
+        .. ',"camera_axes":"x_right_y_down_z_forward"'
+        .. ',"camera_to_world_source":"GetActiveCameraWorldTransform_and_active_camera_axes"'
+        .. ',"world_to_pixel_source":"intrinsic_times_world_to_camera"'
+        .. ',"fov_axis_default":"vertical_from_GetActiveCameraFOV"'
+        .. ',"projection_source":"K_times_OpenCV_world_to_camera"'
+        .. ',"sample_policy":"active_render_camera_available"'
         .. ',"clock":"recorder_publish_unix_plus_game_delta_seconds"}'
 
     local header_ok, header_error = write_line(output_file, header)

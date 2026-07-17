@@ -1,89 +1,84 @@
-# Cyberpunk 2077 Camera
+# Cyberpunk 2077 Camera + Z-depth
 
-通过 **Cyber Engine Tweaks (CET)** 采集赛博朋克 2077 的相机外参（`camera_to_world`）与内参（`intrinsic`、`world_to_clip`、FOV、视口）。
+This module records the final active Cyberpunk 2077 camera through Cyber Engine
+Tweaks and captures the matching GPU depth buffer through a ReShade 6 add-on.
 
-运行项目根目录 **`install.bat`** 时会自动尝试：
+## Install
 
-1. 发现本机赛博朋克 2077 安装目录（Steam manifest / 常见路径 / `CP2077_DIR`）
-2. 安装 **RED4ext** + **Cyber Engine Tweaks**（若尚未安装）
-3. 部署 **CameraFrameLogger**，并在 `.cp2077_camera/install.json` 登记 CET 模组目录
-
-完成后直接 **`run.bat`** 录制即可；停止后 session 内会有 `camera.jsonl`。
-
-CET 将文件访问限制在模组目录内，因此录制器会把控制文件写到
-`CameraFrameLogger/active_session.json`，模组在同目录生成临时 raw JSONL；停止录制后，
-录制器读取并对齐该文件，再输出到 session 的 `camera.jsonl`。
-
-## 手动安装 / 重装
+No Git installation is required in a packaged release. Run:
 
 ```bat
-cp2077-camera\install.bat
-cp2077-camera\install.bat --cp2077-dir "D:\SteamLibrary\steamapps\common\Cyberpunk 2077"
+cp2077-camera\install.bat --cp2077-dir "D:\Games\Cyberpunk 2077"
 ```
 
-若 `install.bat` 未找到游戏，可设置环境变量后重跑：
+The installer:
+
+1. Keeps an existing compatible RED4ext/CET installation, or installs it.
+2. Downloads the official ReShade full add-on setup and installs its `dxgi.dll`
+   proxy for the game's D3D12 renderer.
+3. Replaces the legacy `cp2077_camera_export` CET mod with `CameraFrameLogger`.
+4. Installs `cp2077_depth.addon64` and `CP2077Depth.fx` under `bin\x64`.
+
+ReShade binaries are downloaded from the official website and are not bundled
+for redistribution. For a network-isolated machine, manually place the official
+`ReShade_Setup_*_Addon.exe` in `cp2077-camera\vendor\ReShade\` and use
+`--skip-download`.
+
+## Record
+
+Start the game, load into gameplay, then run the recorder normally. The recorder
+publishes one shared `active_session.json`; the CET camera logger and ReShade
+depth add-on both start and stop with that session.
+
+A completed session contains:
+
+| Path | Contents |
+|---|---|
+| `camera.jsonl` | Per-video-frame camera intrinsics and extrinsics |
+| `depth.jsonl` | Video-frame to depth-file alignment |
+| `depth/depth_*.npy` | `H x W`, little-endian `float32` camera Z-depth in metres |
+| `meta.json` | Schema, alignment statistics, axes and depth calibration |
+
+`camera.jsonl` schema `cp2077_camera_v3` includes:
+
+- `intrinsic`: `fx`, `fy`, `cx`, `cy`, image width and height.
+- `world_to_camera`: row-major 4x4 OpenCV extrinsic for column vectors.
+- `camera_to_world`: inverse row-major 4x4 extrinsic.
+- `rotation_world_to_camera` and `translation_world_to_camera`.
+- `world_to_pixel`: row-major 3x4 matrix `K [R | t]`.
+- `camera_position_world`, active camera axes and vertical/horizontal FOV.
+
+The camera convention is OpenCV: `+X` right, `+Y` down, `+Z` forward. Therefore
+each value in a depth NPY is strictly `Zc` in:
+
+```text
+X_camera = R_world_to_camera X_world + t_world_to_camera
+camera Z-depth = X_camera[2]
+```
+
+It is not camera-to-point Euclidean distance. Pixel back-projection is:
+
+```text
+Xc = (u - cx) / fx * Zc
+Yc = (v - cy) / fy * Zc
+Zc = depth[v, u]
+```
+
+Cyberpunk 2077 device depth is converted with an empirical calibration based on
+the public `jasonbunk/reshade_cv` Cyberpunk curve. The exact constants and source
+are embedded in every session's `meta.json` and raw depth header.
+
+## Performance
+
+Depth is copied through a four-slot asynchronous GPU readback ring and written by
+a bounded worker queue. Even so, uncompressed float depth is large: about 8 MB per
+1080p sample or 33 MB per 4K sample. At 5 fps this is roughly 40 MB/s or 165 MB/s.
+
+## Uninstall
 
 ```bat
-set CP2077_DIR=D:\SteamLibrary\steamapps\common\Cyberpunk 2077
-install.bat
+cp2077-camera\uninstall.bat --cp2077-dir "D:\Games\Cyberpunk 2077"
 ```
 
-## 离线环境
-
-将以下文件放入 vendor 目录后，安装器使用 `--skip-download` 不再联网：
-
-- `cp2077-camera\vendor\RED4ext\red4ext-*.zip`
-- `cp2077-camera\vendor\CET\cet_*.zip`
-
-在线打包机可预缓存：
-
-```bat
-python scripts\install_cp2077_camera.py --prefetch-deps
-```
-
-## 卸载
-
-```bat
-cp2077-camera\uninstall.bat
-```
-
-## 录制流程
-
-1. 启动赛博朋克 2077（确保 CET 已加载模组，可在 CET 控制台看到 `[CameraFrameLogger] Loaded`）
-2. 运行 `run.bat` 开始录制
-3. 停止录制后，session 目录会生成对齐后的 `camera.jsonl`
-
-## 输出字段（`cp2077_camera_v2`）
-
-每帧样本包含：
-
-| 字段 | 说明 |
-|------|------|
-| `camera_to_world` | 4×4 行主序外参矩阵（row-vector，单位：米） |
-| `intrinsic` | 针孔内参 `{fx, fy, cx, cy, width, height}` |
-| `world_to_clip` | 由 FOV + 视口推导的透视投影矩阵 |
-| `fov_horizontal_deg` / `fov_vertical_deg` | 水平/垂直 FOV（度） |
-| `fov_axis` | `horizontal`（步行）或 `vertical`（载具） |
-| `viewport_px` | 游戏窗口分辨率 |
-| `near_plane` / `far_plane` | 近/远裁剪面（默认 0.05 / 10000） |
-| `camera_mode` | `fpp` / `tpp` / `vehicle` / `player` |
-
-坐标系约定（见 raw header `geometry`）：
-
-- 世界轴：X 右、Y 上、Z 前
-- 相机轴：X 前（视线）、Y 右、Z 上
-
-## 限制
-
-- 步行时 FOV 取自图形设置（水平 FOV）；载具第一人称为垂直 FOV。
-- 相机位置取自玩家 `GetWorldPosition` / `GetWorldTransform`，与真实眼球位置可能有少量偏差。
-- 菜单/过场中没有玩家实体时会跳过采样。
-- 首次启动游戏时 CET 可能要求绑定 Overlay 热键，绑定一次即可。
-
-## 禁用同步
-
-录制时若不想发布 CP2077 相机信号：
-
-```bat
-run.bat --no-cp2077-camera
-```
+This removes only `CameraFrameLogger`, `cp2077_depth.addon64` and
+`CP2077Depth.fx`. It leaves shared RED4ext, CET and ReShade runtimes installed.

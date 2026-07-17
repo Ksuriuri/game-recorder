@@ -10,6 +10,27 @@ import time
 
 logger = logging.getLogger(__name__)
 
+RECORDER_COMMAND_PATTERN = r"game[-_]recorder"
+
+
+def _replacement_powershell(pid: int) -> str:
+    """Build the process filter for editable and packaged entry-point names."""
+    return (
+        f"$current=Get-CimInstance Win32_Process -Filter 'ProcessId = {int(pid)}'; "
+        f"$excluded=@({int(pid)}); "
+        "while ($null -ne $current -and $current.ParentProcessId -gt 0) { "
+        "$parent=Get-CimInstance Win32_Process -Filter "
+        "('ProcessId = ' + $current.ParentProcessId); "
+        "if ($null -eq $parent) { break }; "
+        "$excluded += $parent.ProcessId; $current=$parent }; "
+        "Get-CimInstance Win32_Process | Where-Object { "
+        "($_.Name -eq 'pythonw.exe' -or $_.Name -eq 'python.exe') "
+        f"-and $_.CommandLine -match '{RECORDER_COMMAND_PATTERN}' "
+        "-and ($excluded -notcontains $_.ProcessId) } | "
+        "ForEach-Object { Stop-Process -Id $_.ProcessId -Force "
+        "-ErrorAction SilentlyContinue }"
+    )
+
 
 def replace_existing_instance(*, skip_if_continuing: bool = True) -> None:
     """Terminate other game-recorder python processes before this one starts."""
@@ -18,13 +39,7 @@ def replace_existing_instance(*, skip_if_continuing: bool = True) -> None:
     if skip_if_continuing and "--continuing" in sys.argv:
         return
     pid = os.getpid()
-    ps = (
-        "Get-CimInstance Win32_Process | Where-Object { "
-        "($_.Name -eq 'pythonw.exe' -or $_.Name -eq 'python.exe') "
-        "-and $_.CommandLine -match 'game_recorder' "
-        f"-and $_.ProcessId -ne {pid} }} | "
-        "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
-    )
+    ps = _replacement_powershell(pid)
     try:
         result = subprocess.run(
             [

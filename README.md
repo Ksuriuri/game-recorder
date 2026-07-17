@@ -8,7 +8,7 @@
 - **无边框游戏区域自动捕获**：默认 `--capture-mode auto`，按下热键开始录制时会优先捕获当前前台的大客户区窗口（适合 Borderless Windowed），识别不到合适窗口时自动回退整屏
 - **音频捕获**：默认走 **Python `soundcard` 包的 WASAPI Loopback**（抓当前 Windows 默认播放设备的混音），通过本机 TCP 把 PCM 喂给 FFmpeg，与视频在同一 FFmpeg 进程内 mux 实现天然同步。**零配置、不依赖 Stereo Mix、不需要装虚拟声卡、不需要管理员权限**，是网吧 / GTA 之类 shared-mode 游戏的标准录音通路。如果当前 FFmpeg 构建恰好带 `wasapi` indev（罕见），优先用单进程 WASAPI；都不行再回退到 DirectShow（Stereo Mix / VB-CABLE 等）
 - **键鼠捕获**：键盘和鼠标优先走 Win32 Raw Input，避免低级鼠标钩子影响游戏视角；Raw Input 不可用时键盘降级为 `GetAsyncKeyState` 轮询
-- **游戏相机同步**：默认同时发布 GTA V、RDR2 与《黑神话：悟空》的相机会话信号；只会由当前已启动且已安装插件的游戏写数据，结束后按真实视频帧时间生成 `camera.jsonl`
+- **游戏相机同步**：默认同时发布 GTA V、RDR2、《黑神话：悟空》与《赛博朋克 2077》的相机会话信号；只会由当前已启动且已安装插件的游戏写数据，结束后按真实视频帧时间生成 `camera.jsonl`。2077 还会同步生成逐帧索引的 Camera Z-depth
 - **硬件编码**：自动检测 NVIDIA NVENC，使用 GPU 专用编码单元，不占用 CUDA 核心；无 NVENC 时回退到 `libx264 ultrafast`，默认限制 2 个 x264 线程，避免网吧机器上抢占游戏 CPU
 - **统一时钟**：所有数据流共享 `perf_counter_ns` 高精度 T0 基准，同步误差 < 1 帧（33ms）
 - **可选分段保存**：通过 `--segment-minutes N` 每隔 N 分钟落盘一对 `mp4 + jsonl` 文件（默认关闭，推荐保持关闭以获得无缝音视频；启用时段间会有约几百毫秒的空隙）
@@ -374,6 +374,9 @@ recordings/
     20260411_143022_0_42130.jsonl
     frame_timestamps.jsonl
     camera.jsonl                         # 安装并运行了唯一游戏相机插件时生成
+    depth.jsonl                          # 2077：frame 到 Camera Z-depth NPY 的映射
+    depth/                               # 2077：H x W、float32、单位米的 Zc
+        depth_00000000.npy
     meta.json
 ```
 
@@ -454,7 +457,7 @@ recordings/
 
 ### camera.jsonl
 
-GTA、RDR2 与黑神话插件来源默认都启用，但没有启动或没有安装插件的游戏不会写数据。
+GTA、RDR2、黑神话与 2077 插件来源默认都启用，但没有启动或没有安装插件的游戏不会写数据。
 录制结束时只接受一个有效相机来源；若两款或三款游戏同时写出可对齐数据，
 `meta.camera.status` 会记为 `"conflict"`，保留各自 raw 文件且不生成混合轨迹。
 
@@ -486,8 +489,19 @@ rotation order 2，采用 row-major、row-vector；前三行依次是相机的 r
 
 `frame` 与 `frame_timestamps.jsonl`、MP4 帧号一致；`dt_ms` 是所选相机样本时间减去
 该视频帧捕获时间。默认只保留 50ms 内的最近样本，超出窗口的帧不会写入
-`camera.jsonl`。可用 `--no-gta-camera`、`--no-rdr2-camera` 或
-`--no-wukong-camera` 单独禁用来源。
+`camera.jsonl`。可用 `--no-gta-camera`、`--no-rdr2-camera`、
+`--no-wukong-camera` 或 `--no-cp2077-camera` 单独禁用来源。
+
+### depth.jsonl（赛博朋克 2077）
+
+安装 2077 模组后，每次双击 Caps Lock 开始的录制会话会同时生成 `camera.jsonl`、
+`depth.jsonl` 与 `depth/*.npy`。两个 JSONL 都使用与 MP4 相同的 `frame` 编号，
+可以直接按 `frame` 连接。`depth.jsonl` 的 `file` 指向对应的 NPY；同一张游戏画面
+被录制器重复采样时，多个视频帧可能引用同一个深度样本，`dt_ms` 保留真实时间差，
+`meta.json` 记录 `unique_samples_used` 与 `reused_frame_records`。
+
+NPY 为 `H x W`、little-endian `float32`、单位米。每个像素严格表示 OpenCV 相机坐标系
+（`+X` 向右、`+Y` 向下、`+Z` 向前）中的光轴坐标 `Zc`，不是相机到点的欧氏距离。
 
 ### library.json
 

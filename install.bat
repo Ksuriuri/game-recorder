@@ -337,7 +337,7 @@ if defined GAME_RECORDER_SKIP_PAUSE (
 if errorlevel 4 goto :cp2077_install_fail
 if errorlevel 3 goto :cp2077_install_skip
 if errorlevel 1 goto :cp2077_install_fail
-echo       [完成] 赛博朋克 2077 相机插件已安装，录制时会同步输出相机参数。
+echo       [完成] 赛博朋克 2077 插件已安装，录制时会同步输出相机参数与 Camera Z-depth。
 goto :cp2077_install_done
 
 :cp2077_install_skip

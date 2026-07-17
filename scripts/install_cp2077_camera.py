@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install Cyberpunk 2077 camera logger: RED4ext + CET + in-game mod."""
+"""Install CP2077 camera pose and ReShade camera Z-depth capture."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -23,12 +24,17 @@ except ImportError:
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CAMERA_ROOT = PROJECT_ROOT / "cp2077-camera"
 PAYLOAD_ROOT = CAMERA_ROOT / "payload" / "cyber_engine_tweaks" / "mods" / "CameraFrameLogger"
+SHADER_SOURCE = CAMERA_ROOT / "payload" / "reshade-shaders" / "Shaders" / "CP2077Depth.fx"
+ADDON_SOURCE = CAMERA_ROOT / "dist" / "cp2077_depth.addon64"
 VENDOR_RED4EXT = CAMERA_ROOT / "vendor" / "RED4ext"
 VENDOR_CET = CAMERA_ROOT / "vendor" / "CET"
+VENDOR_RESHADE = CAMERA_ROOT / "vendor" / "ReShade"
 CACHE_DIR = PROJECT_ROOT / ".tools" / "cp2077-camera-cache"
 CONTROL_DIRNAME = ".cp2077_camera"
 MOD_DEST_NAME = "CameraFrameLogger"
+LEGACY_MOD_DEST_NAMES = ("cp2077_camera_export",)
 GAME_EXE_REL = Path("bin") / "x64" / "Cyberpunk2077.exe"
+X64_REL = Path("bin") / "x64"
 PLUGINS_REL = Path("bin") / "x64" / "plugins"
 CET_REL = PLUGINS_REL / "cyber_engine_tweaks"
 CP2077_STEAM_APP_ID = "1091500"
@@ -38,6 +44,12 @@ RED4EXT_RELEASE_URL = (
 CET_RELEASE_URL = (
     "https://github.com/maximegmd/CyberEngineTweaks/releases/download/v1.37.1/cet_1.37.1.zip"
 )
+RESHADE_VERSION = "6.7.3"
+RESHADE_SETUP_NAME = f"ReShade_Setup_{RESHADE_VERSION}_Addon.exe"
+RESHADE_SETUP_URL = f"https://reshade.me/downloads/{RESHADE_SETUP_NAME}"
+ADDON_DEST_NAME = "cp2077_depth.addon64"
+SHADER_DEST_REL = Path("reshade-shaders") / "Shaders" / "CP2077Depth.fx"
+RESHADE_PROXY_NAMES = ("dxgi.dll", "d3d12.dll")
 
 
 def _print(message: str = "") -> None:
@@ -70,6 +82,16 @@ def cet_installed(game: Path) -> bool:
 def camera_mod_installed(game: Path) -> bool:
     mod = game / CET_REL / "mods" / MOD_DEST_NAME / "init.lua"
     return mod.is_file()
+
+
+def reshade_installed(game: Path) -> bool:
+    x64 = game / X64_REL
+    return (x64 / "ReShade.ini").is_file() and (x64 / "dxgi.dll").is_file()
+
+
+def depth_payload_installed(game: Path) -> bool:
+    x64 = game / X64_REL
+    return (x64 / ADDON_DEST_NAME).is_file() and (x64 / SHADER_DEST_REL).is_file()
 
 
 def _steam_library_roots() -> list[Path]:
@@ -235,6 +257,34 @@ def _find_vendor_zip(vendor_dir: Path, pattern: str) -> Path | None:
     return matches[-1] if matches else None
 
 
+def _resolve_file(
+    *,
+    vendor_dir: Path,
+    vendor_glob: str,
+    cache_name: str,
+    url: str,
+    allow_download: bool,
+) -> Path:
+    if vendor_dir.is_dir():
+        matches = sorted(vendor_dir.glob(vendor_glob), key=lambda path: path.name)
+        if matches:
+            _print(f"  使用内置 vendor：{matches[-1].name}")
+            return matches[-1]
+
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cached = CACHE_DIR / cache_name
+    if cached.is_file():
+        _print(f"  使用缓存：{cached.name}")
+        return cached
+    if not allow_download:
+        raise FileNotFoundError(
+            f"缺少 {cache_name}。请从 ReShade 官网下载 full add-on support 版本并放入 {vendor_dir}"
+        )
+    _print(f"  正在从 ReShade 官网下载 {cache_name} …")
+    _download(url, cached)
+    return cached
+
+
 def _resolve_zip(
     *,
     vendor_dir: Path,
@@ -309,7 +359,112 @@ def install_cet(game: Path, *, allow_download: bool) -> None:
         raise RuntimeError("Cyber Engine Tweaks 安装后校验失败")
 
 
-def configure_mod_sandbox(mod_dir: Path, recordings_root: Path) -> Path:
+def _ensure_reshade_effect_search_path(ini_path: Path) -> None:
+    wanted = r".\reshade-shaders\Shaders\**\**"
+    obsolete = r".\reshade-shaders\Shaders\**"
+    lines = ini_path.read_text(encoding="utf-8-sig", errors="replace").splitlines()
+    section_start: int | None = None
+    section_end = len(lines)
+    key_index: int | None = None
+    in_general = False
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            if in_general:
+                section_end = index
+                break
+            in_general = stripped.casefold() == "[general]"
+            if in_general:
+                section_start = index
+            continue
+        if in_general and stripped.partition("=")[0].strip().casefold() == "effectsearchpaths":
+            key_index = index
+
+    if section_start is None:
+        if lines and lines[-1]:
+            lines.append("")
+        lines.extend(["[GENERAL]", f"EffectSearchPaths={wanted}"])
+    elif key_index is None:
+        lines.insert(section_end, f"EffectSearchPaths={wanted}")
+    else:
+        _, _, value = lines[key_index].partition("=")
+        paths = [item.strip() for item in value.split(",") if item.strip()]
+        paths = [item for item in paths if item.casefold() != obsolete.casefold()]
+        if wanted.casefold() not in {item.casefold() for item in paths}:
+            paths.append(wanted)
+        lines[key_index] = "EffectSearchPaths=" + ",".join(paths)
+    ini_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def install_reshade(game: Path, *, allow_download: bool) -> None:
+    x64 = game / X64_REL
+    ini = x64 / "ReShade.ini"
+    if not reshade_installed(game):
+        existing_proxies = [
+            x64 / name
+            for name in RESHADE_PROXY_NAMES
+            if (x64 / name).exists()
+        ]
+        if existing_proxies or ini.exists():
+            raise RuntimeError(
+                "bin/x64 中已有不完整或非 ReShade 的 D3D 代理 DLL/ReShade.ini；"
+                "为避免覆盖其他注入器，需先手动确认并移走"
+            )
+        setup = _resolve_file(
+            vendor_dir=VENDOR_RESHADE,
+            vendor_glob="ReShade_Setup_*_Addon.exe",
+            cache_name=RESHADE_SETUP_NAME,
+            url=RESHADE_SETUP_URL,
+            allow_download=allow_download,
+        )
+        _print(
+            f"正在安装 ReShade {RESHADE_VERSION} full add-on support"
+            "（CP2077 D3D12，dxgi.dll 代理）…"
+        )
+        completed = subprocess.run(
+            [
+                str(setup),
+                str(game / GAME_EXE_REL),
+                "--api",
+                "dxgi",
+                "--headless",
+            ],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=300,
+            check=False,
+        )
+        if completed.returncode != 0:
+            detail = (completed.stdout + "\n" + completed.stderr).strip()
+            raise RuntimeError(f"ReShade 安装失败（exit={completed.returncode}）：{detail}")
+    else:
+        _print("ReShade: 已安装，保留现有运行时。")
+
+    if not reshade_installed(game):
+        raise RuntimeError(
+            "ReShade 安装后校验失败（缺少 dxgi.dll 或 ReShade.ini）"
+        )
+    _ensure_reshade_effect_search_path(ini)
+
+
+def install_depth_payload(game: Path) -> tuple[Path, Path]:
+    if not ADDON_SOURCE.is_file():
+        raise FileNotFoundError(
+            f"缺少已编译深度 addon：{ADDON_SOURCE}（开发环境先运行 depth-addon\\build.bat）"
+        )
+    if not SHADER_SOURCE.is_file():
+        raise FileNotFoundError(f"缺少深度 shader：{SHADER_SOURCE}")
+    x64 = game / X64_REL
+    addon_dest = x64 / ADDON_DEST_NAME
+    shader_dest = x64 / SHADER_DEST_REL
+    shader_dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(ADDON_SOURCE, addon_dest)
+    shutil.copy2(SHADER_SOURCE, shader_dest)
+    return addon_dest, shader_dest
+
+
+def configure_mod_sandbox(mod_dir: Path, recordings_root: Path, game: Path) -> Path:
     """Connect the recorder to CET's sandbox-local control/raw files."""
     control = mod_dir / "active_session.json"
     if not control.is_file():
@@ -329,10 +484,13 @@ def configure_mod_sandbox(mod_dir: Path, recordings_root: Path) -> Path:
     state_dir = Path(recordings_root).resolve().parent / CONTROL_DIRNAME
     state_dir.mkdir(parents=True, exist_ok=True)
     install_state = {
-        "schema": "cp2077_camera_install_v1",
+        "schema": "cp2077_camera_install_v2",
         "mod_dir": str(mod_dir.resolve()),
         "control_file": "active_session.json",
         "raw_file": "camera_raw_cp2077.jsonl",
+        "depth_addon": str((game / X64_REL / ADDON_DEST_NAME).resolve()),
+        "depth_shader": str((game / X64_REL / SHADER_DEST_REL).resolve()),
+        "depth_raw_file": "depth_raw_cp2077.jsonl",
     }
     (state_dir / "install.json").write_text(
         json.dumps(install_state, indent=2, ensure_ascii=False) + "\n",
@@ -345,23 +503,38 @@ def install_mod(game: Path, recordings_root: Path) -> Path:
     if not PAYLOAD_ROOT.is_dir():
         raise FileNotFoundError(f"缺少插件 payload：{PAYLOAD_ROOT}")
 
-    dest = game / CET_REL / "mods" / MOD_DEST_NAME
+    mods_dir = game / CET_REL / "mods"
+    for legacy_name in LEGACY_MOD_DEST_NAMES:
+        legacy = mods_dir / legacy_name
+        if legacy.exists():
+            _print(f"正在替换旧相机模组：{legacy}")
+            shutil.rmtree(legacy)
+
+    dest = mods_dir / MOD_DEST_NAME
     dest.mkdir(parents=True, exist_ok=True)
     shutil.copytree(PAYLOAD_ROOT, dest, dirs_exist_ok=True)
-    configure_mod_sandbox(dest, recordings_root)
+    configure_mod_sandbox(dest, recordings_root, game)
     return dest
 
 
 def uninstall_mod(game: Path) -> bool:
     dest = game / CET_REL / "mods" / MOD_DEST_NAME
+    removed = False
     if dest.exists():
         shutil.rmtree(dest)
-        return True
-    return False
+        removed = True
+    for path in (
+        game / X64_REL / ADDON_DEST_NAME,
+        game / X64_REL / SHADER_DEST_REL,
+    ):
+        if path.exists():
+            path.unlink()
+            removed = True
+    return removed
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="安装赛博朋克 2077 相机位姿采集插件")
+    parser = argparse.ArgumentParser(description="安装赛博朋克 2077 相机位姿与 Z-depth 采集插件")
     parser.add_argument("--cp2077-dir", type=Path, default=None, help="赛博朋克 2077 安装目录")
     parser.add_argument(
         "--recordings-dir",
@@ -377,17 +550,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--skip-download",
         action="store_true",
-        help="不联网下载 RED4ext/CET（仅用 vendor 或缓存）",
+        help="不联网下载 RED4ext/CET/ReShade（仅用 vendor 或缓存）",
     )
     parser.add_argument(
         "--uninstall",
         action="store_true",
-        help="仅卸载 CameraFrameLogger 模组",
+        help="卸载 CameraFrameLogger、深度 addon 和 shader（保留 CET/ReShade 运行时）",
     )
     parser.add_argument(
         "--prefetch-deps",
         action="store_true",
-        help="仅下载 RED4ext/CET 到 vendor 缓存（供离线包使用，不需要游戏目录）",
+        help="仅下载 RED4ext/CET/ReShade 到本机缓存（不需要游戏目录）",
     )
     args = parser.parse_args(argv)
 
@@ -404,6 +577,13 @@ def main(argv: list[str] | None = None) -> int:
                 url=RED4EXT_RELEASE_URL,
                 allow_download=True,
             )
+            _resolve_file(
+                vendor_dir=VENDOR_RESHADE,
+                vendor_glob="ReShade_Setup_*_Addon.exe",
+                cache_name=RESHADE_SETUP_NAME,
+                url=RESHADE_SETUP_URL,
+                allow_download=True,
+            )
             _resolve_zip(
                 vendor_dir=VENDOR_CET,
                 vendor_glob="cet_*.zip",
@@ -414,7 +594,7 @@ def main(argv: list[str] | None = None) -> int:
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             _print(f"[错误] 预下载失败：{exc}")
             return 1
-        _print("依赖已缓存到 .tools\\cp2077-camera-cache\\")
+        _print("依赖已缓存到 .tools\\cp2077-camera-cache\\（请勿重新分发 ReShade 安装器）")
         return 0
 
     game, skipped = resolve_cp2077_dir(args.cp2077_dir, prompt=not args.no_prompt)
@@ -424,18 +604,27 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.uninstall:
         removed = uninstall_mod(game)
-        _print("已卸载 CameraFrameLogger。" if removed else "未找到已安装的 CameraFrameLogger。")
+        _print(
+            "已卸载 CP2077 相机/深度模块（保留 CET/ReShade）。"
+            if removed
+            else "未找到已安装的 CP2077 相机/深度模块。"
+        )
         return 0
 
     allow_download = not args.skip_download and os.environ.get("UV_OFFLINE") != "1"
     try:
         install_red4ext(game, allow_download=allow_download)
         install_cet(game, allow_download=allow_download)
+        install_reshade(game, allow_download=allow_download)
+        addon_dest, shader_dest = install_depth_payload(game)
         dest = install_mod(game, Path(args.recordings_dir))
     except (urllib.error.URLError, TimeoutError, OSError, RuntimeError, FileNotFoundError) as exc:
         _print(f"[错误] {exc}")
         if not allow_download:
-            _print("  离线模式需要先将 red4ext-*.zip / cet_*.zip 放入 cp2077-camera\\vendor\\")
+            _print(
+                "  离线模式需要 red4ext-*.zip、cet_*.zip 和官网 full add-on "
+                "ReShade_Setup_*_Addon.exe"
+            )
         else:
             _print("  请检查网络后重试，或手动将 zip 放入 cp2077-camera\\vendor\\ 后加 --skip-download")
         return 1
@@ -447,8 +636,13 @@ def main(argv: list[str] | None = None) -> int:
         Path(args.recordings_dir).resolve().parent / CONTROL_DIRNAME / "install.json",
         game / GAME_EXE_REL,
         game / PLUGINS_REL / "cyber_engine_tweaks.asi",
+        game / X64_REL / "ReShade.ini",
+        addon_dest,
+        shader_dest,
     )
     missing = [str(path) for path in required if not path.is_file()]
+    if not reshade_installed(game):
+        missing.append(str(game / X64_REL / "dxgi.dll"))
     if missing:
         _print("[错误] 安装后校验失败，缺少：")
         for item in missing:
@@ -457,11 +651,16 @@ def main(argv: list[str] | None = None) -> int:
 
     control = dest / "active_session.json"
     _print()
-    _print("安装完成（RED4ext + CET + CameraFrameLogger）。")
+    _print("安装完成（CET 最终相机 + ReShade camera Z-depth）。")
     _print(f"  游戏目录: {game}")
     _print(f"  CET 插件: {dest}")
+    _print(f"  深度 addon: {addon_dest}")
+    _print(f"  深度 shader: {shader_dest}")
     _print(f"  同步信号: {control}")
-    _print("  下一步: 启动游戏 → run.bat 录制 → session 内应有 camera.jsonl")
+    _print(
+        "  下一步: 启动游戏 → run.bat 录制 → session 内应有 "
+        "camera.jsonl、depth.jsonl 和 depth/*.npy"
+    )
     _print("============================================================")
     return 0
 

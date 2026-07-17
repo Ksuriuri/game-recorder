@@ -17,6 +17,13 @@ ACTIVE_SESSION_FILENAME = "active_session.json"
 CAMERA_FILENAME = "camera.jsonl"
 FRAME_TIMESTAMPS_FILENAME = "frame_timestamps.jsonl"
 
+# At low recorder frame rates, game callbacks and GPU presents can land on
+# opposite sides of a frame interval. Keep the usual 50 ms tolerance at 30 fps,
+# while allowing up to 1.25 frame periods (capped at 250 ms) for 5 fps capture.
+MIN_ALIGNMENT_WINDOW_MS = 50.0
+MAX_ALIGNMENT_WINDOW_MS = 250.0
+ALIGNMENT_FRAME_PERIODS = 1.25
+
 
 @dataclass(frozen=True)
 class CameraSource:
@@ -61,7 +68,7 @@ CP2077_CAMERA_SOURCE = CameraSource(
     control_dirname=".cp2077_camera",
     raw_filename="camera_raw_cp2077.jsonl",
     source="cp2077_cet_camera_logger",
-    schema="cp2077_camera_v2",
+    schema="cp2077_camera_v3",
     sandbox_install_filename="install.json",
 )
 
@@ -78,6 +85,15 @@ class FrameCaptureTime:
 
     frame: int
     t_capture_unix_ms: float
+
+
+def frame_alignment_window_ms(fps: int) -> float:
+    """Return the nearest-sample window used for per-video-frame sidecars."""
+    frame_period_ms = 1000.0 / max(1, int(fps))
+    return max(
+        MIN_ALIGNMENT_WINDOW_MS,
+        min(MAX_ALIGNMENT_WINDOW_MS, ALIGNMENT_FRAME_PERIODS * frame_period_ms),
+    )
 
 
 def camera_control_dir(output_dir: Path, source: CameraSource) -> Path:
@@ -366,6 +382,7 @@ def _geometry_contract(header: dict[str, Any]) -> dict[str, Any]:
         "camera_to_world_source",
         "world_to_clip_source",
         "world_to_clip_input_units",
+        "world_to_pixel_source",
         "sample_policy",
         "fov_axis",
         "projection_source",
@@ -378,7 +395,7 @@ def finalize_session_cameras(
     meta: dict[str, Any],
     sources: Iterable[CameraSource],
     *,
-    max_dt_ms: float = 50.0,
+    max_dt_ms: float | None = None,
     wait_raw_s: float = 0.5,
     keep_raw: bool = False,
 ) -> dict[str, Any] | None:
@@ -431,6 +448,8 @@ def finalize_session_cameras(
 
     start_ms = int(meta["start_epoch_ms"])
     fps = int(meta.get("fps") or 30)
+    if max_dt_ms is None:
+        max_dt_ms = frame_alignment_window_ms(fps)
     sync_offset = int(meta.get("event_video_sync_offset") or 0)
     total_frames = int(meta.get("total_frames") or 0)
     if total_frames <= 0:
@@ -549,7 +568,13 @@ def finalize_session_cameras(
         "sample_count_raw": len(samples),
         "frames_matched": matched,
         "frames_missing": missing,
+        "unique_samples_used": len(
+            {record.get("t_unix_ms") for record in records}
+        ),
+        "reused_frame_records": matched
+        - len({record.get("t_unix_ms") for record in records}),
         "max_dt_ms": max_dt_ms,
+        "alignment_policy": "nearest_sample",
         "align": align_mode,
         "follow_recorder": True,
     }

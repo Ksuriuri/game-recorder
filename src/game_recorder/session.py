@@ -54,6 +54,7 @@ from game_recorder.camera_sync import (
     publish_active_session,
 )
 from game_recorder.config import Config, find_ffmpeg
+from game_recorder.depth_sync import finalize_cp2077_depth
 from game_recorder.encoder.ffmpeg_pipe import FFmpegEncoder
 from game_recorder.storage.action_writer import ActionWriter
 from game_recorder.storage.frame_timestamp_writer import (
@@ -709,11 +710,12 @@ class Session:
             final_frame_lag=self._frame_drop_tracker.final_lag,
         )
         meta.save(self._meta_path)
+        finalized_meta = asdict(meta)
         if camera_sources:
             try:
                 cam = finalize_session_cameras(
                     self._session_dir,
-                    asdict(meta),
+                    finalized_meta,
                     camera_sources,
                     wait_raw_s=0.6,
                 )
@@ -736,6 +738,20 @@ class Session:
                         )
             except Exception as exc:
                 logger.warning("对齐游戏相机轨迹失败：%s", exc)
+        if self.config.cp2077_camera_sync:
+            try:
+                depth = finalize_cp2077_depth(
+                    self._session_dir,
+                    finalized_meta,
+                )
+                if depth and depth.get("status") != "aligned":
+                    logger.error(
+                        "CP2077 Z-depth 未对齐（%s），已保留 %s",
+                        depth.get("status"),
+                        depth.get("raw_file", "raw 文件"),
+                    )
+            except Exception as exc:
+                logger.warning("对齐 CP2077 Z-depth 失败：%s", exc)
         try:
             add_session(self.config.output_dir, meta)
         except Exception as exc:

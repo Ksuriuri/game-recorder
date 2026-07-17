@@ -28,6 +28,12 @@ class Cp2077CameraLoggerTests(unittest.TestCase):
             '"clock":"recorder_publish_unix_plus_game_delta_seconds"',
             source,
         )
+        self.assertIn('"schema":"cp2077_camera_v3"', source)
+        self.assertIn("GetActiveCameraWorldTransform", source)
+        self.assertIn("GetActiveCameraFOV", source)
+        self.assertIn('"camera_axes":"x_right_y_down_z_forward"', source)
+        self.assertIn(',\"world_to_camera\":', source)
+        self.assertIn(',\"world_to_pixel\":', source)
         self.assertNotIn("debug.getinfo", source)
         self.assertNotIn("CONTROL_POLL_MS", source)
         self.assertNotIn("join_path(control.session_dir", source)
