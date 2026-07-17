@@ -37,8 +37,12 @@ except ImportError:
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CAMERA_ROOT = PROJECT_ROOT / "rdr2-camera"
 PLUGIN_PROJECT = CAMERA_ROOT / "CameraPoseLogger" / "CameraPoseLogger.vcxproj"
+PREBUILT_PLUGIN = CAMERA_ROOT / "dist" / "CameraPoseLoggerRDR2.asi"
+VENDORED_RUNTIME = CAMERA_ROOT / "vendor" / "ScriptHookRDR2"
+VENDORED_SDK = CAMERA_ROOT / "vendor" / "ScriptHookRDR2_SDK"
 SDK_CACHE = PROJECT_ROOT / ".tools" / "rdr2-camera-sdk"
 DOWNLOAD_CACHE = PROJECT_ROOT / ".tools" / "rdr2-camera-downloads"
+BUILD_TOOLS_INSTALL_NAME = "BuildToolsGameRecorder"
 STATE_DIRNAME = ".game_recorder_rdr2_camera"
 STATE_FILENAME = "state.json"
 STATE_SCHEMA = 1
@@ -50,6 +54,7 @@ SCRIPT_HOOK_URL = "https://www.dev-c.com/rdr2/scripthookrdr2/"
 RUNTIME_GLOB = "ScriptHookRDR2_*.zip"
 SDK_GLOB = "ScriptHookRDR2_SDK_*.zip"
 RUNTIME_REQUIRED = ("bin/ScriptHookRDR2.dll", "bin/dinput8.dll")
+RUNTIME_DEPLOY_NAMES = ("ScriptHookRDR2.dll", "dinput8.dll")
 SDK_REQUIRED = ("inc/main.h", "inc/natives.h", "lib/ScriptHookRDR2.lib")
 KNOWN_ARCHIVE_SHA256 = {
     "scripthookrdr2_1.0.1491.17.zip": (
@@ -88,8 +93,281 @@ class ZipPayload:
     members: dict[str, zipfile.ZipInfo]
 
 
+@dataclass(frozen=True)
+class RuntimeFiles:
+    """ScriptHookRDR2 runtime binaries ready to deploy into the game root."""
+
+    source: Path
+    files: dict[str, bytes]
+    source_sha256: str
+
+
 def _print(message: str = "") -> None:
     print(message, flush=True)
+
+
+def fingerprint_files(files: dict[str, bytes]) -> str:
+    digest = hashlib.sha256()
+    for name in sorted(files):
+        digest.update(name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(files[name])
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def find_named_file(directory: Path, name: str) -> Path | None:
+    for candidate in (directory / name, directory / "bin" / name):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def vendored_runtime_ready(directory: Path | None = None) -> bool:
+    root = VENDORED_RUNTIME if directory is None else directory
+    return all(find_named_file(root, name) is not None for name in RUNTIME_DEPLOY_NAMES)
+
+
+def load_runtime_from_directory(directory: Path) -> RuntimeFiles:
+    if not directory.is_dir():
+        raise InstallerError(f"ScriptHookRDR2 运行时目录不存在：{directory}")
+    files: dict[str, bytes] = {}
+    for name in RUNTIME_DEPLOY_NAMES:
+        path = find_named_file(directory, name)
+        if path is None:
+            raise InstallerError(
+                f"运行时目录缺少 {name}，请放到：\n"
+                f"  {directory}\\{name}\n"
+                f"  或 {directory}\\bin\\{name}"
+            )
+        try:
+            data = path.read_bytes()
+        except OSError as exc:
+            raise InstallerError(f"无法读取 {path}：{exc}") from exc
+        validate_pe_x64(data=data, label=name)
+        files[name] = data
+    version = ""
+    version_path = directory / "VERSION.txt"
+    if version_path.is_file():
+        try:
+            version = (
+                version_path.read_text(encoding="utf-8-sig", errors="ignore")
+                .splitlines()[0]
+                .strip()
+            )
+        except OSError:
+            version = ""
+    label = f" ({version})" if version else ""
+    _print(f"使用 ScriptHookRDR2 运行时目录{label}：{directory}")
+    return RuntimeFiles(directory.resolve(), files, fingerprint_files(files))
+
+
+def load_runtime_from_zip(
+    path: Path,
+    *,
+    prompt: bool,
+    allow_unknown: bool,
+    data: bytes | None = None,
+) -> RuntimeFiles:
+    snapshot = read_archive_snapshot(path) if data is None else data
+    verify_archive_trust(
+        path,
+        prompt=prompt,
+        allow_unknown=allow_unknown,
+        data=snapshot,
+    )
+    payload = validate_zip(path, RUNTIME_REQUIRED, data=snapshot)
+    files = {
+        "ScriptHookRDR2.dll": read_zip_member(payload, "bin/ScriptHookRDR2.dll"),
+        "dinput8.dll": read_zip_member(payload, "bin/dinput8.dll"),
+    }
+    for name, content in files.items():
+        validate_pe_x64(data=content, label=name)
+    return RuntimeFiles(
+        payload.archive,
+        files,
+        hashlib.sha256(payload.data).hexdigest(),
+    )
+
+
+def runtime_files_from_payload(payload: ZipPayload) -> RuntimeFiles:
+    files = {
+        "ScriptHookRDR2.dll": read_zip_member(payload, "bin/ScriptHookRDR2.dll"),
+        "dinput8.dll": read_zip_member(payload, "bin/dinput8.dll"),
+    }
+    return RuntimeFiles(
+        payload.archive,
+        files,
+        hashlib.sha256(payload.data).hexdigest(),
+    )
+
+
+def as_runtime_files(runtime: ZipPayload | RuntimeFiles) -> RuntimeFiles:
+    if isinstance(runtime, RuntimeFiles):
+        return runtime
+    return runtime_files_from_payload(runtime)
+
+
+def load_runtime_source(
+    path: Path,
+    *,
+    prompt: bool,
+    allow_unknown: bool,
+) -> RuntimeFiles:
+    if path.is_dir():
+        return load_runtime_from_directory(path)
+    if path.is_file():
+        return load_runtime_from_zip(
+            path, prompt=prompt, allow_unknown=allow_unknown
+        )
+    raise InstallerError(f"ScriptHookRDR2 运行时路径不存在：{path}")
+
+
+def resolve_runtime(
+    explicit: Path | None,
+    *,
+    prompt: bool,
+    allow_unknown: bool,
+) -> RuntimeFiles:
+    if explicit is not None:
+        return load_runtime_source(
+            explicit, prompt=prompt, allow_unknown=allow_unknown
+        )
+    if vendored_runtime_ready():
+        return load_runtime_from_directory(VENDORED_RUNTIME)
+
+    matches: list[Path] = []
+    for directory in _zip_search_dirs():
+        if not directory.is_dir():
+            continue
+        matches.extend(path for path in directory.glob(RUNTIME_GLOB) if path.is_file())
+        for candidate in directory.glob("ScriptHookRDR2_*"):
+            if (
+                candidate.is_dir()
+                and not candidate.name.casefold().startswith("scripthookrdr2_sdk")
+                and vendored_runtime_ready(candidate)
+            ):
+                matches.append(candidate)
+    matches = [
+        path
+        for path in matches
+        if not (path.is_file() and path.name.casefold().startswith("scripthookrdr2_sdk_"))
+    ]
+    matches = sorted(
+        _unique_paths(matches),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    if matches:
+        _print(f"[自动] 找到 ScriptHookRDR2 运行时：{matches[0]}")
+        return load_runtime_source(
+            matches[0], prompt=prompt, allow_unknown=allow_unknown
+        )
+
+    _print(f"未找到 ScriptHookRDR2 运行时。官方下载：{SCRIPT_HOOK_URL}")
+    _print(
+        f"请将解压后的 ScriptHookRDR2.dll / dinput8.dll 放到：\n  {VENDORED_RUNTIME}"
+    )
+    raise InstallerError(
+        "缺少 ScriptHookRDR2 运行时；请放入 rdr2-camera\\vendor\\ScriptHookRDR2\\ "
+        "或用 --runtime-zip 指定官方 ZIP/解压目录"
+    )
+
+
+def sdk_dir_ready(directory: Path) -> bool:
+    return all(
+        (directory / Path(*PurePosixPath(name).parts)).is_file()
+        for name in SDK_REQUIRED
+    )
+
+
+def resolve_sdk_source(
+    explicit: Path | None,
+    *,
+    prompt: bool,
+    allow_unknown: bool,
+) -> Path:
+    """Return an extracted SDK directory ready for MSBuild."""
+    if explicit is not None:
+        if explicit.is_dir():
+            if not sdk_dir_ready(explicit):
+                raise InstallerError(
+                    "SDK 目录缺少必需文件："
+                    + "、".join(SDK_REQUIRED)
+                )
+            return explicit.resolve()
+        if explicit.is_file():
+            snapshot = read_archive_snapshot(explicit)
+            verify_archive_trust(
+                explicit,
+                prompt=prompt,
+                allow_unknown=allow_unknown,
+                data=snapshot,
+            )
+            payload = validate_zip(explicit, SDK_REQUIRED, data=snapshot)
+            extract_zip_safely(payload, SDK_CACHE)
+            return SDK_CACHE.resolve()
+        raise InstallerError(f"ScriptHookRDR2 SDK 路径不存在：{explicit}")
+
+    if sdk_dir_ready(VENDORED_SDK):
+        version = ""
+        version_path = VENDORED_SDK / "VERSION.txt"
+        if version_path.is_file():
+            try:
+                version = (
+                    version_path.read_text(encoding="utf-8-sig", errors="ignore")
+                    .splitlines()[0]
+                    .strip()
+                )
+            except OSError:
+                version = ""
+        label = f" ({version})" if version else ""
+        _print(f"[自动] 使用项目内 ScriptHookRDR2 SDK{label}：{VENDORED_SDK}")
+        return VENDORED_SDK.resolve()
+
+    if sdk_dir_ready(SDK_CACHE):
+        _print(f"[自动] 使用已缓存的 ScriptHookRDR2 SDK：{SDK_CACHE}")
+        return SDK_CACHE.resolve()
+
+    # Prefer auto-discovery without prompting; only ask as a last resort.
+    matches: list[Path] = []
+    for directory in _zip_search_dirs():
+        if not directory.is_dir():
+            continue
+        matches.extend(path for path in directory.glob(SDK_GLOB) if path.is_file())
+        for candidate in directory.glob("ScriptHookRDR2_SDK_*"):
+            if candidate.is_dir() and sdk_dir_ready(candidate):
+                matches.append(candidate)
+    matches = sorted(
+        _unique_paths(matches),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    if matches:
+        chosen = matches[0]
+        _print(f"[自动] 找到 ScriptHookRDR2 SDK：{chosen}")
+        if chosen.is_dir():
+            return chosen.resolve()
+        snapshot = read_archive_snapshot(chosen)
+        verify_archive_trust(
+            chosen,
+            prompt=prompt,
+            allow_unknown=allow_unknown,
+            data=snapshot,
+        )
+        payload = validate_zip(chosen, SDK_REQUIRED, data=snapshot)
+        extract_zip_safely(payload, SDK_CACHE)
+        return SDK_CACHE.resolve()
+
+    _print(f"未找到 ScriptHookRDR2 SDK。官方下载：{SCRIPT_HOOK_URL}")
+    _print(
+        "请将官方 SDK 解压后的 inc\\ 与 lib\\ 放到：\n"
+        f"  {VENDORED_SDK}"
+    )
+    raise InstallerError(
+        "缺少 ScriptHookRDR2 SDK；请放入 rdr2-camera\\vendor\\ScriptHookRDR2_SDK\\ "
+        "或用 --sdk-zip 指定官方 ZIP/解压目录"
+    )
 
 
 def sha256_file(path: Path) -> str:
@@ -326,33 +604,48 @@ def resolve_zip(
     pattern: str,
     label: str,
     prompt: bool,
+    accept_directory: bool = False,
+    directory_ready: Any | None = None,
 ) -> Path:
     if explicit is not None:
-        if explicit.is_file():
+        if explicit.is_file() or (accept_directory and explicit.is_dir()):
             return explicit.resolve()
-        raise InstallerError(f"{label} ZIP 不存在：{explicit}")
+        raise InstallerError(f"{label} 路径不存在：{explicit}")
     matches: list[Path] = []
     for directory in _zip_search_dirs():
-        if directory.is_dir():
-            matches.extend(path for path in directory.glob(pattern) if path.is_file())
+        if not directory.is_dir():
+            continue
+        matches.extend(path for path in directory.glob(pattern) if path.is_file())
+        if accept_directory:
+            dir_pattern = pattern.removesuffix(".zip")
+            for candidate in directory.glob(dir_pattern):
+                if candidate.is_dir() and (
+                    directory_ready is None or directory_ready(candidate)
+                ):
+                    matches.append(candidate)
     if pattern == RUNTIME_GLOB:
         matches = [
             path
             for path in matches
             if not path.name.casefold().startswith("scripthookrdr2_sdk_")
         ]
-    matches = sorted(_unique_paths(matches), key=lambda path: path.stat().st_mtime, reverse=True)
+    matches = sorted(
+        _unique_paths(matches),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
     if matches:
-        _print(f"[自动] 找到 {label} ZIP：{matches[0]}")
+        _print(f"[自动] 找到 {label}：{matches[0]}")
         return matches[0].resolve()
-    _print(f"未找到 {label} ZIP。官方下载：{SCRIPT_HOOK_URL}")
+    _print(f"未找到 {label}。官方下载：{SCRIPT_HOOK_URL}")
     if not prompt:
-        raise InstallerError(f"缺少 {label} ZIP；请下载后用命令行显式指定")
-    answer = input(f"请输入 {label} ZIP 路径：").strip().strip('"')
+        raise InstallerError(f"缺少 {label}；请下载后用命令行显式指定")
+    hint = " ZIP 或已解压目录" if accept_directory else " ZIP"
+    answer = input(f"请输入 {label}{hint}路径：").strip().strip('"')
     path = Path(answer)
-    if not path.is_file():
-        raise InstallerError(f"{label} ZIP 不存在：{path}")
-    return path.resolve()
+    if path.is_file() or (accept_directory and path.is_dir()):
+        return path.resolve()
+    raise InstallerError(f"{label} 路径不存在：{path}")
 
 
 def _safe_member_name(info: zipfile.ZipInfo) -> str:
@@ -590,7 +883,148 @@ def needs_elevation(game_dir: Path) -> bool:
     )
 
 
-def elevate_and_wait(script: Path, argv: list[str], game_dir: Path) -> int:
+def find_vswhere() -> Path | None:
+    from_path = shutil.which("vswhere.exe") or shutil.which("vswhere")
+    candidates = [Path(from_path)] if from_path else []
+    for env_name in ("ProgramFiles(x86)", "ProgramFiles"):
+        root = os.environ.get(env_name, "").strip()
+        if root:
+            candidates.append(
+                Path(root) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
+            )
+    return next((path for path in _unique_paths(candidates) if path.is_file()), None)
+
+
+def _vswhere_lines(*extra_args: str) -> list[str]:
+    vswhere = find_vswhere()
+    if vswhere is None:
+        return []
+    command = [str(vswhere), "-latest", "-products", "*", *extra_args]
+    try:
+        result = subprocess.run(
+            command, check=False, capture_output=True, text=True, timeout=30
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if result.returncode:
+        return []
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def _msbuild_under(root: Path) -> Path | None:
+    for relative in (
+        Path("MSBuild") / "Current" / "Bin" / "MSBuild.exe",
+        Path("MSBuild") / "15.0" / "Bin" / "MSBuild.exe",
+    ):
+        candidate = root / relative
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _cl_x64_under(root: Path) -> Path | None:
+    msvc_root = root / "VC" / "Tools" / "MSVC"
+    if not msvc_root.is_dir():
+        return None
+    versions = sorted(
+        (path for path in msvc_root.iterdir() if path.is_dir()),
+        key=lambda path: path.name,
+        reverse=True,
+    )
+    for version in versions:
+        candidate = version / "bin" / "Hostx64" / "x64" / "cl.exe"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _vc_targets_ready(root: Path) -> bool:
+    return (root / "MSBuild" / "Microsoft" / "VC" / "v170" / "Microsoft.Cpp.Default.props").is_file() or (
+        root / "MSBuild" / "Microsoft" / "VC" / "v160" / "Microsoft.Cpp.Default.props"
+    ).is_file()
+
+
+def _candidate_vs_roots() -> list[Path]:
+    roots: list[Path] = []
+    for text in _vswhere_lines("-property", "installationPath"):
+        roots.append(Path(text))
+    for env_name in ("ProgramFiles(x86)", "ProgramFiles"):
+        value = os.environ.get(env_name, "").strip()
+        if value:
+            base = Path(value) / "Microsoft Visual Studio" / "2022"
+            roots.extend(
+                (
+                    base / "BuildTools",
+                    base / BUILD_TOOLS_INSTALL_NAME,
+                    base / "Community",
+                    base / "Professional",
+                    base / "Enterprise",
+                )
+            )
+    return _unique_paths(roots)
+
+
+def find_cxx_toolchain_pair() -> tuple[Path, Path] | None:
+    """Prefer MSBuild + cl.exe from the same VS root with C++ MSBuild targets."""
+    for root in _candidate_vs_roots():
+        if not _vc_targets_ready(root):
+            continue
+        msbuild = _msbuild_under(root)
+        cl_path = _cl_x64_under(root)
+        if msbuild is not None and cl_path is not None:
+            return msbuild, cl_path
+    return None
+
+
+def find_msbuild() -> Path | None:
+    pair = find_cxx_toolchain_pair()
+    if pair is not None:
+        return pair[0]
+    for found in _vswhere_lines("-find", r"MSBuild\**\Bin\MSBuild.exe"):
+        candidate = Path(found)
+        if candidate.is_file():
+            return candidate
+    for root in _candidate_vs_roots():
+        candidate = _msbuild_under(root)
+        if candidate is not None:
+            return candidate
+    which = shutil.which("MSBuild.exe") or shutil.which("msbuild")
+    if which:
+        return Path(which)
+    return None
+
+
+def find_cl_x64() -> Path | None:
+    pair = find_cxx_toolchain_pair()
+    if pair is not None:
+        return pair[1]
+    for found in _vswhere_lines(
+        "-find", r"VC\Tools\MSVC\**\bin\Hostx64\x64\cl.exe"
+    ):
+        candidate = Path(found)
+        if candidate.is_file():
+            return candidate
+    for root in _candidate_vs_roots():
+        candidate = _cl_x64_under(root)
+        if candidate is not None:
+            return candidate
+    which = shutil.which("cl.exe") or shutil.which("cl")
+    if which:
+        return Path(which)
+    return None
+
+
+def has_cxx_toolchain() -> bool:
+    return find_cxx_toolchain_pair() is not None
+
+
+def elevate_and_wait(
+    script: Path,
+    argv: list[str],
+    game_dir: Path,
+    *,
+    log_file: Path | None = None,
+) -> int:
     if os.name != "nt":
         raise InstallerError("UAC 提权只适用于 Windows")
     import ctypes
@@ -615,15 +1049,32 @@ def elevate_and_wait(script: Path, argv: list[str], game_dir: Path) -> int:
             ("hProcess", wintypes.HANDLE),
         ]
 
-    parameters = subprocess.list2cmdline(
-        [
-            str(script),
-            *argv,
-            "--rdr2-dir",
-            str(game_dir),
-            "--skip-elevation",
-        ]
+    DOWNLOAD_CACHE.mkdir(parents=True, exist_ok=True)
+    if log_file is None:
+        log_file = DOWNLOAD_CACHE / f"rdr2-elevate-{uuid.uuid4().hex}.log"
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    child_argv = [
+        str(script),
+        *argv,
+        "--rdr2-dir",
+        str(game_dir),
+        "--skip-elevation",
+    ]
+    # Capture elevated stdout/stderr into a log the parent can display. Direct
+    # ShellExecute of python loses that output when the UAC console closes.
+    helper = DOWNLOAD_CACHE / f"rdr2-elevate-{uuid.uuid4().hex}.cmd"
+    helper.write_text(
+        "@echo off\r\n"
+        "chcp 65001 >nul\r\n"
+        "set PYTHONIOENCODING=utf-8\r\n"
+        "set PYTHONUTF8=1\r\n"
+        f'cd /d "{PROJECT_ROOT}"\r\n'
+        f'{subprocess.list2cmdline([sys.executable, *child_argv])}'
+        f' > "{log_file}" 2>&1\r\n'
+        "exit /b %ERRORLEVEL%\r\n",
+        encoding="utf-8",
     )
+
     shell32 = ctypes.WinDLL("shell32", use_last_error=True)
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     execute = shell32.ShellExecuteExW
@@ -643,75 +1094,46 @@ def elevate_and_wait(script: Path, argv: list[str], game_dir: Path) -> int:
     info.cbSize = ctypes.sizeof(info)
     info.fMask = 0x00000040  # SEE_MASK_NOCLOSEPROCESS
     info.lpVerb = "runas"
-    info.lpFile = sys.executable
-    info.lpParameters = parameters
+    info.lpFile = str(helper)
+    info.lpParameters = None
     info.lpDirectory = str(PROJECT_ROOT)
     info.nShow = 1
     ctypes.set_last_error(0)
-    if not execute(ctypes.byref(info)):
-        error = ctypes.get_last_error()
-        if error == 1223:
-            raise InstallerError("用户取消了 UAC 提权")
-        raise InstallerError(f"无法启动 UAC 子进程（Windows 错误 {error}）")
-    if not info.hProcess:
-        raise InstallerError("UAC 子进程未返回进程句柄")
     try:
-        wait_result = wait(info.hProcess, 0xFFFFFFFF)
-        if wait_result != 0:
-            raise InstallerError(f"等待 UAC 子进程失败（代码 {wait_result}）")
-        exit_code = wintypes.DWORD()
-        if not get_exit_code(info.hProcess, ctypes.byref(exit_code)):
-            raise InstallerError("无法取得 UAC 子进程退出码")
-        return int(exit_code.value)
+        if not execute(ctypes.byref(info)):
+            error = ctypes.get_last_error()
+            if error == 1223:
+                raise InstallerError("用户取消了 UAC 提权")
+            raise InstallerError(f"无法启动 UAC 子进程（Windows 错误 {error}）")
+        if not info.hProcess:
+            raise InstallerError("UAC 子进程未返回进程句柄")
+        try:
+            wait_result = wait(info.hProcess, 0xFFFFFFFF)
+            if wait_result != 0:
+                raise InstallerError(f"等待 UAC 子进程失败（代码 {wait_result}）")
+            exit_code = wintypes.DWORD()
+            if not get_exit_code(info.hProcess, ctypes.byref(exit_code)):
+                raise InstallerError("无法取得 UAC 子进程退出码")
+            code = int(exit_code.value)
+            if code != 0 and log_file.is_file():
+                log_text = _read_text_best_effort(log_file).strip()
+                if log_text:
+                    _print("—— 管理员安装日志 ——")
+                    _print(log_text)
+                    _print("—— 日志结束 ——")
+                else:
+                    _print(
+                        f"[错误] 管理员子进程失败（exit {code}），日志为空：{log_file}"
+                    )
+            elif code != 0:
+                _print(
+                    f"[错误] 管理员子进程失败（exit {code}），未生成日志：{log_file}"
+                )
+            return code
+        finally:
+            close(info.hProcess)
     finally:
-        close(info.hProcess)
-
-
-def find_vswhere() -> Path | None:
-    from_path = shutil.which("vswhere.exe") or shutil.which("vswhere")
-    candidates = [Path(from_path)] if from_path else []
-    for env_name in ("ProgramFiles(x86)", "ProgramFiles"):
-        root = os.environ.get(env_name, "").strip()
-        if root:
-            candidates.append(
-                Path(root) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
-            )
-    return next((path for path in _unique_paths(candidates) if path.is_file()), None)
-
-
-def find_msbuild() -> Path | None:
-    vswhere = find_vswhere()
-    if vswhere is None:
-        return None
-    command = [
-        str(vswhere),
-        "-latest",
-        "-products",
-        "*",
-        "-requires",
-        "Microsoft.Component.MSBuild",
-        "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
-        "-property",
-        "installationPath",
-    ]
-    try:
-        result = subprocess.run(
-            command, check=False, capture_output=True, text=True, timeout=30
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if result.returncode:
-        return None
-    for line in result.stdout.splitlines():
-        root = Path(line.strip())
-        for relative in (
-            Path("MSBuild") / "Current" / "Bin" / "MSBuild.exe",
-            Path("MSBuild") / "15.0" / "Bin" / "MSBuild.exe",
-        ):
-            candidate = root / relative
-            if candidate.is_file():
-                return candidate
-    return None
+        helper.unlink(missing_ok=True)
 
 
 def _download(url: str, destination: Path) -> None:
@@ -728,34 +1150,262 @@ def _download(url: str, destination: Path) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def ensure_msbuild() -> Path:
-    existing = find_msbuild()
-    if existing is not None:
-        return existing
-    installer = DOWNLOAD_CACHE / "vs_BuildTools.exe"
-    _print("未找到 Visual C++ Build Tools，正在下载官方安装器 …")
+def _read_text_best_effort(path: Path) -> str:
+    raw = path.read_bytes()
+    for encoding in ("utf-8-sig", "utf-8", "gbk", "cp936"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
+def find_vs_setup_exe() -> Path | None:
+    for env_name in ("ProgramFiles(x86)", "ProgramFiles"):
+        root = os.environ.get(env_name, "").strip()
+        if not root:
+            continue
+        candidate = Path(root) / "Microsoft Visual Studio" / "Installer" / "setup.exe"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def list_vs_instances() -> list[dict[str, Any]]:
+    vswhere = find_vswhere()
+    if vswhere is None:
+        return []
+    command = [
+        str(vswhere),
+        "-all",
+        "-products",
+        "*",
+        "-format",
+        "json",
+    ]
     try:
-        _download(BUILD_TOOLS_URL, installer)
+        result = subprocess.run(
+            command, check=False, capture_output=True, text=True, timeout=30
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if result.returncode:
+        return []
+    try:
+        payload = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError:
+        return []
+    return payload if isinstance(payload, list) else []
+
+
+def _directory_is_empty(path: Path) -> bool:
+    if not path.exists():
+        return True
+    try:
+        next(path.iterdir())
+    except StopIteration:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def pick_build_tools_install_path() -> Path:
+    """Choose a fresh install path; VS refuses nonempty leftover directories."""
+    bases: list[Path] = []
+    for env_name in ("ProgramFiles(x86)", "ProgramFiles"):
+        value = os.environ.get(env_name, "").strip()
+        if value:
+            bases.append(Path(value) / "Microsoft Visual Studio" / "2022")
+    bases.append(Path(r"C:\Program Files (x86)\Microsoft Visual Studio\2022"))
+    registered = {
+        os.path.normcase(str(Path(item["installationPath"]).resolve()))
+        for item in list_vs_instances()
+        if isinstance(item.get("installationPath"), str)
+    }
+    for base in _unique_paths(bases):
+        default_path = base / "BuildTools"
+        key = os.path.normcase(str(default_path))
+        if key in registered or _directory_is_empty(default_path):
+            return default_path
+        alternate = base / BUILD_TOOLS_INSTALL_NAME
+        alt_key = os.path.normcase(str(alternate))
+        if alt_key in registered or _directory_is_empty(alternate):
+            _print(
+                f"默认 BuildTools 目录不可用（非空残留）：{default_path}\n"
+                f"  改用：{alternate}"
+            )
+            return alternate
+    return Path(r"C:\BuildToolsGameRecorder")
+
+
+def _run_vs_installer(command: list[str], *, label: str) -> None:
+    _print(f"{label}（可能需要数分钟）…")
+    _print("  " + subprocess.list2cmdline(command))
+    result = subprocess.run(command, check=False)
+    if result.returncode not in (0, 3010):
+        raise InstallerError(f"{label}失败（exit {result.returncode}）")
+
+
+def try_modify_existing_vs_for_cxx() -> bool:
+    """Add MSVC tools to an already-installed VS/Build Tools instance."""
+    setup = find_vs_setup_exe()
+    if setup is None:
+        return False
+    instances = [
+        item
+        for item in list_vs_instances()
+        if isinstance(item.get("installationPath"), str) and item.get("isComplete")
+    ]
+    if not instances:
+        return False
+    for item in instances:
+        install_path = Path(str(item["installationPath"]))
+        product_id = str(item.get("productId", ""))
+        if "BuildTools" in product_id:
+            workload = "Microsoft.VisualStudio.Workload.VCTools"
+        else:
+            workload = "Microsoft.VisualStudio.Workload.NativeDesktop"
+        command = [
+            str(setup),
+            "modify",
+            "--installPath",
+            str(install_path),
+            "--add",
+            workload,
+            "--add",
+            "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+            "--includeRecommended",
+            "--quiet",
+            "--wait",
+            "--norestart",
+        ]
+        try:
+            _run_vs_installer(
+                command,
+                label=f"正在为已有 Visual Studio 添加 C++ 工具集（{install_path}）",
+            )
+        except InstallerError as exc:
+            _print(f"[警告] {exc}；尝试下一实例或改装 Build Tools")
+            continue
+        if has_cxx_toolchain():
+            return True
+    return False
+
+
+def install_vs_build_tools() -> None:
+    installer = DOWNLOAD_CACHE / "vs_BuildTools.exe"
+    try:
+        if not installer.is_file():
+            _print("正在下载官方 Visual Studio Build Tools …")
+            _download(BUILD_TOOLS_URL, installer)
     except (OSError, urllib.error.URLError, TimeoutError) as exc:
         raise InstallerError(f"Build Tools 下载失败：{exc}") from exc
+    install_path = pick_build_tools_install_path()
     command = [
         str(installer),
         "--quiet",
         "--wait",
         "--norestart",
         "--nocache",
+        "--installPath",
+        str(install_path),
         "--add",
         "Microsoft.VisualStudio.Workload.VCTools",
         "--includeRecommended",
     ]
-    _print("正在静默安装 Microsoft.VisualStudio.Workload.VCTools …")
-    result = subprocess.run(command, check=False)
-    if result.returncode not in (0, 3010):
-        raise InstallerError(f"Build Tools 安装失败（exit {result.returncode}）")
-    discovered = find_msbuild()
-    if discovered is None:
-        raise InstallerError("Build Tools 安装完成，但仍无法通过 vswhere 找到 MSBuild")
-    return discovered
+    _run_vs_installer(command, label="正在安装 Visual Studio Build Tools（VCTools）")
+
+
+def ensure_cxx_toolchain() -> Path:
+    """Ensure a coherent MSBuild + MSVC x64 toolchain; return MSBuild path."""
+    pair = find_cxx_toolchain_pair()
+    if pair is not None:
+        msbuild, cl_path = pair
+        _print(f"MSVC x64 编译器：{cl_path}")
+        return msbuild
+
+    msbuild = find_msbuild()
+    cl_path = find_cl_x64()
+    if msbuild is not None and cl_path is None:
+        _print("已找到 MSBuild，但缺少完整的 MSVC x64 工具集（cl.exe / VC targets）。")
+    else:
+        _print("未找到完整的 Visual C++ 编译工具链。")
+
+    if try_modify_existing_vs_for_cxx():
+        pair = find_cxx_toolchain_pair()
+        if pair is not None:
+            msbuild, cl_path = pair
+            _print(f"MSVC x64 编译器：{cl_path}")
+            return msbuild
+
+    install_vs_build_tools()
+    pair = find_cxx_toolchain_pair()
+    if pair is None:
+        raise InstallerError(
+            "C++ 工具链安装后仍缺少可用的 MSBuild+cl.exe 组合。\n"
+            "通用处理：打开 Visual Studio Installer，安装"
+            "「使用 C++ 的桌面开发」或 Build Tools 的 VCTools；\n"
+            "或在一台已有工具链的机器上构建后，把 ASI 放到：\n"
+            f"  {PREBUILT_PLUGIN}"
+        )
+    msbuild, cl_path = pair
+    _print(f"MSVC x64 编译器：{cl_path}")
+    return msbuild
+
+
+def find_prebuilt_plugin() -> Path | None:
+    candidates = [
+        PREBUILT_PLUGIN,
+        CAMERA_ROOT / "dist" / "RDR2CameraPoseLogger.asi",
+        PLUGIN_PROJECT.parent / "bin" / "Release" / "RDR2CameraPoseLogger.asi",
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            try:
+                validate_pe_x64(candidate, label=candidate.name)
+            except InstallerError:
+                continue
+            return candidate.resolve()
+    return None
+
+
+def publish_prebuilt_plugin(plugin: Path) -> Path:
+    """Keep dist/ in sync so other machines can install without compiling."""
+    PREBUILT_PLUGIN.parent.mkdir(parents=True, exist_ok=True)
+    if plugin.resolve() != PREBUILT_PLUGIN.resolve():
+        shutil.copy2(plugin, PREBUILT_PLUGIN)
+    return PREBUILT_PLUGIN.resolve()
+
+
+def resolve_plugin(sdk_dir: Path | None = None) -> Path:
+    """Prefer a vendored ASI (portable across machines); compile only if needed."""
+    if PREBUILT_PLUGIN.is_file():
+        try:
+            validate_pe_x64(PREBUILT_PLUGIN, label=PREBUILT_PLUGIN.name)
+            _print(f"使用预编译插件：{PREBUILT_PLUGIN}")
+            return PREBUILT_PLUGIN.resolve()
+        except InstallerError as exc:
+            _print(f"[警告] 预编译插件无效，将尝试重新编译：{exc}")
+
+    fallback = find_prebuilt_plugin()
+    if fallback is not None and not has_cxx_toolchain():
+        _print(f"使用已有编译产物：{fallback}")
+        return fallback
+
+    if sdk_dir is None:
+        raise InstallerError(
+            "缺少预编译插件且无法编译。请将 ASI 放到：\n"
+            f"  {PREBUILT_PLUGIN}\n"
+            "或准备 ScriptHookRDR2 SDK 后在本机编译。"
+        )
+    msbuild = ensure_cxx_toolchain()
+    _print(f"MSBuild：{msbuild}")
+    _print(f"SDK：{sdk_dir}")
+    built = build_plugin(msbuild, sdk_dir)
+    published = publish_prebuilt_plugin(built)
+    _print(f"已写入预编译副本，供其他机器免编译安装：{published}")
+    return published
 
 
 def build_plugin(msbuild: Path, sdk_dir: Path) -> Path:
@@ -1068,11 +1718,12 @@ def _validate_existing_control(
 def install_payload(
     game_dir: Path,
     recordings_dir: Path,
-    runtime_payload: ZipPayload,
+    runtime_payload: ZipPayload | RuntimeFiles,
     plugin: Path,
     *,
     force_existing: bool = False,
 ) -> tuple[Path, Path]:
+    runtime = as_runtime_files(runtime_payload)
     state_dir = game_dir / STATE_DIRNAME
     state_file = state_dir / STATE_FILENAME
     control_file = recordings_dir.resolve().parent / CONTROL_DIRNAME / CONTROL_FILENAME
@@ -1099,12 +1750,7 @@ def install_payload(
         force_existing=force_existing,
     )
 
-    runtime_data = {
-        "ScriptHookRDR2.dll": read_zip_member(
-            runtime_payload, "bin/ScriptHookRDR2.dll"
-        ),
-        "dinput8.dll": read_zip_member(runtime_payload, "bin/dinput8.dll"),
-    }
+    runtime_data = dict(runtime.files)
     for name, data in runtime_data.items():
         validate_pe_x64(data=data, label=name)
     validate_pe_x64(plugin, label=plugin.name)
@@ -1195,10 +1841,9 @@ def install_payload(
             "first_installed_at": first_installed,
             "installed_at": datetime.now(timezone.utc).isoformat(),
             "game_root": str(game_dir),
-            "runtime_zip": str(runtime_payload.archive),
-            "runtime_zip_sha256": hashlib.sha256(
-                runtime_payload.data
-            ).hexdigest(),
+            "runtime_source": str(runtime.source),
+            "runtime_zip": str(runtime.source),
+            "runtime_zip_sha256": runtime.source_sha256,
             "plugin_source": str(plugin),
             "control_file": str(control_file),
             "managed_files": list(MANAGED_NAMES),
@@ -1228,8 +1873,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=PROJECT_ROOT / "recordings",
         help="game-recorder recordings 目录",
     )
-    parser.add_argument("--runtime-zip", type=Path, help="ScriptHookRDR2 官方 ZIP")
-    parser.add_argument("--sdk-zip", type=Path, help="ScriptHookRDR2 SDK 官方 ZIP")
+    parser.add_argument(
+        "--runtime-zip",
+        type=Path,
+        help="ScriptHookRDR2 官方 ZIP 或已解压目录（默认优先用 rdr2-camera/vendor）",
+    )
+    parser.add_argument(
+        "--sdk-zip",
+        type=Path,
+        help="ScriptHookRDR2 SDK 官方 ZIP 或已解压目录",
+    )
     parser.add_argument(
         "--allow-unknown-zip",
         action="store_true",
@@ -1256,63 +1909,59 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     try:
         game_dir = resolve_rdr2_dir(args.rdr2_dir, prompt=not args.no_prompt)
-        runtime_zip = resolve_zip(
+        runtime = resolve_runtime(
             args.runtime_zip,
-            pattern=RUNTIME_GLOB,
-            label="ScriptHookRDR2 运行时",
-            prompt=not args.no_prompt,
-        )
-        sdk_zip = resolve_zip(
-            args.sdk_zip,
-            pattern=SDK_GLOB,
-            label="ScriptHookRDR2 SDK",
-            prompt=not args.no_prompt,
-        )
-        runtime_snapshot = read_archive_snapshot(runtime_zip)
-        sdk_snapshot = read_archive_snapshot(sdk_zip)
-        verify_archive_trust(
-            runtime_zip,
             prompt=not args.no_prompt,
             allow_unknown=args.allow_unknown_zip,
-            data=runtime_snapshot,
-        )
-        verify_archive_trust(
-            sdk_zip,
-            prompt=not args.no_prompt,
-            allow_unknown=args.allow_unknown_zip,
-            data=sdk_snapshot,
-        )
-        runtime_payload = validate_zip(
-            runtime_zip, RUNTIME_REQUIRED, data=runtime_snapshot
-        )
-        sdk_payload = validate_zip(
-            sdk_zip, SDK_REQUIRED, data=sdk_snapshot
         )
         validate_pe_x64(game_dir / "RDR2.exe", label="RDR2.exe")
-        for member in RUNTIME_REQUIRED:
-            validate_pe_x64(
-                data=read_zip_member(runtime_payload, member), label=member
-            )
         ensure_game_closed()
-        needs_build_tools = find_msbuild() is None
+
+        # Portable path: dist ASI means no SDK / MSVC on target machines.
+        has_prebuilt = False
+        if PREBUILT_PLUGIN.is_file():
+            try:
+                validate_pe_x64(PREBUILT_PLUGIN, label=PREBUILT_PLUGIN.name)
+                has_prebuilt = True
+            except InstallerError:
+                has_prebuilt = False
+
+        needs_compile = not has_prebuilt
+        needs_build_tools = needs_compile and not has_cxx_toolchain()
         if not args.skip_elevation and (
             needs_elevation(game_dir) or needs_build_tools
         ):
-            reason = (
-                "安装 C++ Build Tools"
-                if needs_build_tools
-                else "写入游戏目录"
-            )
+            if needs_build_tools:
+                msbuild = find_msbuild()
+                cl_path = find_cl_x64()
+                _print(
+                    "未找到预编译插件，且本机缺少 C++ 工具链"
+                    f"（MSBuild={'有' if msbuild else '无'}，"
+                    f"cl.exe={'有' if cl_path else '无'}）。"
+                )
+                _print(
+                    "将请求管理员权限安装/补齐 Visual C++ 工具集；"
+                    "若希望各机器免编译，请先在一台开发机生成：\n"
+                    f"  {PREBUILT_PLUGIN}"
+                )
+                reason = "安装 C++ 工具链"
+            else:
+                reason = "写入游戏目录"
             _print(f"{reason}需要管理员权限，正在请求 UAC …")
             return elevate_and_wait(Path(__file__).resolve(), original_argv, game_dir)
-        extract_zip_safely(sdk_payload, SDK_CACHE)
-        msbuild = ensure_msbuild()
-        _print(f"MSBuild：{msbuild}")
-        plugin = build_plugin(msbuild, SDK_CACHE)
+
+        sdk_dir: Path | None = None
+        if needs_compile:
+            sdk_dir = resolve_sdk_source(
+                args.sdk_zip,
+                prompt=not args.no_prompt,
+                allow_unknown=args.allow_unknown_zip,
+            )
+        plugin = resolve_plugin(sdk_dir)
         state_file, control_file = install_payload(
             game_dir,
             args.recordings_dir,
-            runtime_payload,
+            runtime,
             plugin,
             force_existing=args.force_existing,
         )

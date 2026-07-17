@@ -1,0 +1,14 @@
+RDR2 相机插件（维护说明）
+========================
+
+录制员运行 install.bat / rdr2-camera\install.bat 即可。
+优先使用预编译插件，各机器一般不用装 VS / Build Tools：
+
+  rdr2-camera\dist\CameraPoseLoggerRDR2.asi  → 游戏根目录
+  rdr2-camera\vendor\ScriptHookRDR2\        → 游戏根目录（dll）
+
+若 dist 里没有 ASI，安装器才会在本机编译（需要 C++ 工具链），成功后自动写回 dist。
+
+开发机首次编译缺工具链时，安装器会：
+  1. 尝试给已有 VS 补上 C++ 工作负载
+  2. 否则安装 Build Tools 到干净目录（避开非空残留的默认 BuildTools 目录）

@@ -37,7 +37,7 @@
 6. 尝试发现并安装 GTA V / RDR2 / 黑神话相机插件；未安装对应游戏时只跳过，不影响录制器
 7. 安装 RDR2 插件时，如本机缺少 MSVC x64 工具链，RDR2 安装器会从 Microsoft 官方地址自动下载并安装 Visual Studio 2022 Build Tools
 
-> **RDR2 官方文件必须由用户自行下载**：请从 [dev-c ScriptHookRDR2 官方页面](https://www.dev-c.com/rdr2/scripthookrdr2/) 下载与当前游戏版本匹配的 runtime ZIP 和 SDK ZIP。本项目不包含、镜像或再分发 ScriptHookRDR2 runtime、ASI loader、SDK 头文件或库文件。安装器只会自动查找桌面/下载目录中的官方 ZIP、校验并安装；它不会替用户下载这些 dev-c 文件。
+> **RDR2 官方文件必须由用户自行准备**：从 [dev-c ScriptHookRDR2](https://www.dev-c.com/rdr2/scripthookrdr2/) 取得匹配游戏版本的 runtime，放到 `rdr2-camera\vendor\ScriptHookRDR2\`。插件优先使用 `rdr2-camera\dist\CameraPoseLoggerRDR2.asi`（与 GTA 的 dist 方式相同），这样各目标机安装时不需要 C++ 工具链；仅在缺少预编译 ASI 时才会用 SDK 编译。
 
 > **关于音频**：BtbN / 上游 win64 静态构建几乎都**没有编译 `wasapi` indev**，所以本工具的默认音频通路其实是 Python 端的 `soundcard` WASAPI loopback（抓默认扬声器混音 → s16le → 本机 TCP → FFmpeg）。这条路径不依赖 FFmpeg 构建带不带 wasapi、也不依赖 Stereo Mix 是否启用，是网吧场景能开箱跑通的关键。如果你换的 FFmpeg 构建恰好带 `wasapi` indev，会自动优先用单进程的 wasapi（一点 CPU 优化），但不是必须。
 
@@ -72,18 +72,15 @@ uv pip install -e .
 
 #### RDR2 相机插件独立安装
 
-先从上述 dev-c 官方页面自行下载 runtime ZIP 与 SDK ZIP，然后运行：
+将官方 runtime 解压后的文件放到 `rdr2-camera\vendor\ScriptHookRDR2\`，并确保存在预编译插件
+`rdr2-camera\dist\CameraPoseLoggerRDR2.asi`（开发机首次编译成功后会自动生成）。然后直接运行：
 
 ```bat
-rdr2-camera\install.bat --runtime-zip "C:\Downloads\ScriptHookRDR2_1.0.zip" --sdk-zip "C:\Downloads\ScriptHookRDR2_SDK_1.0.zip"
+rdr2-camera\install.bat
 ```
 
-可追加 `--rdr2-dir "D:\Games\Red Dead Redemption 2"` 显式指定游戏目录。未指定 ZIP
-时，安装器会在桌面和下载目录自动选择最新匹配文件，并确保 runtime 自动选择不会误用
-SDK ZIP。安装器会校验必需条目和 x64 PE、在需要时请求 UAC、自动安装 Microsoft
-Build Tools、构建 `/MT` x64 插件，再以事务方式写入游戏目录；失败会回滚。它不会启动
-游戏，也不会下载 dev-c runtime/SDK。仅在 RDR2 **Story Mode** 使用，勿在 Red Dead
-Online 中加载。
+有预编译 ASI 时，目标机只需复制文件，不需要 Visual Studio / Build Tools / SDK。
+若缺少 dist 插件，安装器才会解析 SDK 并尝试安装/补齐 C++ 工具链后编译。
 
 ### 方式三：离线便携包（网吧 / 无网环境）
 

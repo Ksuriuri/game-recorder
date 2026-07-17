@@ -1,0 +1,5 @@
+CameraPoseLoggerRDR2.asi (prebuilt)
+
+Built from rdr2-camera/CameraPoseLogger with the vendored ScriptHookRDR2 SDK.
+Target machines should prefer this file so install.bat only copies runtime + ASI
+and does not require Visual C++ Build Tools.

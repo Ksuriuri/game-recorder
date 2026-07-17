@@ -253,6 +253,113 @@ class Rdr2InstallerTests(unittest.TestCase):
                 )
             self.assertEqual(selected, new_runtime.resolve())
 
+    def test_resolve_runtime_prefers_vendor_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vendor = Path(temporary) / "vendor"
+            vendor.mkdir()
+            (vendor / "ScriptHookRDR2.dll").write_bytes(_pe())
+            (vendor / "dinput8.dll").write_bytes(_pe())
+            (vendor / "VERSION.txt").write_text(
+                "ScriptHookRDR2_test\n", encoding="utf-8"
+            )
+            with mock.patch.object(installer, "VENDORED_RUNTIME", vendor):
+                runtime = installer.resolve_runtime(
+                    None, prompt=False, allow_unknown=True
+                )
+            self.assertEqual(runtime.source, vendor.resolve())
+            self.assertEqual(set(runtime.files), {"ScriptHookRDR2.dll", "dinput8.dll"})
+
+    def test_resolve_runtime_accepts_extracted_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            extracted = Path(temporary) / "ScriptHookRDR2_1.0.1491.17"
+            (extracted / "bin").mkdir(parents=True)
+            (extracted / "bin" / "ScriptHookRDR2.dll").write_bytes(_pe())
+            (extracted / "bin" / "dinput8.dll").write_bytes(_pe())
+            runtime = installer.resolve_runtime(
+                extracted, prompt=False, allow_unknown=True
+            )
+            self.assertEqual(runtime.source, extracted.resolve())
+            self.assertIn("ScriptHookRDR2.dll", runtime.files)
+
+    def test_resolve_sdk_prefers_vendor_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            vendor = Path(temporary) / "sdk"
+            (vendor / "inc").mkdir(parents=True)
+            (vendor / "lib").mkdir(parents=True)
+            (vendor / "inc" / "main.h").write_text("main", encoding="utf-8")
+            (vendor / "inc" / "natives.h").write_text("natives", encoding="utf-8")
+            (vendor / "lib" / "ScriptHookRDR2.lib").write_bytes(b"lib")
+            (vendor / "VERSION.txt").write_text(
+                "ScriptHookRDR2_SDK_test\n", encoding="utf-8"
+            )
+            with mock.patch.object(installer, "VENDORED_SDK", vendor):
+                sdk = installer.resolve_sdk_source(
+                    None, prompt=False, allow_unknown=True
+                )
+            self.assertEqual(sdk, vendor.resolve())
+
+    def test_find_msbuild_uses_vswhere_find_without_vc_require(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            msbuild = root / "MSBuild" / "Current" / "Bin" / "MSBuild.exe"
+            msbuild.parent.mkdir(parents=True)
+            msbuild.write_bytes(b"msbuild")
+            with mock.patch.object(
+                installer, "find_cxx_toolchain_pair", return_value=None
+            ), mock.patch.object(
+                installer,
+                "_vswhere_lines",
+                side_effect=lambda *args: (
+                    [str(msbuild)] if args[:1] == ("-find",) else []
+                ),
+            ), mock.patch.object(
+                installer, "_candidate_vs_roots", return_value=[]
+            ), mock.patch.object(installer.shutil, "which", return_value=None):
+                self.assertEqual(installer.find_msbuild(), msbuild)
+
+    def test_has_cxx_toolchain_requires_cl(self) -> None:
+        with mock.patch.object(installer, "find_cxx_toolchain_pair", return_value=None):
+            self.assertFalse(installer.has_cxx_toolchain())
+        with mock.patch.object(
+            installer,
+            "find_cxx_toolchain_pair",
+            return_value=(Path("MSBuild.exe"), Path("cl.exe")),
+        ):
+            self.assertTrue(installer.has_cxx_toolchain())
+
+    def test_pick_build_tools_skips_nonempty_leftover(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary) / "2022"
+            leftover = base / "BuildTools"
+            leftover.mkdir(parents=True)
+            (leftover / "junk.txt").write_text("x", encoding="utf-8")
+            with mock.patch.object(
+                installer, "list_vs_instances", return_value=[]
+            ), mock.patch.dict(
+                os.environ,
+                {"ProgramFiles(x86)": str(base.parent), "ProgramFiles": str(base.parent)},
+                clear=False,
+            ):
+                # Force only our temp base by patching unique path construction
+                chosen = installer.pick_build_tools_install_path()
+            self.assertNotEqual(chosen, leftover.resolve())
+            self.assertTrue(
+                chosen.name in {"BuildToolsGameRecorder", "BuildTools"}
+                or "BuildToolsGameRecorder" in str(chosen)
+            )
+
+    def test_resolve_plugin_prefers_dist_prebuilt(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            dist = Path(temporary) / "dist" / "CameraPoseLoggerRDR2.asi"
+            dist.parent.mkdir(parents=True)
+            dist.write_bytes(_pe())
+            with mock.patch.object(installer, "PREBUILT_PLUGIN", dist), mock.patch.object(
+                installer, "ensure_cxx_toolchain"
+            ) as ensure_mock:
+                plugin = installer.resolve_plugin(sdk_dir=None)
+            self.assertEqual(plugin, dist.resolve())
+            ensure_mock.assert_not_called()
+
     def test_no_prompt_missing_game_is_an_intentional_skip(self) -> None:
         with mock.patch.object(installer, "find_rdr2_candidates", return_value=[]):
             with self.assertRaises(installer.InstallerSkipped):

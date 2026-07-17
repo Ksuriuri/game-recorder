@@ -1,0 +1,2 @@
+ScriptHookRDR2_1.0.1491.17
+Files: ScriptHookRDR2.dll + dinput8.dll

@@ -1,0 +1,9 @@
+ScriptHookRDR2 SDK (vendored)
+
+Obtain from Alexander Blade / dev-c:
+  https://www.dev-c.com/rdr2/scripthookrdr2/
+
+Required layout after extracting the official SDK ZIP:
+  inc\main.h
+  inc\natives.h
+  lib\ScriptHookRDR2.lib

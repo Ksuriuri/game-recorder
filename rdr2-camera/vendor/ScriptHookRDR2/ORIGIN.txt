@@ -1,0 +1,10 @@
+ScriptHookRDR2 (vendored runtime)
+
+Obtain from Alexander Blade / dev-c (do not redistribute from this repo as a substitute for the official download):
+  https://www.dev-c.com/rdr2/scripthookrdr2/
+
+Place or refresh these files here after extracting the official runtime ZIP:
+  ScriptHookRDR2.dll
+  dinput8.dll
+
+Version must match your Red Dead Redemption 2 game build.

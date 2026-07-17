@@ -1,0 +1,2 @@
+ScriptHookRDR2_SDK_1.0.1207.73
+Files: inc\ + lib\ScriptHookRDR2.lib

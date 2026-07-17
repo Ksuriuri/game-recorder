@@ -22,9 +22,14 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
-import winreg
 import zipfile
+from collections.abc import Iterable
 from pathlib import Path
+
+try:
+    import winreg
+except ImportError:  # pragma: no cover - non-Windows
+    winreg = None  # type: ignore[assignment]
 
 SHVDN_API = (
     "https://api.github.com/repos/scripthookvdotnet/scripthookvdotnet-nightly/releases/latest"
@@ -35,88 +40,250 @@ VENDORED_SHVDN = PROJECT_ROOT / "gta-camera" / "vendor" / "ScriptHookVDotNet"
 VENDORED_SHV = PROJECT_ROOT / "gta-camera" / "vendor" / "ScriptHookV"
 PREBUILT_DLL = PROJECT_ROOT / "gta-camera" / "dist" / "CameraPoseLogger.dll"
 
+# Steam store app id for Grand Theft Auto V (classic).
+GTA_STEAM_APP_ID = "271590"
+GTA_STEAM_DIRNAMES = (
+    "Grand Theft Auto V",
+    "Grand Theft Auto V Enhanced",
+)
+GTA_EXE_NAMES = (
+    "GTA5.exe",
+    "GTA5_Enhanced.exe",
+    "PlayGTAV.exe",
+)
+
 
 def _print(msg: str = "") -> None:
     print(msg, flush=True)
 
 
-def find_gta_candidates() -> list[Path]:
-    found: list[Path] = []
-
-    env = os.environ.get("GTAV_DIR", "").strip()
-    if env:
-        found.append(Path(env))
-
-    # Steam libraryfolders.vdf
-    steam_roots = [
-        Path(r"C:\Program Files (x86)\Steam"),
-        Path(r"C:\Program Files\Steam"),
-        Path(os.environ.get("ProgramFiles(x86)", "")) / "Steam",
-        Path(os.environ.get("ProgramFiles", "")) / "Steam",
-    ]
-    for steam in steam_roots:
-        vdf = steam / "steamapps" / "libraryfolders.vdf"
-        if not vdf.is_file():
-            continue
-        try:
-            text = vdf.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            continue
-        for m in re.finditer(r'"path"\s+"([^"]+)"', text):
-            lib = Path(m.group(1).replace("\\\\", "\\"))
-            cand = lib / "steamapps" / "common" / "Grand Theft Auto V"
-            found.append(cand)
-
-        found.append(
-            steam / "steamapps" / "common" / "Grand Theft Auto V"
-        )
-
-    # Epic / Rockstar common layouts
-    for base in (
-        Path(r"C:\Program Files\Epic Games\GTAV"),
-        Path(r"C:\Program Files\Rockstar Games\Grand Theft Auto V"),
-        Path(r"D:\SteamLibrary\steamapps\common\Grand Theft Auto V"),
-        Path(r"E:\SteamLibrary\steamapps\common\Grand Theft Auto V"),
-        Path(r"D:\Games\Grand Theft Auto V"),
-        Path(r"E:\Games\Grand Theft Auto V"),
-    ):
-        found.append(base)
-
-    # Registry: Rockstar Launcher install
-    for hive, sub in (
-        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Rockstar Games\GTAV"),
-        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Rockstar Games\GTAV"),
-        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Rockstar Games\Grand Theft Auto V"),
-    ):
-        try:
-            with winreg.OpenKey(hive, sub) as key:
-                for name in ("InstallFolder", "Install Folder", "InstallPath"):
-                    try:
-                        val, _ = winreg.QueryValueEx(key, name)
-                        if val:
-                            found.append(Path(str(val)))
-                    except OSError:
-                        pass
-        except OSError:
-            pass
-
-    uniq: list[Path] = []
+def _unique_paths(paths: Iterable[Path]) -> list[Path]:
+    unique: list[Path] = []
     seen: set[str] = set()
-    for p in found:
+    for path in paths:
         try:
-            rp = str(p.resolve()) if p.exists() else str(p)
+            normalized = path.expanduser().resolve() if path.exists() else path.expanduser()
         except OSError:
-            rp = str(p)
-        key = rp.lower()
+            normalized = path.expanduser()
+        key = os.path.normcase(str(normalized)).casefold()
         if key in seen:
             continue
         seen.add(key)
-        uniq.append(Path(rp))
-    return uniq
+        unique.append(normalized)
+    return unique
+
+
+def _registry_values(hive: object, subkey: str, names: tuple[str, ...]) -> list[str]:
+    if winreg is None:
+        return []
+    views = [0]
+    for attr in ("KEY_WOW64_32KEY", "KEY_WOW64_64KEY"):
+        view = getattr(winreg, attr, 0)
+        if view and view not in views:
+            views.append(view)
+    values: list[str] = []
+    for view in views:
+        try:
+            with winreg.OpenKey(hive, subkey, 0, winreg.KEY_READ | view) as key:
+                for name in names:
+                    try:
+                        value, _ = winreg.QueryValueEx(key, name)
+                    except OSError:
+                        continue
+                    if value:
+                        values.append(os.path.expandvars(str(value)).strip().strip('"'))
+        except OSError:
+            continue
+    return values
+
+
+def _windows_drive_roots() -> list[Path]:
+    if os.name != "nt":
+        return []
+    try:
+        import ctypes
+
+        mask = int(ctypes.windll.kernel32.GetLogicalDrives())
+    except (AttributeError, OSError):
+        mask = 0
+    roots: list[Path] = []
+    for index, letter in enumerate("ABCDEFGHIJKLMNOPQRSTUVWXYZ"):
+        path = Path(f"{letter}:/")
+        if (mask & (1 << index)) or (not mask and path.exists()):
+            roots.append(path)
+    return roots
+
+
+def _steam_roots() -> list[Path]:
+    """Locate Steam installs via registry, Program Files, and common drive layouts."""
+    roots: list[Path] = []
+    if winreg is not None:
+        for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+            for value in _registry_values(
+                hive,
+                r"SOFTWARE\Valve\Steam",
+                ("SteamPath", "InstallPath"),
+            ):
+                roots.append(Path(value))
+    for env_name in ("ProgramFiles(x86)", "ProgramFiles"):
+        value = os.environ.get(env_name, "").strip()
+        if value:
+            roots.append(Path(value) / "Steam")
+    roots.extend(
+        (
+            Path(r"C:\Program Files (x86)\Steam"),
+            Path(r"C:\Program Files\Steam"),
+        )
+    )
+    # Non-default installs like F:\steam are common on gaming PCs /网吧.
+    for drive in _windows_drive_roots():
+        roots.extend(
+            (
+                drive / "Steam",
+                drive / "steam",
+                drive / "SteamLibrary",
+                drive / "Program Files (x86)" / "Steam",
+                drive / "Program Files" / "Steam",
+            )
+        )
+    return _unique_paths(roots)
+
+
+def _steam_libraries(steam_root: Path) -> list[Path]:
+    libraries = [steam_root]
+    vdf = steam_root / "steamapps" / "libraryfolders.vdf"
+    try:
+        text = vdf.read_text(encoding="utf-8-sig", errors="ignore")
+    except OSError:
+        return libraries
+    for match in re.finditer(r'"path"\s+"([^"]+)"', text, flags=re.IGNORECASE):
+        value = match.group(1).replace("\\\\", "\\")
+        if value:
+            libraries.append(Path(value))
+    return _unique_paths(libraries)
+
+
+def _acf_install_dir(acf_path: Path) -> str | None:
+    try:
+        text = acf_path.read_text(encoding="utf-8-sig", errors="ignore")
+    except OSError:
+        return None
+    match = re.search(r'"installdir"\s+"([^"]+)"', text, flags=re.IGNORECASE)
+    return match.group(1) if match else None
+
+
+def _registered_gta_locations() -> list[Path]:
+    if winreg is None:
+        return []
+    locations: list[Path] = []
+    hives = (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE)
+    keys = (
+        (
+            rf"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Steam App {GTA_STEAM_APP_ID}",
+            ("InstallLocation",),
+        ),
+        (
+            r"SOFTWARE\Rockstar Games\GTAV",
+            ("InstallFolder", "Install Folder", "InstallPath"),
+        ),
+        (
+            r"SOFTWARE\Rockstar Games\Grand Theft Auto V",
+            ("InstallFolder", "Install Folder", "InstallPath"),
+        ),
+        (
+            r"SOFTWARE\WOW6432Node\Rockstar Games\GTAV",
+            ("InstallFolder", "Install Folder", "InstallPath"),
+        ),
+        (
+            r"SOFTWARE\WOW6432Node\Rockstar Games\Grand Theft Auto V",
+            ("InstallFolder", "Install Folder", "InstallPath"),
+        ),
+    )
+    for hive in hives:
+        for key, names in keys:
+            locations.extend(Path(value) for value in _registry_values(hive, key, names))
+        uninstall_base = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
+        views = [0]
+        for attr in ("KEY_WOW64_32KEY", "KEY_WOW64_64KEY"):
+            view = getattr(winreg, attr, 0)
+            if view and view not in views:
+                views.append(view)
+        for view in views:
+            try:
+                with winreg.OpenKey(
+                    hive, uninstall_base, 0, winreg.KEY_READ | view
+                ) as uninstall:
+                    count = winreg.QueryInfoKey(uninstall)[0]
+                    subkeys = [
+                        winreg.EnumKey(uninstall, index) for index in range(count)
+                    ]
+            except OSError:
+                continue
+            for subkey in subkeys:
+                full_key = uninstall_base + "\\" + subkey
+                display_names = _registry_values(hive, full_key, ("DisplayName",))
+                if not any(
+                    "grand theft auto v" in name.casefold() for name in display_names
+                ):
+                    continue
+                locations.extend(
+                    Path(value)
+                    for value in _registry_values(
+                        hive, full_key, ("InstallLocation", "InstallPath")
+                    )
+                )
+    return locations
+
+
+def find_gta_candidates() -> list[Path]:
+    """Discover likely GTA V roots (may include non-existent paths)."""
+    found: list[Path] = []
+
+    env = os.environ.get("GTAV_DIR", "").strip().strip('"')
+    if env:
+        found.append(Path(env))
+
+    found.extend(_registered_gta_locations())
+
+    for steam_root in _steam_roots():
+        for library in _steam_libraries(steam_root):
+            common = library / "steamapps" / "common"
+            manifest = library / "steamapps" / f"appmanifest_{GTA_STEAM_APP_ID}.acf"
+            installdir = _acf_install_dir(manifest)
+            if installdir:
+                found.append(common / installdir)
+            for dirname in GTA_STEAM_DIRNAMES:
+                found.append(common / dirname)
+
+    program_files = [
+        os.environ.get("ProgramFiles", ""),
+        os.environ.get("ProgramFiles(x86)", ""),
+        r"C:\Program Files",
+        r"C:\Program Files (x86)",
+    ]
+    for root in filter(None, program_files):
+        found.extend(
+            (
+                Path(root) / "Rockstar Games" / "Grand Theft Auto V",
+                Path(root) / "Epic Games" / "GTAV",
+            )
+        )
+
+    # Last-resort common layouts across drives (no hard-coded single drive letter).
+    for drive in _windows_drive_roots():
+        for dirname in GTA_STEAM_DIRNAMES:
+            found.extend(
+                (
+                    drive / "Games" / dirname,
+                    drive / "Rockstar Games" / dirname,
+                )
+            )
+
+    return _unique_paths(found)
 
 
 def is_gta_dir(path: Path) -> bool:
-    return (path / "GTA5.exe").is_file() or (path / "PlayGTAV.exe").is_file()
+    return any((path / name).is_file() for name in GTA_EXE_NAMES)
 
 
 def resolve_gta_dir(explicit: Path | None, *, prompt: bool) -> tuple[Path | None, bool]:
@@ -141,8 +308,8 @@ def resolve_gta_dir(explicit: Path | None, *, prompt: bool) -> tuple[Path | None
         for i, p in enumerate(cands, 1):
             _print(f"  [{i}] {p}")
         if not prompt:
-            _print("请用 --gta-dir 指定，或设置环境变量 GTAV_DIR。")
-            return None, False
+            _print(f"[自动] 无人值守模式使用：{cands[0]}")
+            return cands[0].resolve(), False
         try:
             choice = input(
                 f"选择 [1-{len(cands)}]，或输入完整路径；直接回车跳过: "
