@@ -7,10 +7,12 @@ import argparse
 import json
 import re
 import sys
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from datetime import datetime
 from pathlib import PurePosixPath
 from typing import Any
@@ -35,6 +37,13 @@ SESSION_RE = re.compile(
     r"^(?P<recording_id>.+)_session_(?P<date>\d{8})_(?P<time>\d{6})$"
 )
 DATED_RECORDING_ID_RE = re.compile(r"^(?P<recorder>.+)-(?P<date>\d{8})$")
+DUPLICATED_DATE_DIGIT_RE = re.compile(
+    r"^(?P<recorder>.+)-(?P<date>\d{8})(?P<extra>\d)$"
+)
+RECORDER_ALIASES = {
+    "BPK2077-LZ02": "SBPK2077-LZ02",
+    "SBOK2077-LZ02": "SBPK2077-LZ02",
+}
 
 
 def search_files(access_token: str, keyword: str) -> list[dict[str, Any]]:
@@ -97,11 +106,23 @@ def download_meta(access_token: str, path: str, dlink: str) -> dict[str, Any]:
     separator = "&" if "?" in dlink else "?"
     url = f"{dlink}{separator}{urllib.parse.urlencode({'access_token': access_token})}"
     request = urllib.request.Request(url, headers={"User-Agent": "pan.baidu.com"})
-    with urllib.request.urlopen(request, timeout=45) as response:
-        content_length = int(response.headers.get("Content-Length", "0") or 0)
-        if content_length > MAX_META_BYTES:
-            raise RuntimeError(f"{path} 超过 meta.json 大小限制")
-        payload = response.read(MAX_META_BYTES + 1)
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(request, timeout=45) as response:
+                content_length = int(
+                    response.headers.get("Content-Length", "0") or 0
+                )
+                if content_length > MAX_META_BYTES:
+                    raise RuntimeError(f"{path} 超过 meta.json 大小限制")
+                payload = response.read(MAX_META_BYTES + 1)
+            break
+        except urllib.error.HTTPError as error:
+            if error.code < 500 or attempt == 2:
+                raise
+        except urllib.error.URLError:
+            if attempt == 2:
+                raise
+        time.sleep(2**attempt)
     if len(payload) > MAX_META_BYTES:
         raise RuntimeError(f"{path} 超过 meta.json 大小限制")
     value = json.loads(payload.decode("utf-8"))
@@ -201,6 +222,51 @@ def list_session_videos(
     return videos, failures
 
 
+def discover_game_data_files(
+    access_token: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, str]]]:
+    """Recursively list /game-data; avoids the intermittently empty search API."""
+    meta_files: list[dict[str, Any]] = []
+    mp4_files: list[dict[str, Any]] = []
+    failures: list[dict[str, str]] = []
+    seen_directories = {GAME_DATA_DIR}
+
+    with ThreadPoolExecutor(max_workers=LIST_WORKERS) as executor:
+        pending = {
+            executor.submit(list_directory, access_token, GAME_DATA_DIR): GAME_DATA_DIR
+        }
+        while pending:
+            completed, _ = wait(pending, return_when=FIRST_COMPLETED)
+            for future in completed:
+                directory = pending.pop(future)
+                try:
+                    entries = future.result()
+                except Exception as error:
+                    failures.append({"path": directory, "error": str(error)})
+                    continue
+
+                for item in entries:
+                    path = str(item.get("path", ""))
+                    if item.get("isdir"):
+                        if path and path not in seen_directories:
+                            seen_directories.add(path)
+                            pending[
+                                executor.submit(list_directory, access_token, path)
+                            ] = path
+                        continue
+
+                    filename = str(item.get("server_filename", ""))
+                    if filename == "meta.json":
+                        meta_files.append(item)
+                    elif filename.lower().endswith(".mp4"):
+                        mp4_files.append(item)
+
+    meta_files.sort(key=lambda item: str(item.get("path", "")))
+    mp4_files.sort(key=lambda item: str(item.get("path", "")))
+    failures.sort(key=lambda item: item["path"])
+    return meta_files, mp4_files, failures
+
+
 def session_identity(path: str, meta: dict[str, Any]) -> tuple[str, str, str, str]:
     parent_name = PurePosixPath(path).parent.name
     session_id = str(meta.get("session_id") or parent_name)
@@ -209,13 +275,28 @@ def session_identity(path: str, meta: dict[str, Any]) -> tuple[str, str, str, st
         raise ValueError(f"无法解析 session_id：{session_id}")
 
     recording_id = match.group("recording_id")
-    recorder_match = DATED_RECORDING_ID_RE.fullmatch(recording_id)
-    recorder = (
-        recorder_match.group("recorder") if recorder_match else recording_id
+    timestamp = str(meta.get("session_timestamp") or "")
+    date_compact = (
+        timestamp[:8]
+        if re.match(r"^\d{8}_\d{6}$", timestamp)
+        else match.group("date")
     )
 
-    timestamp = str(meta.get("session_timestamp") or "")
-    date_compact = timestamp[:8] if re.match(r"^\d{8}_\d{6}$", timestamp) else match.group("date")
+    recorder_match = DATED_RECORDING_ID_RE.fullmatch(recording_id)
+    if recorder_match:
+        recorder = recorder_match.group("recorder")
+    else:
+        duplicated_match = DUPLICATED_DATE_DIGIT_RE.fullmatch(recording_id)
+        if (
+            duplicated_match
+            and duplicated_match.group("date") == date_compact
+            and duplicated_match.group("extra") == date_compact[-1]
+        ):
+            recorder = duplicated_match.group("recorder")
+        else:
+            recorder = recording_id
+    recorder = RECORDER_ALIASES.get(recorder, recorder)
+
     date = datetime.strptime(date_compact, "%Y%m%d").date().isoformat()
     return session_id, recording_id, recorder, date
 
@@ -364,7 +445,9 @@ def build_report(
         "methodology": {
             "duration": "meta.json.duration_s",
             "date": "meta.json.session_timestamp 的日期部分",
-            "recorder": "recording_id 去除末尾 -YYYYMMDD",
+            "recorder": (
+                "recording_id 去除末尾日期；修复重复日期尾数并应用已知拼写别名"
+            ),
             "video_presence": "仅统计云端同一会话目录内至少存在一个 .mp4 的会话",
             "video_content_downloaded": False,
         },
@@ -409,14 +492,13 @@ def main() -> int:
 
     try:
         access_token = load_token(load_keys())["access_token"]
-        meta_files = [
-            item
-            for item in search_files(access_token, "meta.json")
-            if item.get("server_filename") == "meta.json"
-        ]
-        mp4_files, video_listing_failures = list_session_videos(
-            access_token, meta_files
+        meta_files, mp4_files, video_listing_failures = discover_game_data_files(
+            access_token
         )
+        if not meta_files:
+            raise RuntimeError(
+                "/game-data 中未发现 meta.json；为避免覆盖旧报告，已中止统计"
+            )
         metadata = load_cached_metadata(meta_files) if args.use_cache else None
         failures: list[dict[str, str]] = []
         if metadata is None:
