@@ -16,11 +16,25 @@ set "VENV_DIR=%PACK_DIR%\.venv"
 set "PYTHON_EXE=%VENV_DIR%\Scripts\python.exe"
 set "REQUIREMENTS=%PACK_DIR%\requirements.txt"
 
+REM Offline only when the wheel set looks complete. A lone modelscope-*.whl
+REM (or wheels missing colorama) would otherwise fail on Windows with:
+REM   no versions of colorama{sys_platform == 'win32'} / tqdm cannot be used
 set "OFFLINE_MODE=0"
-if exist "%WHEELS_DIR%\modelscope-*.whl" if exist "%UV_EXE%" set "OFFLINE_MODE=1"
+if exist "%WHEELS_DIR%\modelscope-*.whl" if exist "%WHEELS_DIR%\colorama-*.whl" if exist "%WHEELS_DIR%\tqdm-*.whl" if exist "%UV_EXE%" (
+    set "OFFLINE_MODE=1"
+)
 if "%OFFLINE_MODE%"=="1" (
     set "UV_OFFLINE=1"
     set "UV_PYTHON_DOWNLOADS=never"
+) else (
+    set "UV_OFFLINE="
+    set "UV_PYTHON_DOWNLOADS="
+    if exist "%WHEELS_DIR%\modelscope-*.whl" (
+        if not defined MODELSCOPE_UPLOAD_QUIET (
+            echo WARNING: modelscope-upload\wheels is incomplete ^(need colorama + tqdm^).
+            echo Falling back to online install. Re-run build_bundle.bat to refresh wheels.
+        )
+    )
 )
 
 if not exist "%UV_EXE%" (

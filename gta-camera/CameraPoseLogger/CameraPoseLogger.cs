@@ -654,25 +654,38 @@ public class CameraPoseLogger : Script
         return null;
     }
 
+    private static bool? ExtractJsonBool(string json, string key)
+    {
+        var needle = "\"" + key + "\"";
+        var i = json.IndexOf(needle, StringComparison.OrdinalIgnoreCase);
+        if (i < 0)
+        {
+            return null;
+        }
+        i = json.IndexOf(':', i + needle.Length);
+        if (i < 0)
+        {
+            return null;
+        }
+        i++;
+        while (i < json.Length && char.IsWhiteSpace(json[i]))
+        {
+            i++;
+        }
+        if (i + 4 <= json.Length && string.Compare(json, i, "true", 0, 4, StringComparison.OrdinalIgnoreCase) == 0)
+        {
+            return true;
+        }
+        if (i + 5 <= json.Length && string.Compare(json, i, "false", 0, 5, StringComparison.OrdinalIgnoreCase) == 0)
+        {
+            return false;
+        }
+        return null;
+    }
+
     private static void Notify(string msg)
     {
-        var text = "~b~CameraPose~w~ " + msg;
-        try
-        {
-            GTA.UI.Notification.PostTicker(text, false);
-            return;
-        }
-        catch
-        {
-            // fall through
-        }
-        try
-        {
-            GTA.UI.Screen.ShowSubtitle(text, 3500);
-        }
-        catch
-        {
-            // ignore
-        }
+        // Intentionally silent: PostTicker sits in the bottom-left for ~10s and
+        // distracts during capture. Keep the call sites for future logging.
     }
 }

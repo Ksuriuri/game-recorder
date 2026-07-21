@@ -1,3 +1,6 @@
 # Pinned for reproducible offline/online installs. Bump intentionally after testing.
+# colorama: Windows-only transitive dep of tqdm; pin explicitly so offline wheels/
+# always include it (missing colorama makes uv report unsatisfiable on win32).
 modelscope==1.38.0
 modelscope-hub==0.1.6
+colorama==0.4.6
