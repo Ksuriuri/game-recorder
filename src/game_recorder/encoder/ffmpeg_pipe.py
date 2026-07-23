@@ -15,10 +15,22 @@ import sys
 import threading
 from pathlib import Path
 
-from game_recorder.config import Config, detect_nvenc, find_ffmpeg, nvenc_runtime_usable
+from game_recorder.config import (
+    Config,
+    find_ffmpeg,
+    listed_h264_encoders,
+    select_h264_encoder,
+)
 from game_recorder.encoder import python_loopback as _pyloop
 
 logger = logging.getLogger(__name__)
+
+_ENCODER_LABEL = {
+    "h264_nvenc": "NVIDIA NVENC",
+    "h264_amf": "AMD AMF",
+    "h264_qsv": "Intel QSV",
+    "libx264": "libx264（软件）",
+}
 
 # Python loopback (soundcard) format pumped into FFmpeg over TCP.
 # 48 kHz / stereo / s16le matches the standard Windows shared-mode mixer format,
@@ -215,14 +227,26 @@ class FFmpegEncoder:
         self.config = config
         self._proc: subprocess.Popen | None = None  # type: ignore[type-arg]
         self._ffmpeg_path = find_ffmpeg()
-        listed = detect_nvenc(self._ffmpeg_path)
-        self._has_nvenc = listed and nvenc_runtime_usable(self._ffmpeg_path)
-        if listed and not self._has_nvenc:
-            logger.warning(
-                "FFmpeg 已编译 NVENC 但 GPU 驱动拒绝使用 "
-                "（例如此 FFmpeg 需要 NVIDIA 570+ 驱动）。将使用 libx264。"
+        self._encoder = select_h264_encoder(self._ffmpeg_path)
+        listed = listed_h264_encoders(self._ffmpeg_path)
+        if self._encoder == "libx264":
+            skipped = [
+                name
+                for name in ("h264_nvenc", "h264_amf", "h264_qsv")
+                if name in listed
+            ]
+            if skipped:
+                logger.warning(
+                    "FFmpeg 已编译 %s，但本机 GPU/驱动无法打开；回退到 libx264。"
+                    "非 N 卡机器若卡顿，可试 --fps 20 --quality 28 --x264-threads 1。",
+                    "/".join(skipped),
+                )
+        else:
+            logger.info(
+                "视频编码器：%s（%s）",
+                self._encoder,
+                _ENCODER_LABEL.get(self._encoder, self._encoder),
             )
-        self._encoder = "h264_nvenc" if self._has_nvenc else "libx264"
         self._frame_size = 0
         self._ffmpeg_stderr = bytearray()
         self._stdin_broken_logged = False
@@ -361,20 +385,7 @@ class FFmpegEncoder:
         ]
 
         # --- Encoder settings ---
-        if self._encoder == "h264_nvenc":
-            cmd += [
-                "-c:v", "h264_nvenc",
-                "-preset", cfg.video_preset,
-                "-rc", "vbr",
-                "-cq", str(cfg.video_quality),
-            ]
-        else:
-            cmd += [
-                "-c:v", "libx264",
-                "-preset", "ultrafast",
-                "-crf", str(cfg.video_quality),
-                "-threads", str(max(1, cfg.x264_threads)),
-            ]
+        cmd += _video_encoder_args(self._encoder, cfg)
 
         cmd += ["-pix_fmt", "yuv420p"]
 
@@ -561,6 +572,57 @@ class FFmpegEncoder:
                 pass
         if err_text.strip():
             logger.error("FFmpeg stderr：\n%s", err_text)
+
+
+def _video_encoder_args(encoder: str, cfg: Config) -> list[str]:
+    """FFmpeg ``-c:v …`` args for the selected H.264 encoder."""
+    q = str(cfg.video_quality)
+    if encoder == "h264_nvenc":
+        return [
+            "-c:v",
+            "h264_nvenc",
+            "-preset",
+            cfg.video_preset,
+            "-rc",
+            "vbr",
+            "-cq",
+            q,
+        ]
+    if encoder == "h264_amf":
+        # CQP keeps quality roughly aligned with NVENC CQ / x264 CRF.
+        return [
+            "-c:v",
+            "h264_amf",
+            "-usage",
+            "transcoding",
+            "-quality",
+            "balanced",
+            "-rc",
+            "cqp",
+            "-qp_i",
+            q,
+            "-qp_p",
+            q,
+        ]
+    if encoder == "h264_qsv":
+        return [
+            "-c:v",
+            "h264_qsv",
+            "-preset",
+            "veryfast",
+            "-global_quality",
+            q,
+        ]
+    return [
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-crf",
+        q,
+        "-threads",
+        str(max(1, cfg.x264_threads)),
+    ]
 
 
 def _below_normal_priority() -> int:

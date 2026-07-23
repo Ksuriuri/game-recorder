@@ -137,7 +137,7 @@ def main() -> None:
         "--quality",
         type=int,
         default=23,
-        help="视频质量 CQ 值，越小越好（默认：23）",
+        help="视频质量（越小越好）：NVENC CQ / AMF QP / QSV / x264 CRF（默认：23）",
     )
     parser.add_argument(
         "--x264-threads",

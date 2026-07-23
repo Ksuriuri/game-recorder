@@ -17,7 +17,7 @@ REM     4) Double-click run.bat, then start GTA V or Black Myth: Wukong.
 REM
 REM   What goes into the zip:
 REM     .tools\          uv.exe + managed Python 3.11 + uv cache
-REM     ffmpeg\          BtbN gpl FFmpeg (NVENC + libx264 + dshow)
+REM     ffmpeg\          BtbN gpl FFmpeg (NVENC/AMF/QSV + libx264 + dshow)
 REM     wheels\          pre-downloaded dependency wheels (numpy, opencv-headless,
 REM                      dxcam, soundcard, cffi, pycparser …)
 REM     src\, scripts\, gta-camera\, rdr2-camera\, wukong-camera\, cp2077-camera\, pyproject.toml

@@ -123,7 +123,7 @@ if "%OFFLINE_MODE%"=="1" (
 )
 
 REM ============================================================
-REM  Step 3/4: Download FFmpeg (BtbN gpl — encoders: NVENC, libx264, dshow, …)
+REM  Step 3/4: Download FFmpeg (BtbN gpl — encoders: NVENC, AMF, QSV, libx264, dshow, …)
 REM ============================================================
 REM  Note: Upstream static win64 FFmpeg (incl. BtbN) often has NO wasapi
 REM  *demuxer*; system audio is usually captured via DirectShow (Stereo Mix,
@@ -135,7 +135,7 @@ echo.
 if exist "%FFMPEG_EXE%" (
     echo [3/4] FFmpeg 已存在，跳过下载。
 ) else (
-    echo [3/4] 正在下载 FFmpeg ^(BtbN gpl，约 140MB，含 NVENC + dshow + libx264^) ...
+    echo [3/4] 正在下载 FFmpeg ^(BtbN gpl，约 140MB，含 NVENC/AMF/QSV + dshow + libx264^) ...
     set "FFMPEG_ZIP=%TOOLS_DIR%\ffmpeg.zip"
     set "FFMPEG_TMP=%TOOLS_DIR%\ffmpeg-extract"
 

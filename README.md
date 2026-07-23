@@ -9,7 +9,7 @@
 - **音频捕获**：默认走 **Python `soundcard` 包的 WASAPI Loopback**（抓当前 Windows 默认播放设备的混音），通过本机 TCP 把 PCM 喂给 FFmpeg，与视频在同一 FFmpeg 进程内 mux 实现天然同步。**零配置、不依赖 Stereo Mix、不需要装虚拟声卡、不需要管理员权限**，是网吧 / GTA 之类 shared-mode 游戏的标准录音通路。如果当前 FFmpeg 构建恰好带 `wasapi` indev（罕见），优先用单进程 WASAPI；都不行再回退到 DirectShow（Stereo Mix / VB-CABLE 等）
 - **键鼠捕获**：键盘和鼠标优先走 Win32 Raw Input，避免低级鼠标钩子影响游戏视角；Raw Input 不可用时键盘降级为 `GetAsyncKeyState` 轮询
 - **游戏相机同步**：默认同时发布 GTA V、RDR2、《黑神话：悟空》与《赛博朋克 2077》的相机会话信号；只会由当前已启动且已安装插件的游戏写数据，结束后按真实视频帧时间生成 `camera.jsonl`。2077 还会同步生成逐帧索引的 Camera Z-depth
-- **硬件编码**：自动检测 NVIDIA NVENC，使用 GPU 专用编码单元，不占用 CUDA 核心；无 NVENC 时回退到 `libx264 ultrafast`，默认限制 2 个 x264 线程，避免网吧机器上抢占游戏 CPU
+- **硬件编码**：自动按 **NVENC → AMF → QSV → libx264** 探测可用编码器（NVIDIA / AMD / Intel 硬件优先）；无硬件编码时回退到 `libx264 ultrafast`，默认限制 2 个 x264 线程，避免网吧机器上抢占游戏 CPU
 - **统一时钟**：所有数据流共享 `perf_counter_ns` 高精度 T0 基准，同步误差 < 1 帧（33ms）
 - **可选分段保存**：通过 `--segment-minutes N` 每隔 N 分钟落盘一对 `mp4 + jsonl` 文件（默认关闭，推荐保持关闭以获得无缝音视频；启用时段间会有约几百毫秒的空隙）
 - **录制状态悬浮窗**：屏幕右上角显示当前段已录制时长与 **累计有效视频时长**（全库汇总，每次录制结束后刷新）；默认后台启动、无黑色终端，通过悬浮窗 **退出** 正常结束程序
@@ -21,7 +21,7 @@
 - Windows 10/11
 - Python 3.10+
 - FFmpeg（需在 PATH 中或放入项目 `ffmpeg/` 目录）
-- NVIDIA GPU（可选，用于 NVENC 硬件编码）
+- NVIDIA / AMD / Intel GPU（可选，用于 NVENC / AMF / QSV 硬件编码）
 
 ## 安装
 
@@ -31,7 +31,7 @@
 
 1. 下载独立版 `uv`
 2. 通过 uv 安装托管的 Python 3.11
-3. 下载 FFmpeg（[BtbN gpl 构建](https://github.com/BtbN/FFmpeg-Builds)，约 140 MB，含 NVENC、libx264、DirectShow 等编码器/复用器）
+3. 下载 FFmpeg（[BtbN gpl 构建](https://github.com/BtbN/FFmpeg-Builds)，约 140 MB，含 NVENC、AMF、QSV、libx264、DirectShow 等编码器/复用器）
 4. 创建 `.venv` 并 `uv pip install -e .`（`soundcard` 这个 Python 包就是默认音频通路的关键，pyproject.toml 里已经声明）
 5. 生成启动脚本 `run.bat`（默认无窗口后台运行；`--console` 显示终端；`--list-audio-devices` / `--no-overlay` 自动带控制台）
 6. 尝试发现并安装 GTA V / RDR2 / 黑神话相机插件；未安装对应游戏时只跳过，不影响录制器
@@ -255,10 +255,10 @@ game-recorder -v
 |------|--------|------|
 | `--fps` | 30 | 目标捕获帧率 |
 | `--output` | `./recordings` | 输出目录 |
-| `--quality` | 23 | 视频质量（CQ 值，越低质量越高，文件越大） |
+| `--quality` | 23 | 视频质量（越低越好）：NVENC CQ / AMF QP / QSV global_quality / x264 CRF |
 | `--audio-device` | 自动检测 | DirectShow 音频设备名 |
 | `--mouse-hz` | 30 | 鼠标移动采样率（Hz） |
-| `--x264-threads` | 2 | 无 NVENC 时 `libx264` 软件编码可用的 CPU 线程数；游戏卡顿时可设为 `1` |
+| `--x264-threads` | 2 | 无硬件编码时 `libx264` 软件编码可用的 CPU 线程数；游戏卡顿时可设为 `1` |
 | `--segment-minutes` | 0 | 每隔多少分钟自动切分一段 mp4 + jsonl，`0`（默认）表示关闭分段、整次录制写入单文件 |
 | `--capture-mode` | `auto` | `auto`：自动捕获前台的大客户区窗口，否则整屏；`foreground`：尽量强制前台客户区；`screen`：整屏 |
 | `--idle-timeout` | 10 | 超过 N 秒未按 WASD，或超过 N 秒 WASD 组合不变且无鼠标移动，则自动停止；末尾 N 秒裁掉不计有效时长；`0` 关闭这两项（鼠标点击与非 WASD 按键仍会停止） |
@@ -348,7 +348,7 @@ game-recorder -v
   - `Python soundcard loopback (default speaker): no`   → 极少数情况（驱动问题 / 默认设备配置异常），再考虑 enable Stereo Mix 或 `--audio-device`
 - **录制前别动音频设备**：录制开始时把"默认播放设备"快照下来，录制中如果**插拔耳机 / 切换输出设备**导致 Windows 切换默认设备，本次录制会继续录原设备（很可能从这一刻起变静音）。需要换设备的话，请先 **连按两次大写键** 停止当前段（会冷重启），再切换设备后开始下一段。
 - **GTA 等使用 shared-mode 音频的游戏可直接录**。极少数**强制独占模式**的应用会让 WASAPI loopback 拿到静音；本工具自动降级到 DirectShow，再不行就静音录制（`meta.json` 的 `audio_source` 会是 `null`，便于事后过滤）。
-- **NVENC 跨机泛化**：网吧 GPU 五花八门，不一定是 N 卡。代码里已经做了 NVENC 运行时探测：编译启用但驱动不给开 → 自动落到 `libx264 ultrafast`，并默认限制 `--x264-threads 2`。如果 GTA5 等游戏仍然卡，优先用 `run.bat --fps 20 --quality 28 --x264-threads 1`。
+- **硬件编码跨机泛化**：网吧 GPU 五花八门。启动时按 **NVENC → AMF → QSV → libx264** 做编译列表 + 运行时探测：有对应 GPU/驱动则走硬件编码，否则落到 `libx264 ultrafast`（默认 `--x264-threads 2`）。若仍卡，优先用 `run.bat --fps 20 --quality 28 --x264-threads 1`。
 - **切屏 / 全屏切换**：DXGI 在 Alt+Tab 或游戏切全屏时可能短暂报告不同分辨率。录制器会把临时尺寸缩放回本次 session 的初始尺寸，避免视频花屏或被切成多段；真正 0 帧的启动空段会自动清理。
 
 ## 输出格式
@@ -663,7 +663,7 @@ scripts/（后处理与打包，非运行时依赖）
 | 组件 | CPU | GPU | 磁盘 |
 |------|-----|-----|------|
 | DXcam 帧捕获 | ~3% 单核 | ~0% | - |
-| FFmpeg NVENC 编码 | ~2% 单核 | 编码单元（不影响游戏） | 8-12 MB/s |
+| FFmpeg 硬件编码（NVENC/AMF/QSV） | ~2% 单核 | 编码单元 | 8-12 MB/s |
 | 音频（soundcard WASAPI loopback） | ~0.3% 单核 | - | - |
 | Raw Input 输入捕获 | ~0.1% | - | < 0.1 MB/s |
 | 状态悬浮窗 | 可忽略 | - | 录制结束后读一次 `library.json` |
