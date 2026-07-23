@@ -17,8 +17,10 @@ class Config:
     output_dir: Path = field(default_factory=lambda: Path("recordings"))
 
     # Video encoding
-    video_quality: int = 23  # CQ value: lower = better quality, higher = smaller file
-    video_preset: str = "p4"  # NVENC preset (p1=fastest … p7=best quality)
+    # Quality scale (~0–51): lower = better quality / larger files.
+    # Mapped to NVENC -cq, AMF -qp_*, QSV -global_quality, or libx264 -crf.
+    video_quality: int = 23
+    video_preset: str = "p4"  # NVENC preset only (p1=fastest … p7=best quality)
     x264_threads: int = 2  # software fallback should not steal every CPU core from games
 
     # Audio
@@ -71,9 +73,22 @@ class Config:
     wukong_camera_sync: bool = True
     cp2077_camera_sync: bool = True
 
+    # OS-level WASD + mouse wander (hybrid: SendInput drive + camera pose feedback).
+    # On by default; disable with ``--no-auto-move``.
+    auto_move: bool = True
+    auto_move_tick_hz: float = 250.0
+    auto_move_stuck_speed_mps: float = 0.15
+    auto_move_stuck_s: float = 1.5
+    auto_move_turn_deg_s: float = 55.0
+
     def __post_init__(self) -> None:
         self.output_dir = Path(self.output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        if self.auto_move:
+            # Constant WASD hold would trip idle/stuck; smooth scripted look can
+            # still look "violent" to the shake detector — disable both in auto mode.
+            self.idle_timeout_s = 0.0
+            self.violent_duration_s = 0.0
 
 
 def find_ffmpeg() -> str:
@@ -111,8 +126,18 @@ def find_ffmpeg() -> str:
     sys.exit(1)
 
 
-def detect_nvenc(ffmpeg_path: str) -> bool:
-    """Check whether h264_nvenc is available in the installed ffmpeg."""
+# Preferred H.264 encoder order: GPU hardware first, then software.
+_H264_ENCODER_PREFERENCE: tuple[str, ...] = (
+    "h264_nvenc",  # NVIDIA NVENC
+    "h264_amf",  # AMD AMF
+    "h264_qsv",  # Intel Quick Sync
+    "libx264",  # CPU fallback
+)
+
+
+@functools.lru_cache(maxsize=8)
+def listed_h264_encoders(ffmpeg_path: str) -> frozenset[str]:
+    """Return H.264 encoder names advertised by ``ffmpeg -encoders``."""
     try:
         result = subprocess.run(
             [ffmpeg_path, "-hide_banner", "-encoders"],
@@ -122,18 +147,29 @@ def detect_nvenc(ffmpeg_path: str) -> bool:
             errors="replace",
             timeout=5,
         )
-        return "h264_nvenc" in result.stdout
     except Exception:
-        return False
+        return frozenset()
+    out = result.stdout or ""
+    return frozenset(name for name in _H264_ENCODER_PREFERENCE if name in out)
 
 
-@functools.lru_cache(maxsize=8)
-def nvenc_runtime_usable(ffmpeg_path: str) -> bool:
-    """True if FFmpeg can actually open h264_nvenc (driver NVENC API matches the build).
+def detect_nvenc(ffmpeg_path: str) -> bool:
+    """Check whether h264_nvenc is available in the installed ffmpeg."""
+    return "h264_nvenc" in listed_h264_encoders(ffmpeg_path)
 
-    ``-encoders`` alone is not enough: newer FFmpeg may require a newer driver
-    (e.g. API 13.0 / driver 570+) than the one installed.
+
+@functools.lru_cache(maxsize=32)
+def hw_encoder_runtime_usable(ffmpeg_path: str, encoder: str) -> bool:
+    """True if FFmpeg can actually open *encoder* on this machine.
+
+    ``-encoders`` alone is not enough: the build may list NVENC/AMF/QSV while the
+    installed driver / GPU rejects opening the encoder (e.g. NVENC API mismatch).
+
+    Probe uses ``yuv420p`` at 256x256 — tiny lavfi sizes without an explicit
+    pixel format often fail with ``Invalid argument`` even when the GPU works.
     """
+    if encoder == "libx264":
+        return True
     try:
         result = subprocess.run(
             [
@@ -145,9 +181,11 @@ def nvenc_runtime_usable(ffmpeg_path: str) -> bool:
                 "-f",
                 "lavfi",
                 "-i",
-                "color=c=black:s=64x64:d=0.04",
+                "color=c=black:s=256x256:d=0.1",
+                "-pix_fmt",
+                "yuv420p",
                 "-c:v",
-                "h264_nvenc",
+                encoder,
                 "-frames:v",
                 "1",
                 "-f",
@@ -163,3 +201,22 @@ def nvenc_runtime_usable(ffmpeg_path: str) -> bool:
         return result.returncode == 0
     except Exception:
         return False
+
+
+def nvenc_runtime_usable(ffmpeg_path: str) -> bool:
+    """True if FFmpeg can actually open h264_nvenc (driver NVENC API matches the build)."""
+    return hw_encoder_runtime_usable(ffmpeg_path, "h264_nvenc")
+
+
+@functools.lru_cache(maxsize=8)
+def select_h264_encoder(ffmpeg_path: str) -> str:
+    """Pick the best usable H.264 encoder: NVENC → AMF → QSV → libx264."""
+    listed = listed_h264_encoders(ffmpeg_path)
+    for name in _H264_ENCODER_PREFERENCE:
+        if name == "libx264":
+            return "libx264"
+        if name not in listed:
+            continue
+        if hw_encoder_runtime_usable(ffmpeg_path, name):
+            return name
+    return "libx264"

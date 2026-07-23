@@ -137,7 +137,7 @@ def main() -> None:
         "--quality",
         type=int,
         default=23,
-        help="视频质量 CQ 值，越小越好（默认：23）",
+        help="视频质量（越小越好）：NVENC CQ / AMF QP / QSV / x264 CRF（默认：23）",
     )
     parser.add_argument(
         "--x264-threads",
@@ -228,6 +228,17 @@ def main() -> None:
         help="禁用赛博朋克 2077 相机位姿、内外参与 Camera Z-depth 同步",
     )
     parser.add_argument(
+        "--no-auto-move",
+        action="store_true",
+        help="禁用自动移动（默认开启：热键开始录制后注入 WASD + 鼠标视角）",
+    )
+    parser.add_argument(
+        "--auto-move-hz",
+        type=float,
+        default=250.0,
+        help="自动移动鼠标注入频率 Hz（默认：250；策略仍约 30Hz，越高视角越丝滑）",
+    )
+    parser.add_argument(
         "--list-audio-devices",
         action="store_true",
         help="列出 --audio-device 可用的 DirectShow 设备名，并显示 WASAPI 支持情况后退出",
@@ -310,6 +321,8 @@ def main() -> None:
         rdr2_camera_sync=not bool(args.no_rdr2_camera),
         wukong_camera_sync=not bool(args.no_wukong_camera),
         cp2077_camera_sync=not bool(args.no_cp2077_camera),
+        auto_move=not bool(args.no_auto_move),
+        auto_move_tick_hz=max(1.0, float(args.auto_move_hz)),
     )
 
     session: Session | None = None
@@ -472,10 +485,14 @@ def main() -> None:
                 target = new_session.capture_target
                 if overlay is not None:
                     overlay.set_recording(True)
+                # Restore focus before auto-move so injected WASD reaches the game.
                 if target is not None and (target.hwnd or target.title):
                     restore_window_focus(hwnd=target.hwnd, title=target.title)
+                new_session.begin_auto_move()
                 session = new_session
                 print(f"\n>>> 开始录制  [{session.session_id}]")
+                if config.auto_move:
+                    print("    自动移动已启动（WASD + 鼠标视角）")
                 if args.no_hotkey:
                     print("    按 Ctrl+C 停止并退出。\n")
                 else:
@@ -509,6 +526,18 @@ def main() -> None:
         print(
             f"  僵滞自动停止: {config.idle_timeout_s:g} 秒 WASD 状态不变且无鼠标移动"
         )
+    if config.auto_move:
+        when = (
+            "启动后立即开始录制并启动"
+            if args.no_hotkey
+            else f"热键 {HOTKEY_LABEL} 开始录制后再启动"
+        )
+        print(
+            f"  自动移动: 已启用（{config.auto_move_tick_hz:g} Hz，"
+            f"WASD + 鼠标视角；{when}；空闲/僵滞/剧烈检测已关闭）"
+        )
+    else:
+        print("  自动移动: 已禁用（--no-auto-move）")
     if config.min_recording_duration_s > 0:
         print(
             f"  最短有效录制: {config.min_recording_duration_s:g} 秒"

@@ -43,6 +43,8 @@ from game_recorder.capture.window_region import (
     is_recorder_ui_foreground,
     resolve_capture_target,
 )
+from game_recorder.auto_move.policy_wander import WanderPolicy
+from game_recorder.auto_move.runner import AutoMoveRunner
 from game_recorder.camera_sync import (
     CP2077_CAMERA_SOURCE,
     GTA_CAMERA_SOURCE,
@@ -347,6 +349,7 @@ class Session:
         self._violence: _ViolenceMonitor | None = None
         self._stop_finalized = False
         self._stop_kept = False
+        self._auto_move: AutoMoveRunner | None = None
 
     @property
     def session_id(self) -> str:
@@ -530,11 +533,43 @@ class Session:
             )
 
         logger.info(
-            "会话已启动 — 编码器=%s，fps=%d，前台窗口=%r",
+            "会话已启动 — 编码器=%s，fps=%d，前台窗口=%r%s",
             encoder_name,
             self.config.fps,
             fg,
+            "，自动移动=待启动" if self.config.auto_move else "",
         )
+
+    def begin_auto_move(self) -> None:
+        """Start WASD/mouse automation after recording has begun (e.g. post-hotkey).
+
+        Safe to call once per session; no-op when ``auto_move`` is disabled or
+        already running. Caller should restore game focus first.
+        """
+        if not self.config.auto_move:
+            return
+        if self._auto_move is not None:
+            return
+        if self._stop_event.is_set():
+            return
+
+        target = self._capture_target
+        policy = WanderPolicy(
+            stuck_speed_mps=float(self.config.auto_move_stuck_speed_mps),
+            stuck_s=float(self.config.auto_move_stuck_s),
+            turn_deg_s=float(self.config.auto_move_turn_deg_s),
+        )
+        self._auto_move = AutoMoveRunner(
+            output_dir=self.config.output_dir,
+            session_dir=self._session_dir,
+            sources=_enabled_camera_sources(self.config),
+            tick_hz=float(self.config.auto_move_tick_hz),
+            policy=policy,
+            hwnd=target.hwnd if target else None,
+            title=target.title if target else "",
+        )
+        self._auto_move.start()
+        logger.info("自动移动已在录制开始后启动")
 
     def stop(self) -> bool:
         """Signal threads to stop, finalize the active segment, write metadata.
@@ -547,6 +582,13 @@ class Session:
         logger.info("正在停止会话 %s …", self._session_id)
         camera_sources = _enabled_camera_sources(self.config)
         self._stop_event.set()
+
+        if self._auto_move is not None:
+            try:
+                self._auto_move.stop()
+            except Exception as exc:
+                logger.warning("停止自动移动失败：%s", exc)
+            self._auto_move = None
 
         # Wait for capture threads to drain
         if self._screen_thread and self._screen_thread.is_alive():
