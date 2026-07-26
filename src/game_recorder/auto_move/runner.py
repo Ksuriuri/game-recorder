@@ -6,10 +6,12 @@ import logging
 import threading
 import time
 from pathlib import Path
+from typing import Protocol
 
 from game_recorder.auto_move.input_inject import InputInjector, set_timer_resolution_1ms
-from game_recorder.auto_move.policy_wander import WanderPolicy, apply_action
-from game_recorder.auto_move.pose_live import LivePoseReader, default_auto_move_sources
+from game_recorder.auto_move.policy_balanced import BalancedRadiusPolicy
+from game_recorder.auto_move.policy_wander import WanderAction, apply_action
+from game_recorder.auto_move.pose_live import LivePoseReader, UnifiedPose, default_auto_move_sources
 from game_recorder.camera_sync import CameraSource
 from game_recorder.capture.window_region import restore_window_focus
 
@@ -22,6 +24,18 @@ _DEFAULT_INJECT_HZ = 250.0
 _PIXELS_PER_DEG = 6.0
 
 
+class AutoMovePolicy(Protocol):
+    def reset(self) -> None: ...
+
+    def step(
+        self,
+        pose: UnifiedPose | None,
+        *,
+        dt: float,
+        now: float | None = None,
+    ) -> WanderAction: ...
+
+
 class AutoMoveRunner:
     """Drive WASD + mouse look while a session is recording."""
 
@@ -32,7 +46,7 @@ class AutoMoveRunner:
         session_dir: Path,
         sources: tuple[CameraSource, ...] | None = None,
         tick_hz: float = _DEFAULT_INJECT_HZ,
-        policy: WanderPolicy | None = None,
+        policy: AutoMovePolicy | None = None,
         hwnd: int | None = None,
         title: str = "",
         pixels_per_deg: float = _PIXELS_PER_DEG,
@@ -42,7 +56,7 @@ class AutoMoveRunner:
         self._sources = sources if sources is not None else default_auto_move_sources()
         # tick_hz = mouse inject rate (policy runs at _POLICY_HZ internally).
         self._tick_hz = max(60.0, float(tick_hz))
-        self._policy = policy or WanderPolicy()
+        self._policy: AutoMovePolicy = policy or BalancedRadiusPolicy()
         self._pixels_per_deg = max(1.0, float(pixels_per_deg))
         self._hwnd = hwnd
         self._title = title or ""
@@ -56,7 +70,7 @@ class AutoMoveRunner:
         )
 
     @property
-    def policy(self) -> WanderPolicy:
+    def policy(self) -> AutoMovePolicy:
         return self._policy
 
     def start(self) -> None:

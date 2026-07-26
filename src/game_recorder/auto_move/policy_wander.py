@@ -29,6 +29,10 @@ class WanderAction:
     yaw_deg_s: float = 0.0
     pitch_deg_s: float = 0.0
     phase: WanderPhase = WanderPhase.WALK
+    # Optional discrete labels (balanced policy / logging).
+    action_id: int | None = None
+    translation: str | None = None
+    rotation: str | None = None
 
 
 @dataclass
@@ -147,6 +151,9 @@ class WanderPolicy:
             yaw_deg_s=self._cmd_yaw_deg_s,
             pitch_deg_s=self._cmd_pitch_deg_s,
             phase=action.phase,
+            action_id=action.action_id,
+            translation=action.translation,
+            rotation=action.rotation,
         )
 
     def _update_look_rates(self, dt: float, clock: float) -> tuple[float, float]:

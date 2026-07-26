@@ -43,6 +43,7 @@ from game_recorder.capture.window_region import (
     is_recorder_ui_foreground,
     resolve_capture_target,
 )
+from game_recorder.auto_move.policy_balanced import BalancedRadiusPolicy
 from game_recorder.auto_move.policy_wander import WanderPolicy
 from game_recorder.auto_move.runner import AutoMoveRunner
 from game_recorder.camera_sync import (
@@ -554,11 +555,30 @@ class Session:
             return
 
         target = self._capture_target
-        policy = WanderPolicy(
-            stuck_speed_mps=float(self.config.auto_move_stuck_speed_mps),
-            stuck_s=float(self.config.auto_move_stuck_s),
-            turn_deg_s=float(self.config.auto_move_turn_deg_s),
-        )
+        policy_name = (self.config.auto_move_policy or "balanced").strip().lower()
+        if policy_name == "wander":
+            policy = WanderPolicy(
+                stuck_speed_mps=float(self.config.auto_move_stuck_speed_mps),
+                stuck_s=float(self.config.auto_move_stuck_s),
+                turn_deg_s=float(self.config.auto_move_turn_deg_s),
+            )
+        else:
+            if policy_name not in ("balanced", "balance", "radius"):
+                logger.warning(
+                    "未知 auto_move_policy=%r，回退到 balanced",
+                    self.config.auto_move_policy,
+                )
+            policy = BalancedRadiusPolicy(
+                radius_m=float(self.config.auto_move_radius_m),
+                freq_alpha=float(self.config.auto_move_freq_alpha),
+                hold_min_s=float(self.config.auto_move_action_hold_min_s),
+                hold_max_s=float(self.config.auto_move_action_hold_max_s),
+                look_yaw_deg_s=float(self.config.auto_move_look_yaw_deg_s),
+                look_pitch_deg_s=float(self.config.auto_move_look_pitch_deg_s),
+                stuck_speed_mps=float(self.config.auto_move_stuck_speed_mps),
+                stuck_s=float(self.config.auto_move_stuck_s),
+                return_yaw_deg_s=float(self.config.auto_move_turn_deg_s),
+            )
         self._auto_move = AutoMoveRunner(
             output_dir=self.config.output_dir,
             session_dir=self._session_dir,
@@ -569,7 +589,11 @@ class Session:
             title=target.title if target else "",
         )
         self._auto_move.start()
-        logger.info("自动移动已在录制开始后启动")
+        logger.info(
+            "自动移动已在录制开始后启动（policy=%s, radius=%.2fm）",
+            policy_name if policy_name == "wander" else "balanced",
+            float(self.config.auto_move_radius_m),
+        )
 
     def stop(self) -> bool:
         """Signal threads to stop, finalize the active segment, write metadata.

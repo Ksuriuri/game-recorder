@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import random
 import sys
 import tempfile
 import unittest
@@ -12,10 +13,20 @@ from unittest import mock
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from game_recorder.auto_move.input_inject import VK_S, VK_W, InputInjector
+from game_recorder.auto_move.action_space import (
+    TRANSLATIONS,
+    load_action_catalog,
+    nearest_inward_translation,
+    rotation_rates,
+    translation_inward_score,
+    translation_keys,
+)
+from game_recorder.auto_move.input_inject import VK_A, VK_D, VK_S, VK_W, InputInjector
+from game_recorder.auto_move.policy_balanced import BalancedRadiusPolicy
 from game_recorder.auto_move.policy_wander import WanderPhase, WanderPolicy, apply_action
 from game_recorder.auto_move.pose_live import (
     LivePoseReader,
+    UnifiedPose,
     candidate_raw_paths,
     extract_unified_pose,
 )
@@ -156,6 +167,111 @@ class LivePoseReaderTests(unittest.TestCase):
         self.assertTrue(any(p.name == "camera_raw_wukong.jsonl" for p in paths))
 
 
+class ActionSpaceTests(unittest.TestCase):
+    def test_catalog_has_81_bins_and_inverse_weights(self) -> None:
+        catalog = load_action_catalog(alpha=1.0)
+        self.assertEqual(len(catalog), 81)
+        forward_none = catalog.by_pair[("forward", "none")]
+        rare = catalog.by_pair[("backward_right", "pitch_down")]
+        self.assertLess(forward_none.weight, rare.weight)
+        self.assertGreater(forward_none.dense_pct, rare.dense_pct)
+
+    def test_translation_and_rotation_mapping(self) -> None:
+        self.assertEqual(translation_keys("none"), frozenset())
+        self.assertEqual(translation_keys("forward"), frozenset({VK_W}))
+        self.assertEqual(translation_keys("forward_left"), frozenset({VK_W, VK_A}))
+        self.assertEqual(translation_keys("backward_right"), frozenset({VK_S, VK_D}))
+        self.assertEqual(rotation_rates("none"), (0.0, 0.0))
+        self.assertEqual(rotation_rates("yaw_left", yaw_deg_s=40.0), (-40.0, 0.0))
+        self.assertEqual(rotation_rates("pitch_up", pitch_deg_s=12.0), (0.0, -12.0))
+        self.assertEqual(
+            rotation_rates("yaw_right_pitch_down", yaw_deg_s=40.0, pitch_deg_s=12.0),
+            (40.0, 12.0),
+        )
+
+    def test_inward_score_prefers_back_when_past_anchor(self) -> None:
+        # Facing +Y; standing at y=5 with anchor at origin → need backward.
+        score_fwd = translation_inward_score(
+            "forward",
+            pos_x=0.0,
+            pos_y=5.0,
+            anchor_x=0.0,
+            anchor_y=0.0,
+            forward_x=0.0,
+            forward_y=1.0,
+        )
+        score_back = translation_inward_score(
+            "backward",
+            pos_x=0.0,
+            pos_y=5.0,
+            anchor_x=0.0,
+            anchor_y=0.0,
+            forward_x=0.0,
+            forward_y=1.0,
+        )
+        self.assertLess(score_fwd, 0.0)
+        self.assertGreater(score_back, 0.0)
+        nearest = nearest_inward_translation(
+            pos_x=0.0,
+            pos_y=5.0,
+            anchor_x=0.0,
+            anchor_y=0.0,
+            forward_x=0.0,
+            forward_y=1.0,
+        )
+        self.assertEqual(nearest, "backward")
+
+
+class BalancedRadiusPolicyTests(unittest.TestCase):
+    def test_step_without_pose_does_not_crash(self) -> None:
+        policy = BalancedRadiusPolicy(
+            hold_min_s=0.2,
+            hold_max_s=0.2,
+            rate_track_hz=100.0,
+            rng=random.Random(0),
+        )
+        policy.reset()
+        action = policy.step(None, dt=1.0 / 30.0, now=1.0)
+        self.assertIsNotNone(action.action_id)
+        self.assertIn(action.translation, TRANSLATIONS)
+
+    def test_outside_radius_forces_inward_translation(self) -> None:
+        policy = BalancedRadiusPolicy(
+            radius_m=3.0,
+            soft_radius_frac=0.75,
+            hold_min_s=0.01,
+            hold_max_s=0.01,
+            rate_track_hz=100.0,
+            look_yaw_deg_s=0.0,
+            look_pitch_deg_s=0.0,
+            return_yaw_deg_s=0.0,
+            rng=random.Random(1),
+        )
+        policy.reset()
+        # Lock anchor at origin facing +Y.
+        anchor = UnifiedPose(
+            0, 0.0, 0.0, 0.0, "gta", forward_x=0.0, forward_y=1.0, forward_z=0.0
+        )
+        policy.step(anchor, dt=0.05, now=1.0)
+
+        outside = UnifiedPose(
+            100, 0.0, 4.0, 0.0, "gta", forward_x=0.0, forward_y=1.0, forward_z=0.0
+        )
+        # Force resample with pose outside hard radius.
+        policy._hold_until = 0.0
+        action = policy.step(outside, dt=0.05, now=2.0)
+        self.assertEqual(action.translation, "backward")
+        self.assertEqual(action.keys, frozenset({VK_S}))
+
+        # Soft zone: outward translations should be filtered from allowed set.
+        soft = UnifiedPose(
+            200, 0.0, 2.5, 0.0, "gta", forward_x=0.0, forward_y=1.0, forward_z=0.0
+        )
+        allowed = policy._allowed_translations(soft, force_stuck=False)
+        self.assertNotIn("forward", allowed)
+        self.assertIn("backward", allowed)
+
+
 class WanderPolicyTests(unittest.TestCase):
     def test_stuck_triggers_turn_or_backup(self) -> None:
         policy = WanderPolicy(
@@ -172,8 +288,6 @@ class WanderPolicyTests(unittest.TestCase):
         policy.reset()
         # Freeze repath clock so only stuck logic fires.
         policy._next_repath_at = 1e9
-        from game_recorder.auto_move.pose_live import UnifiedPose
-
         p0 = UnifiedPose(0, 0.0, 0.0, 0.0, "gta")
         action = policy.step(p0, dt=0.05, now=1.0)
         self.assertEqual(action.phase, WanderPhase.WALK)
@@ -216,6 +330,8 @@ class ConfigAutoMoveTests(unittest.TestCase):
                 violent_duration_s=1.0,
             )
             self.assertTrue(cfg.auto_move)
+            self.assertEqual(cfg.auto_move_policy, "balanced")
+            self.assertEqual(cfg.auto_move_radius_m, 3.0)
             self.assertEqual(cfg.idle_timeout_s, 0.0)
             self.assertEqual(cfg.violent_duration_s, 0.0)
 

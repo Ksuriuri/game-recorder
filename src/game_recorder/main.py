@@ -239,6 +239,18 @@ def main() -> None:
         help="自动移动鼠标注入频率 Hz（默认：250；策略仍约 30Hz，越高视角越丝滑）",
     )
     parser.add_argument(
+        "--auto-move-radius",
+        type=float,
+        default=3.0,
+        help="自动移动活动半径（米，默认：3；以首次相机位姿为锚点）",
+    )
+    parser.add_argument(
+        "--auto-move-policy",
+        choices=("balanced", "wander"),
+        default="balanced",
+        help="自动移动策略：balanced=半径内低频 action 均衡（默认）；wander=旧版按住 W 游荡",
+    )
+    parser.add_argument(
         "--list-audio-devices",
         action="store_true",
         help="列出 --audio-device 可用的 DirectShow 设备名，并显示 WASAPI 支持情况后退出",
@@ -323,6 +335,8 @@ def main() -> None:
         cp2077_camera_sync=not bool(args.no_cp2077_camera),
         auto_move=not bool(args.no_auto_move),
         auto_move_tick_hz=max(1.0, float(args.auto_move_hz)),
+        auto_move_radius_m=max(0.1, float(args.auto_move_radius)),
+        auto_move_policy=str(args.auto_move_policy),
     )
 
     session: Session | None = None
@@ -534,6 +548,7 @@ def main() -> None:
         )
         print(
             f"  自动移动: 已启用（{config.auto_move_tick_hz:g} Hz，"
+            f"policy={config.auto_move_policy}，半径 {config.auto_move_radius_m:g} m，"
             f"WASD + 鼠标视角；{when}；空闲/僵滞/剧烈检测已关闭）"
         )
     else:
