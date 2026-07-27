@@ -238,7 +238,7 @@ class BalancedRadiusPolicyTests(unittest.TestCase):
     def test_outside_radius_forces_inward_translation(self) -> None:
         policy = BalancedRadiusPolicy(
             radius_m=3.0,
-            soft_radius_frac=0.75,
+            soft_radius_frac=0.5,
             hold_min_s=0.01,
             hold_max_s=0.01,
             rate_track_hz=100.0,
@@ -265,11 +265,55 @@ class BalancedRadiusPolicyTests(unittest.TestCase):
 
         # Soft zone: outward translations should be filtered from allowed set.
         soft = UnifiedPose(
-            200, 0.0, 2.5, 0.0, "gta", forward_x=0.0, forward_y=1.0, forward_z=0.0
+            200, 0.0, 2.0, 0.0, "gta", forward_x=0.0, forward_y=1.0, forward_z=0.0
         )
         allowed = policy._allowed_translations(soft, force_stuck=False)
         self.assertNotIn("forward", allowed)
         self.assertIn("backward", allowed)
+
+    def test_mid_hold_outward_walk_interrupted_at_soft_radius(self) -> None:
+        """Regression: small radii must not wait for hold expiry to turn back."""
+        catalog = load_action_catalog(alpha=1.0)
+        forward_none = catalog.by_pair[("forward", "none")]
+        policy = BalancedRadiusPolicy(
+            radius_m=0.5,
+            soft_radius_frac=0.5,
+            hold_min_s=5.0,
+            hold_max_s=5.0,
+            rate_track_hz=100.0,
+            look_yaw_deg_s=0.0,
+            look_pitch_deg_s=0.0,
+            return_yaw_deg_s=0.0,
+            catalog=catalog,
+            rng=random.Random(0),
+        )
+        policy.reset()
+        anchor = UnifiedPose(
+            0, 0.0, 0.0, 0.0, "gta", forward_x=0.0, forward_y=1.0, forward_z=0.0
+        )
+        policy.step(anchor, dt=0.05, now=1.0)
+        # Simulate a long outward hold that would previously overshoot.
+        policy._current = forward_none
+        policy._hold_until = 1e9
+        past_soft = UnifiedPose(
+            50, 0.0, 0.4, 0.0, "gta", forward_x=0.0, forward_y=1.0, forward_z=0.0
+        )
+        action = policy.step(past_soft, dt=0.05, now=2.0)
+        self.assertNotEqual(action.translation, "forward")
+        self.assertIn(action.translation, ("backward", "none", "left", "right",
+                                           "backward_left", "backward_right",
+                                           "forward_left", "forward_right"))
+        # Specifically must not keep walking further away.
+        score = translation_inward_score(
+            action.translation or "none",
+            pos_x=0.0,
+            pos_y=0.4,
+            anchor_x=0.0,
+            anchor_y=0.0,
+            forward_x=0.0,
+            forward_y=1.0,
+        )
+        self.assertGreaterEqual(score, -0.05)
 
 
 class WanderPolicyTests(unittest.TestCase):

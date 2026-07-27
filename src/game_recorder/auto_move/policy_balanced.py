@@ -27,7 +27,8 @@ class BalancedRadiusPolicy:
     """Sample rare human actions inside a fixed horizontal radius around an anchor."""
 
     radius_m: float = 3.0
-    soft_radius_frac: float = 0.75
+    # Start cutting outward walks earlier so small radii do not feel oversized.
+    soft_radius_frac: float = 0.5
     freq_alpha: float = 1.0
     hold_min_s: float = 0.35
     hold_max_s: float = 1.0
@@ -35,6 +36,8 @@ class BalancedRadiusPolicy:
     look_pitch_deg_s: float = 18.0
     # When outside radius, blend a stronger yaw toward the anchor.
     return_yaw_deg_s: float = 55.0
+    # Estimated walk speed used to cap hold length near the boundary.
+    walk_speed_mps: float = 2.0
     stuck_speed_mps: float = 0.15
     stuck_s: float = 1.5
     # Soften commanded look so discrete bins do not jerk the mouse.
@@ -98,12 +101,67 @@ class BalancedRadiusPolicy:
             self._escape_until = clock + self.rng.uniform(0.4, 0.9)
             self._stuck_since = None
             self._resample(clock, pose=pose, force_stuck=True)
-        elif clock >= self._hold_until or self._current is None:
-            self._resample(clock, pose=pose, force_stuck=clock < self._escape_until)
+        elif self._should_interrupt_for_radius(pose) or (
+            clock >= self._hold_until or self._current is None
+        ):
+            # Radius is checked every policy tick (~30Hz), not only at hold
+            # boundaries — otherwise a 0.5–1s walk hold can overshoot small radii
+            # by 1–2m at GTA walk speed.
+            self._resample(
+                clock,
+                pose=pose,
+                force_stuck=clock < self._escape_until,
+            )
 
         assert self._current is not None
         action = self._to_wander_action(self._current, pose=pose)
         return self._finish_action(action, dt)
+
+    def _horizontal_dist_to_anchor(self, pose: UnifiedPose) -> float | None:
+        if self._anchor_x is None or self._anchor_y is None:
+            return None
+        return math.hypot(pose.x - self._anchor_x, pose.y - self._anchor_y)
+
+    def _should_interrupt_for_radius(self, pose: UnifiedPose | None) -> bool:
+        """True when the current hold is pushing past the soft/hard radius."""
+        if pose is None or self._current is None:
+            return False
+        dist = self._horizontal_dist_to_anchor(pose)
+        if dist is None:
+            return False
+        radius = max(0.1, float(self.radius_m))
+        soft = radius * max(0.1, min(1.0, float(self.soft_radius_frac)))
+        tr = self._current.translation
+
+        if dist >= radius:
+            # Already outside: interrupt unless we are already commanded inward.
+            if tr == "none":
+                return True
+            score = translation_inward_score(
+                tr,
+                pos_x=pose.x,
+                pos_y=pose.y,
+                anchor_x=float(self._anchor_x),
+                anchor_y=float(self._anchor_y),
+                forward_x=pose.forward_x,
+                forward_y=pose.forward_y,
+            )
+            return score < 0.15
+
+        if dist >= soft and tr != "none":
+            score = translation_inward_score(
+                tr,
+                pos_x=pose.x,
+                pos_y=pose.y,
+                anchor_x=float(self._anchor_x),
+                anchor_y=float(self._anchor_y),
+                forward_x=pose.forward_x,
+                forward_y=pose.forward_y,
+            )
+            # Soft zone: cut any clearly outward hold immediately.
+            return score < -0.05
+
+        return False
 
     def _maybe_set_anchor(self, pose: UnifiedPose) -> None:
         if self._anchor_x is None:
@@ -182,7 +240,24 @@ class BalancedRadiusPolicy:
                 chosen = pair
 
         self._current = chosen
-        self._hold_until = clock + self._sample_hold()
+        # Cap hold by remaining distance to the soft boundary so small radii
+        # cannot plan a 1s forward walk that tunnels through the circle.
+        hold = self._sample_hold()
+        if (
+            pose is not None
+            and self._anchor_x is not None
+            and self._anchor_y is not None
+        ):
+            radius = max(0.1, float(self.radius_m))
+            soft = radius * max(0.1, min(1.0, float(self.soft_radius_frac)))
+            dist = math.hypot(pose.x - self._anchor_x, pose.y - self._anchor_y)
+            speed = max(0.5, float(self.walk_speed_mps))
+            if forced is not None or dist >= soft:
+                hold = min(hold, 0.18)
+            elif chosen.translation != "none":
+                remaining = max(0.05, soft - dist)
+                hold = min(hold, remaining / speed)
+        self._hold_until = clock + hold
 
     def _allowed_translations(
         self,
@@ -212,6 +287,19 @@ class BalancedRadiusPolicy:
                 forward_x=pose.forward_x,
                 forward_y=pose.forward_y,
             )
+            score = translation_inward_score(
+                forced,
+                pos_x=pose.x,
+                pos_y=pose.y,
+                anchor_x=self._anchor_x,
+                anchor_y=self._anchor_y,
+                forward_x=pose.forward_x,
+                forward_y=pose.forward_y,
+            )
+            # Not facing inward enough: stop feet and yaw toward center first.
+            if score < 0.35:
+                self._forced_translation = "none"
+                return {"none"}
             self._forced_translation = forced
             return {forced}
 

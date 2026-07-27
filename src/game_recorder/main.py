@@ -5,6 +5,8 @@ Usage:
     game-recorder --output ./data  # Custom output directory
     game-recorder --quality 18     # Higher quality (lower CQ = larger files)
 
+While idle (not recording):
+    [ / ] / \\        — decrease / increase / reset auto-move radius
 While recording:
     Double-tap Caps Lock — toggle recording on/off
     Ctrl+C               — stop and exit
@@ -33,7 +35,14 @@ from game_recorder.hotkeys import (
     HOTKEY_LABEL,
     HOTKEY_SEQUENCE_LENGTH,
     HOTKEY_SEQUENCE_TIMEOUT_SECONDS,
+    RADIUS_HOTKEY_HINT,
+    RADIUS_MAX_M,
+    RADIUS_MIN_M,
+    RADIUS_STEP_M,
     VK_CAPSLOCK,
+    VK_OEM_4,
+    VK_OEM_5,
+    VK_OEM_6,
 )
 from game_recorder.capture.window_region import restore_window_focus
 from game_recorder.overlay import RecordingStatusOverlay
@@ -69,8 +78,12 @@ class _ChineseLevelFormatter(logging.Formatter):
 def _hotkey_listener(
     toggle_cb: Callable[[], None],
     stop_event: threading.Event,
+    *,
+    is_idle: Callable[[], bool] | None = None,
+    on_radius_delta: Callable[[float], None] | None = None,
+    on_radius_reset: Callable[[], None] | None = None,
 ) -> None:
-    """Listen for double-tap Caps Lock (polling)."""
+    """Listen for double-tap Caps Lock; while idle, also [ ] \\ for radius."""
     user32 = ctypes.windll.user32  # type: ignore[attr-defined]
 
     user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
@@ -80,6 +93,9 @@ def _hotkey_listener(
     seq_count = 0
     seq_started_at = 0.0
     prev_caps = False
+    prev_bracket_l = False
+    prev_bracket_r = False
+    prev_backslash = False
 
     def _fire_once() -> None:
         nonlocal last_toggle_at, seq_count
@@ -110,6 +126,26 @@ def _hotkey_listener(
                     _fire_once()
 
         prev_caps = caps
+
+        idle = True if is_idle is None else bool(is_idle())
+        if idle and (on_radius_delta is not None or on_radius_reset is not None):
+            bracket_l = _key_down(VK_OEM_4)
+            bracket_r = _key_down(VK_OEM_6)
+            backslash = _key_down(VK_OEM_5)
+            if bracket_l and not prev_bracket_l and on_radius_delta is not None:
+                on_radius_delta(-RADIUS_STEP_M)
+            if bracket_r and not prev_bracket_r and on_radius_delta is not None:
+                on_radius_delta(RADIUS_STEP_M)
+            if backslash and not prev_backslash and on_radius_reset is not None:
+                on_radius_reset()
+            prev_bracket_l = bracket_l
+            prev_bracket_r = bracket_r
+            prev_backslash = backslash
+        else:
+            prev_bracket_l = _key_down(VK_OEM_4)
+            prev_bracket_r = _key_down(VK_OEM_6)
+            prev_backslash = _key_down(VK_OEM_5)
+
         time.sleep(0.05)
 
 
@@ -409,6 +445,8 @@ def main() -> None:
             on_quit=app_stop.set,
             ui_settled=overlay_ui_settled,
             expect_auto_stop_notice=pending_auto_stop is not None,
+            radius_m=float(config.auto_move_radius_m),
+            radius_hint=RADIUS_HOTKEY_HINT if (config.auto_move and not args.no_hotkey) else "",
         )
         overlay.start()
 
@@ -533,8 +571,13 @@ def main() -> None:
         print(f"  录制 ID: {config.recording_id}")
     if not args.no_hotkey:
         print(f"  热键: {HOTKEY_LABEL}（{HOTKEY_HINT}）切换录制")
+        if config.auto_move:
+            print(
+                f"  半径热键（仅未录制时）: [ -{RADIUS_STEP_M:g}m  ] +{RADIUS_STEP_M:g}m  "
+                f"\\ 重置；当前 {config.auto_move_radius_m:g} m"
+            )
     if not args.no_overlay:
-        print("  悬浮窗: 已启用（右上角状态 + 已录制时长，点「退出」结束）")
+        print("  悬浮窗: 已启用（右上角状态 + 已录制时长 + 活动半径，点「退出」结束）")
     if config.idle_timeout_s > 0:
         print(f"  空闲自动停止: {config.idle_timeout_s:g} 秒未按 WASD")
         print(
@@ -587,9 +630,47 @@ def main() -> None:
     # Hotkey listener thread
     hotkey_thread: threading.Thread | None = None
     if not args.no_hotkey:
+        radius_default_m = float(config.auto_move_radius_m)
+
+        def _is_idle() -> bool:
+            with session_lock:
+                return session is None
+
+        def _adjust_radius(delta: float) -> None:
+            if not config.auto_move:
+                return
+            new_r = min(
+                RADIUS_MAX_M,
+                max(RADIUS_MIN_M, float(config.auto_move_radius_m) + float(delta)),
+            )
+            # Snap to step grid for stable display (e.g. 3 / 3.5 / 4).
+            steps = round(new_r / RADIUS_STEP_M)
+            new_r = min(RADIUS_MAX_M, max(RADIUS_MIN_M, steps * RADIUS_STEP_M))
+            if abs(new_r - float(config.auto_move_radius_m)) < 1e-9:
+                return
+            config.auto_move_radius_m = new_r
+            if overlay is not None:
+                overlay.set_radius_m(new_r)
+            logger.info("活动半径已设为 %.3g m", new_r)
+
+        def _reset_radius() -> None:
+            if not config.auto_move:
+                return
+            if abs(float(config.auto_move_radius_m) - radius_default_m) < 1e-9:
+                return
+            config.auto_move_radius_m = radius_default_m
+            if overlay is not None:
+                overlay.set_radius_m(radius_default_m)
+            logger.info("活动半径已重置为 %.3g m", radius_default_m)
+
         hotkey_thread = threading.Thread(
             target=_hotkey_listener,
             args=(_toggle, app_stop),
+            kwargs={
+                "is_idle": _is_idle,
+                "on_radius_delta": _adjust_radius if config.auto_move else None,
+                "on_radius_reset": _reset_radius if config.auto_move else None,
+            },
             name="hotkey",
             daemon=True,
         )
