@@ -21,6 +21,7 @@ from game_recorder.auto_move.action_space import (
     translation_inward_score,
     translation_keys,
 )
+from game_recorder.auto_move.coverage_maps import CoverageMaps
 from game_recorder.auto_move.input_inject import VK_A, VK_D, VK_S, VK_W, InputInjector
 from game_recorder.auto_move.policy_balanced import BalancedRadiusPolicy
 from game_recorder.auto_move.policy_wander import WanderPhase, WanderPolicy, apply_action
@@ -222,6 +223,95 @@ class ActionSpaceTests(unittest.TestCase):
         self.assertEqual(nearest, "backward")
 
 
+class CoverageMapsTests(unittest.TestCase):
+    def test_visited_sector_lowers_move_novelty(self) -> None:
+        maps = CoverageMaps()
+        maps.set_anchor(
+            anchor_x=0.0,
+            anchor_y=0.0,
+            radius_m=3.0,
+            ref_forward_x=0.0,
+            ref_forward_y=1.0,
+        )
+        # Sit and mark the forward (+Y) cell many times.
+        pose = UnifiedPose(
+            0, 0.0, 0.8, 0.0, "gta", forward_x=0.0, forward_y=1.0, forward_z=0.0
+        )
+        for i in range(20):
+            maps.observe(pose, now=float(i))
+
+        nov = maps.novelty_move(
+            pos_x=0.0,
+            pos_y=0.0,
+            forward_x=0.0,
+            forward_y=1.0,
+        )
+        self.assertLess(nov["forward"], nov["backward"])
+        self.assertLess(nov["forward"], nov["left"])
+
+    def test_visited_yaw_lowers_same_direction_look_novelty(self) -> None:
+        maps = CoverageMaps()
+        maps.set_anchor(
+            anchor_x=0.0,
+            anchor_y=0.0,
+            radius_m=3.0,
+            ref_forward_x=0.0,
+            ref_forward_y=1.0,
+        )
+        # Looking +Y (ref). Mark current look bin heavily.
+        pose = UnifiedPose(
+            0, 0.0, 0.0, 0.0, "gta", forward_x=0.0, forward_y=1.0, forward_z=0.0
+        )
+        for i in range(20):
+            maps.observe(pose, now=float(i))
+
+        nov = maps.novelty_look(
+            forward_x=0.0,
+            forward_y=1.0,
+            forward_z=0.0,
+        )
+        # yaw_right / yaw_left target neighbor bins; none targets current (visited).
+        self.assertLess(nov["none"], nov["yaw_right"])
+        self.assertLess(nov["none"], nov["yaw_left"])
+
+    def test_fuse_keeps_rare_prior_advantage(self) -> None:
+        maps = CoverageMaps()
+        catalog = load_action_catalog(alpha=1.0)
+        common = catalog.by_pair[("forward", "none")]
+        rare = catalog.by_pair[("backward_right", "pitch_down")]
+        move = {t: 1.0 for t in TRANSLATIONS}
+        look = {r: 1.0 for r in (
+            "none",
+            "yaw_right",
+            "yaw_left",
+            "pitch_up",
+            "pitch_down",
+            "yaw_right_pitch_up",
+            "yaw_right_pitch_down",
+            "yaw_left_pitch_up",
+            "yaw_left_pitch_down",
+        )}
+        w_common = maps.fuse_weight(
+            prior=common.weight,
+            translation=common.translation,
+            rotation=common.rotation,
+            move_novelty=move,
+            look_novelty=look,
+            beta=1.5,
+            gamma=1.5,
+        )
+        w_rare = maps.fuse_weight(
+            prior=rare.weight,
+            translation=rare.translation,
+            rotation=rare.rotation,
+            move_novelty=move,
+            look_novelty=look,
+            beta=1.5,
+            gamma=1.5,
+        )
+        self.assertGreater(w_rare, w_common)
+
+
 class BalancedRadiusPolicyTests(unittest.TestCase):
     def test_step_without_pose_does_not_crash(self) -> None:
         policy = BalancedRadiusPolicy(
@@ -376,6 +466,8 @@ class ConfigAutoMoveTests(unittest.TestCase):
             self.assertTrue(cfg.auto_move)
             self.assertEqual(cfg.auto_move_policy, "balanced")
             self.assertEqual(cfg.auto_move_radius_m, 3.0)
+            self.assertEqual(cfg.auto_move_cover_move_beta, 1.5)
+            self.assertEqual(cfg.auto_move_cover_look_gamma, 1.5)
             self.assertEqual(cfg.idle_timeout_s, 0.0)
             self.assertEqual(cfg.violent_duration_s, 0.0)
 

@@ -578,6 +578,8 @@ class Session:
                 stuck_speed_mps=float(self.config.auto_move_stuck_speed_mps),
                 stuck_s=float(self.config.auto_move_stuck_s),
                 return_yaw_deg_s=float(self.config.auto_move_turn_deg_s),
+                cover_move_beta=float(self.config.auto_move_cover_move_beta),
+                cover_look_gamma=float(self.config.auto_move_cover_look_gamma),
             )
         self._auto_move = AutoMoveRunner(
             output_dir=self.config.output_dir,

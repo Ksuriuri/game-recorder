@@ -88,6 +88,9 @@ class Config:
     auto_move_action_hold_max_s: float = 1.0
     auto_move_look_yaw_deg_s: float = 45.0
     auto_move_look_pitch_deg_s: float = 18.0
+    # Coverage × inverse-freq fusion gains (see BalancedRadiusPolicy).
+    auto_move_cover_move_beta: float = 1.5
+    auto_move_cover_look_gamma: float = 1.5
 
     def __post_init__(self) -> None:
         self.output_dir = Path(self.output_dir)

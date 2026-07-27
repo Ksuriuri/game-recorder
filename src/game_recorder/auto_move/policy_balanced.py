@@ -18,6 +18,7 @@ from game_recorder.auto_move.action_space import (
     translation_inward_score,
     translation_keys,
 )
+from game_recorder.auto_move.coverage_maps import CoverageMaps
 from game_recorder.auto_move.policy_wander import WanderAction, WanderPhase
 from game_recorder.auto_move.pose_live import UnifiedPose
 
@@ -42,10 +43,15 @@ class BalancedRadiusPolicy:
     stuck_s: float = 1.5
     # Soften commanded look so discrete bins do not jerk the mouse.
     rate_track_hz: float = 8.0
+    # Coverage reweight: w_final = prior × (1+β·move) × (1+γ·look).
+    cover_move_beta: float = 1.5
+    cover_look_gamma: float = 1.5
     catalog: ActionCatalog | None = None
+    coverage: CoverageMaps | None = None
     rng: random.Random = field(default_factory=random.Random)
 
     _catalog: ActionCatalog = field(init=False, repr=False)
+    _coverage: CoverageMaps = field(init=False, repr=False)
     _anchor_x: float | None = field(default=None, init=False)
     _anchor_y: float | None = field(default=None, init=False)
     _current: DiscreteAction | None = field(default=None, init=False)
@@ -63,6 +69,7 @@ class BalancedRadiusPolicy:
             self._catalog = self.catalog
         else:
             self._catalog = default_action_catalog(alpha=float(self.freq_alpha))
+        self._coverage = self.coverage if self.coverage is not None else CoverageMaps()
 
     def reset(self) -> None:
         now = time.monotonic()
@@ -77,6 +84,7 @@ class BalancedRadiusPolicy:
         self._cmd_yaw_deg_s = 0.0
         self._cmd_pitch_deg_s = 0.0
         self._escape_until = 0.0
+        self._coverage.reset()
         self._resample(now, pose=None, force_stuck=False)
 
     def step(
@@ -92,6 +100,7 @@ class BalancedRadiusPolicy:
         if pose is not None:
             self._maybe_set_anchor(pose)
             self._observe_pose(pose, clock)
+            self._coverage.observe(pose, now=clock)
 
         stuck = (
             self._stuck_since is not None
@@ -167,6 +176,13 @@ class BalancedRadiusPolicy:
         if self._anchor_x is None:
             self._anchor_x = float(pose.x)
             self._anchor_y = float(pose.y)
+            self._coverage.set_anchor(
+                anchor_x=self._anchor_x,
+                anchor_y=self._anchor_y,
+                radius_m=float(self.radius_m),
+                ref_forward_x=pose.forward_x,
+                ref_forward_y=pose.forward_y,
+            )
 
     def _observe_pose(self, pose: UnifiedPose, now: float) -> None:
         prev = self._last_pose
@@ -210,7 +226,43 @@ class BalancedRadiusPolicy:
         if not candidates:
             candidates = list(self._catalog.actions)
 
-        weights = [max(0.0, a.weight) for a in candidates]
+        move_nov: dict[str, float] = {}
+        look_nov: dict[str, float] = {}
+        if (
+            pose is not None
+            and self._coverage.ready
+            and self._forced_translation is None
+            and not force_stuck
+        ):
+            move_nov = self._coverage.novelty_move(
+                pos_x=pose.x,
+                pos_y=pose.y,
+                forward_x=pose.forward_x,
+                forward_y=pose.forward_y,
+                translations=tuple(sorted(allowed_translations)),
+            )
+            look_nov = self._coverage.novelty_look(
+                forward_x=pose.forward_x,
+                forward_y=pose.forward_y,
+                forward_z=pose.forward_z,
+            )
+
+        weights: list[float] = []
+        for a in candidates:
+            if move_nov or look_nov:
+                w = self._coverage.fuse_weight(
+                    prior=a.weight,
+                    translation=a.translation,
+                    rotation=a.rotation,
+                    move_novelty=move_nov or {a.translation: 1.0},
+                    look_novelty=look_nov or {a.rotation: 1.0},
+                    beta=self.cover_move_beta,
+                    gamma=self.cover_look_gamma,
+                )
+            else:
+                w = max(0.0, a.weight)
+            weights.append(w)
+
         if force_stuck:
             # Boost escape translations further while stuck/escaping.
             weights = [
