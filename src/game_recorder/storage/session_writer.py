@@ -63,5 +63,6 @@ class SessionMeta:
     final_frame_lag: int = 0
 
     def save(self, path: Path) -> None:
-        with open(path, "w", encoding="utf-8") as f:
+        # Force LF so Windows local size matches ModelScope non-LFS blob size.
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
             json.dump(asdict(self), f, indent=2, ensure_ascii=False)

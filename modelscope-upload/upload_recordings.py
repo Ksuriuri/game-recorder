@@ -272,6 +272,10 @@ def _file_sha256(
     return result
 
 
+def _sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
 def _is_sha256(value: str) -> bool:
     return len(value) == 64 and all(char in "0123456789abcdef" for char in value)
 
@@ -281,6 +285,34 @@ def _short_path_list(paths: list[str], *, limit: int = 3) -> str:
     if len(paths) > limit:
         shown += f" 等 {len(paths)} 个"
     return shown
+
+
+def _matches_remote_after_crlf_normalize(
+    local_file: LocalFile,
+    remote_file: RemoteFile,
+    *,
+    verify_hashes: bool,
+) -> bool:
+    """Return True when local CRLF text matches a remote LF blob.
+
+    Windows writes ``meta.json`` in text mode, so local size includes ``\\r\\n``.
+    ModelScope stores non-LFS blobs with LF, so a raw size/hash compare fails even
+    though the uploaded content is the same document.
+    """
+    # Only small text sidecars are worth reading fully for this fallback.
+    if local_file.size > 1024 * 1024:
+        return False
+    data = local_file.path.read_bytes()
+    if b"\r\n" not in data:
+        return False
+    normalized = data.replace(b"\r\n", b"\n")
+    if len(normalized) != remote_file.size:
+        return False
+    if not verify_hashes:
+        return True
+    if not _is_sha256(remote_file.sha256):
+        return False
+    return _sha256_bytes(normalized) == remote_file.sha256
 
 
 def check_remote_manifest(
@@ -307,12 +339,27 @@ def check_remote_manifest(
             pending.append(relative_path)
             continue
         if local_file.size != remote_file.size:
-            size_mismatches.append(relative_path)
+            if _matches_remote_after_crlf_normalize(
+                local_file,
+                remote_file,
+                verify_hashes=verify_hashes,
+            ):
+                continue
+            size_mismatches.append(
+                f"{relative_path} (本地 {local_file.size} / 远程 {remote_file.size})"
+            )
             continue
         if verify_hashes and not _is_sha256(remote_file.sha256):
             unavailable_hashes.append(relative_path)
             continue
         if verify_hashes and _file_sha256(local_file, hash_cache) != remote_file.sha256:
+            # Same CRLF/LF case can also present as equal sizes rarely; still check normalize.
+            if _matches_remote_after_crlf_normalize(
+                local_file,
+                remote_file,
+                verify_hashes=True,
+            ):
+                continue
             hash_mismatches.append(relative_path)
 
     problems: list[str] = []

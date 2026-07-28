@@ -365,7 +365,7 @@ def _raw_path_for_source(
 
 
 def _save_meta(session_dir: Path, meta: dict[str, Any]) -> None:
-    with open(session_dir / "meta.json", "w", encoding="utf-8") as f:
+    with open(session_dir / "meta.json", "w", encoding="utf-8", newline="\n") as f:
         json.dump(meta, f, indent=2, ensure_ascii=False)
         f.write("\n")
 

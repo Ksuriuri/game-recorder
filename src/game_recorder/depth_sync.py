@@ -115,7 +115,7 @@ def _fallback_frame_times(meta: dict[str, Any]) -> list[FrameCaptureTime]:
 
 
 def _save_meta(session_dir: Path, meta: dict[str, Any]) -> None:
-    with (session_dir / "meta.json").open("w", encoding="utf-8") as output:
+    with (session_dir / "meta.json").open("w", encoding="utf-8", newline="\n") as output:
         json.dump(meta, output, indent=2, ensure_ascii=False)
         output.write("\n")
 
