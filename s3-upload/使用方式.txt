@@ -1,0 +1,47 @@
+S3 录制数据上传包 - 使用说明
+====================================
+
+【解压位置】
+  将本 zip 解压到 game-recorder 文件夹的根目录。
+
+  正确示例（解压后应能看到 s3-upload 文件夹）：
+
+    D:\game-recorder\
+      install.bat
+      run.bat
+      recordings\          <-- 录制好的数据在这里
+      .tools\
+      .venv\
+      s3-upload\           <-- 本压缩包解压出来的文件夹
+        使用方式.txt       <-- 本文件
+        upload.bat         <-- 双击这个上传
+        ...
+
+  错误示例：
+    - 解压到桌面、下载文件夹（旁边没有 recordings 文件夹）
+    - 只解压出 s3-upload 里的文件，没有和 recordings 同级
+
+【运行哪个文件】
+  双击：s3-upload\upload.bat
+
+  作用：
+    1. 首次运行会自动安装上传所需环境（有 wheels\ 则离线，否则联网）
+    2. 读取上一级目录的 recordings\ 里各 session 文件夹
+    3. 自动检查百度网盘 /game-data/：本地同名 session 若已完整则跳过
+       （凭证已内置，无需再配 keys.txt）
+    4. 其余 session 上传到 S3 存储桶 noiz 的 game-data-raw/ 目录
+    5. S3 上同名 session 也会核对文件清单和大小，确认完整才跳过
+       （只读取远程元数据，不会下载远程视频）
+    6. 遇到网络波动会自动重试；远程不完整的 session 会自动补传
+
+【使用前请确认】
+  1. 本电脑已经安装过游戏录制器（根目录运行过 install.bat）
+  2. recordings\ 里已有要上传的 session 文件夹
+  3. 上传需要联网（公网 S3 + 百度接口）
+
+【其他文件说明】
+  upload.bat           一键安装 + 上传（日常使用这个）
+  install.bat          仅安装上传环境，不上传
+  upload_recordings.py 上传脚本（含 S3 默认凭证）
+  baidu_remote.py      百度去重（含内置凭证）
+  wheels\              离线安装包（若有），请勿删除
