@@ -25,7 +25,7 @@ S3 录制数据上传包
     .tools/                  <- 复用录制器的 uv / Python
     s3-upload/
       upload.bat             <- 一键安装 + 上传
-      oss_credentials.zip    <- OSS 密钥包（不进 git，需单独放进本目录）
+      oss_credentials.zip    <- OSS 密钥包（仓库内自带，upload.bat 自动解压）
       install.bat            <- 仅安装上传环境
       upload_recordings.py
       baidu_remote.py
@@ -34,7 +34,7 @@ S3 录制数据上传包
 
 配置
 ----
-  OSS 密钥：把 oss_credentials.zip 放进本目录即可（upload.bat 会自动解压）
+  OSS 密钥：仓库已含 oss_credentials.zip，upload.bat 会自动解压
   百度：修改 baidu_remote.py 顶部 DEFAULT_BAIDU_* 常量
   ModelScope：修改 upload_recordings.py / modelscope_remote.py 顶部常量
   关闭百度检查：python upload_recordings.py --skip-baidu-check
