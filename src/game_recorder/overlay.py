@@ -19,6 +19,8 @@ logger = logging.getLogger(__name__)
 Command = (
     tuple[Literal["recording"], bool]
     | tuple[Literal["stop"]]
+    | tuple[Literal["radius"], float]
+    | tuple[Literal["library_ready"]]
     | tuple[
         Literal["auto_stop_notice"],
         Literal[
@@ -67,6 +69,8 @@ class RecordingStatusOverlay:
         on_quit: Callable[[], None] | None = None,
         ui_settled: threading.Event | None = None,
         expect_auto_stop_notice: bool = False,
+        radius_m: float = 3.0,
+        radius_hint: str = "",
     ) -> None:
         self._idle_hint = idle_hint
         self._recording_hint = recording_hint
@@ -74,6 +78,8 @@ class RecordingStatusOverlay:
         self._on_quit = on_quit
         self._ui_settled = ui_settled
         self._expect_auto_stop_notice = expect_auto_stop_notice
+        self._radius_m = max(0.1, float(radius_m))
+        self._radius_hint = radius_hint
         self._library_total_s: float = 0.0
         self._commands: queue.Queue[Command] = queue.Queue()
         self._thread: threading.Thread | None = None
@@ -89,6 +95,10 @@ class RecordingStatusOverlay:
     def set_recording(self, recording: bool) -> None:
         if self._thread and self._thread.is_alive():
             self._commands.put(("recording", recording))
+
+    def set_radius_m(self, radius_m: float) -> None:
+        if self._thread and self._thread.is_alive():
+            self._commands.put(("radius", max(0.1, float(radius_m))))
 
     def show_auto_stop_notice(
         self,
@@ -140,8 +150,8 @@ class RecordingStatusOverlay:
 
         canvas = tk.Canvas(
             root,
-            width=220,
-            height=94,
+            width=240,
+            height=112,
             bg="#181818",
             highlightthickness=2,
             highlightbackground="#ffffff",
@@ -252,12 +262,24 @@ class RecordingStatusOverlay:
             except Exception as exc:
                 logger.debug("读取库累计时长失败：%s", exc)
 
+        def draw_radius_line(y: int, *, size: int = 9, idle: bool = False) -> None:
+            radius_text = f"活动半径 {self._radius_m:g} m"
+            if idle and self._radius_hint:
+                radius_text = f"{radius_text}  ·  {self._radius_hint}"
+            canvas.create_text(
+                120,
+                y,
+                text=radius_text,
+                fill="#9fd89f",
+                font=("Microsoft YaHei UI", size, "bold"),
+            )
+
         def draw_library_total(y: int, *, size: int = 9) -> None:
             if self._recordings_dir is None:
                 return
             total_s = max(0, int(round(self._library_total_s)))
             canvas.create_text(
-                110,
+                120,
                 y,
                 text=f"累计有效视频时长 {self._format_duration(total_s)}",
                 fill="#a8c8ff",
@@ -268,44 +290,46 @@ class RecordingStatusOverlay:
             canvas.delete("all")
             if recording_started_at is None:
                 canvas.create_text(
-                    110,
-                    20,
+                    120,
+                    16,
                     text="未开始录制",
                     fill="#ffffff",
-                    font=("Microsoft YaHei UI", 14, "bold"),
-                )
-                canvas.create_text(
-                    110,
-                    44,
-                    text=self._idle_hint,
-                    fill="#d8d8d8",
-                    font=("Microsoft YaHei UI", 10, "bold"),
-                )
-                draw_library_total(72)
-            else:
-                elapsed_s = max(0, int(time.monotonic() - recording_started_at))
-                canvas.create_text(
-                    110,
-                    16,
-                    text="正在录制",
-                    fill="#ff5a5a",
                     font=("Microsoft YaHei UI", 13, "bold"),
                 )
                 canvas.create_text(
-                    110,
+                    120,
                     38,
-                    text=f"已录制 {self._format_duration(elapsed_s)}",
-                    fill="#ffffff",
-                    font=("Microsoft YaHei UI", 12, "bold"),
-                )
-                canvas.create_text(
-                    110,
-                    58,
-                    text=self._recording_hint,
+                    text=self._idle_hint,
                     fill="#d8d8d8",
                     font=("Microsoft YaHei UI", 9, "bold"),
                 )
-                draw_library_total(80, size=9)
+                draw_radius_line(60, size=9, idle=True)
+                draw_library_total(86, size=8)
+            else:
+                elapsed_s = max(0, int(time.monotonic() - recording_started_at))
+                canvas.create_text(
+                    120,
+                    14,
+                    text="正在录制",
+                    fill="#ff5a5a",
+                    font=("Microsoft YaHei UI", 12, "bold"),
+                )
+                canvas.create_text(
+                    120,
+                    34,
+                    text=f"已录制 {self._format_duration(elapsed_s)}",
+                    fill="#ffffff",
+                    font=("Microsoft YaHei UI", 11, "bold"),
+                )
+                canvas.create_text(
+                    120,
+                    52,
+                    text=self._recording_hint,
+                    fill="#d8d8d8",
+                    font=("Microsoft YaHei UI", 8, "bold"),
+                )
+                draw_radius_line(72, size=8, idle=False)
+                draw_library_total(94, size=8)
             root.deiconify()
             root.update_idletasks()
             root.attributes("-topmost", True)
@@ -323,6 +347,8 @@ class RecordingStatusOverlay:
                         return
                     if cmd[0] == "recording":
                         apply_recording(cmd[1])
+                    if cmd[0] == "radius":
+                        self._radius_m = float(cmd[1])
                     if cmd[0] == "auto_stop_notice":
                         extra = cmd[3] if len(cmd) > 3 else None
                         show_auto_stop_notice(cmd[1], cmd[2], extra)

@@ -5,6 +5,8 @@ Usage:
     game-recorder --output ./data  # Custom output directory
     game-recorder --quality 18     # Higher quality (lower CQ = larger files)
 
+While idle (not recording):
+    [ / ] / \\        — decrease / increase / reset auto-move radius
 While recording:
     Double-tap Caps Lock — toggle recording on/off
     Ctrl+C               — stop and exit
@@ -33,7 +35,14 @@ from game_recorder.hotkeys import (
     HOTKEY_LABEL,
     HOTKEY_SEQUENCE_LENGTH,
     HOTKEY_SEQUENCE_TIMEOUT_SECONDS,
+    RADIUS_HOTKEY_HINT,
+    RADIUS_MAX_M,
+    RADIUS_MIN_M,
+    RADIUS_STEP_M,
     VK_CAPSLOCK,
+    VK_OEM_4,
+    VK_OEM_5,
+    VK_OEM_6,
 )
 from game_recorder.capture.window_region import restore_window_focus
 from game_recorder.overlay import RecordingStatusOverlay
@@ -69,8 +78,12 @@ class _ChineseLevelFormatter(logging.Formatter):
 def _hotkey_listener(
     toggle_cb: Callable[[], None],
     stop_event: threading.Event,
+    *,
+    is_idle: Callable[[], bool] | None = None,
+    on_radius_delta: Callable[[float], None] | None = None,
+    on_radius_reset: Callable[[], None] | None = None,
 ) -> None:
-    """Listen for double-tap Caps Lock (polling)."""
+    """Listen for double-tap Caps Lock; while idle, also [ ] \\ for radius."""
     user32 = ctypes.windll.user32  # type: ignore[attr-defined]
 
     user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
@@ -80,6 +93,9 @@ def _hotkey_listener(
     seq_count = 0
     seq_started_at = 0.0
     prev_caps = False
+    prev_bracket_l = False
+    prev_bracket_r = False
+    prev_backslash = False
 
     def _fire_once() -> None:
         nonlocal last_toggle_at, seq_count
@@ -110,6 +126,26 @@ def _hotkey_listener(
                     _fire_once()
 
         prev_caps = caps
+
+        idle = True if is_idle is None else bool(is_idle())
+        if idle and (on_radius_delta is not None or on_radius_reset is not None):
+            bracket_l = _key_down(VK_OEM_4)
+            bracket_r = _key_down(VK_OEM_6)
+            backslash = _key_down(VK_OEM_5)
+            if bracket_l and not prev_bracket_l and on_radius_delta is not None:
+                on_radius_delta(-RADIUS_STEP_M)
+            if bracket_r and not prev_bracket_r and on_radius_delta is not None:
+                on_radius_delta(RADIUS_STEP_M)
+            if backslash and not prev_backslash and on_radius_reset is not None:
+                on_radius_reset()
+            prev_bracket_l = bracket_l
+            prev_bracket_r = bracket_r
+            prev_backslash = backslash
+        else:
+            prev_bracket_l = _key_down(VK_OEM_4)
+            prev_bracket_r = _key_down(VK_OEM_6)
+            prev_backslash = _key_down(VK_OEM_5)
+
         time.sleep(0.05)
 
 
@@ -228,6 +264,29 @@ def main() -> None:
         help="禁用赛博朋克 2077 相机位姿、内外参与 Camera Z-depth 同步",
     )
     parser.add_argument(
+        "--no-auto-move",
+        action="store_true",
+        help="禁用自动移动（默认开启：热键开始录制后注入 WASD + 鼠标视角）",
+    )
+    parser.add_argument(
+        "--auto-move-hz",
+        type=float,
+        default=250.0,
+        help="自动移动鼠标注入频率 Hz（默认：250；策略仍约 30Hz，越高视角越丝滑）",
+    )
+    parser.add_argument(
+        "--auto-move-radius",
+        type=float,
+        default=3.0,
+        help="自动移动活动半径（米，默认：3；以首次相机位姿为锚点）",
+    )
+    parser.add_argument(
+        "--auto-move-policy",
+        choices=("balanced", "wander"),
+        default="balanced",
+        help="自动移动策略：balanced=半径内低频 action 均衡（默认）；wander=旧版按住 W 游荡",
+    )
+    parser.add_argument(
         "--list-audio-devices",
         action="store_true",
         help="列出 --audio-device 可用的 DirectShow 设备名，并显示 WASAPI 支持情况后退出",
@@ -310,6 +369,10 @@ def main() -> None:
         rdr2_camera_sync=not bool(args.no_rdr2_camera),
         wukong_camera_sync=not bool(args.no_wukong_camera),
         cp2077_camera_sync=not bool(args.no_cp2077_camera),
+        auto_move=not bool(args.no_auto_move),
+        auto_move_tick_hz=max(1.0, float(args.auto_move_hz)),
+        auto_move_radius_m=max(0.1, float(args.auto_move_radius)),
+        auto_move_policy=str(args.auto_move_policy),
     )
 
     session: Session | None = None
@@ -382,6 +445,8 @@ def main() -> None:
             on_quit=app_stop.set,
             ui_settled=overlay_ui_settled,
             expect_auto_stop_notice=pending_auto_stop is not None,
+            radius_m=float(config.auto_move_radius_m),
+            radius_hint=RADIUS_HOTKEY_HINT if (config.auto_move and not args.no_hotkey) else "",
         )
         overlay.start()
 
@@ -472,10 +537,14 @@ def main() -> None:
                 target = new_session.capture_target
                 if overlay is not None:
                     overlay.set_recording(True)
+                # Restore focus before auto-move so injected WASD reaches the game.
                 if target is not None and (target.hwnd or target.title):
                     restore_window_focus(hwnd=target.hwnd, title=target.title)
+                new_session.begin_auto_move()
                 session = new_session
                 print(f"\n>>> 开始录制  [{session.session_id}]")
+                if config.auto_move:
+                    print("    自动移动已启动（WASD + 鼠标视角）")
                 if args.no_hotkey:
                     print("    按 Ctrl+C 停止并退出。\n")
                 else:
@@ -502,13 +571,31 @@ def main() -> None:
         print(f"  录制 ID: {config.recording_id}")
     if not args.no_hotkey:
         print(f"  热键: {HOTKEY_LABEL}（{HOTKEY_HINT}）切换录制")
+        if config.auto_move:
+            print(
+                f"  半径热键（仅未录制时）: [ -{RADIUS_STEP_M:g}m  ] +{RADIUS_STEP_M:g}m  "
+                f"\\ 重置；当前 {config.auto_move_radius_m:g} m"
+            )
     if not args.no_overlay:
-        print("  悬浮窗: 已启用（右上角状态 + 已录制时长，点「退出」结束）")
+        print("  悬浮窗: 已启用（右上角状态 + 已录制时长 + 活动半径，点「退出」结束）")
     if config.idle_timeout_s > 0:
         print(f"  空闲自动停止: {config.idle_timeout_s:g} 秒未按 WASD")
         print(
             f"  僵滞自动停止: {config.idle_timeout_s:g} 秒 WASD 状态不变且无鼠标移动"
         )
+    if config.auto_move:
+        when = (
+            "启动后立即开始录制并启动"
+            if args.no_hotkey
+            else f"热键 {HOTKEY_LABEL} 开始录制后再启动"
+        )
+        print(
+            f"  自动移动: 已启用（{config.auto_move_tick_hz:g} Hz，"
+            f"policy={config.auto_move_policy}，半径 {config.auto_move_radius_m:g} m，"
+            f"WASD + 鼠标视角；{when}；空闲/僵滞/剧烈检测已关闭）"
+        )
+    else:
+        print("  自动移动: 已禁用（--no-auto-move）")
     if config.min_recording_duration_s > 0:
         print(
             f"  最短有效录制: {config.min_recording_duration_s:g} 秒"
@@ -543,9 +630,47 @@ def main() -> None:
     # Hotkey listener thread
     hotkey_thread: threading.Thread | None = None
     if not args.no_hotkey:
+        radius_default_m = float(config.auto_move_radius_m)
+
+        def _is_idle() -> bool:
+            with session_lock:
+                return session is None
+
+        def _adjust_radius(delta: float) -> None:
+            if not config.auto_move:
+                return
+            new_r = min(
+                RADIUS_MAX_M,
+                max(RADIUS_MIN_M, float(config.auto_move_radius_m) + float(delta)),
+            )
+            # Snap to step grid for stable display (e.g. 3 / 3.5 / 4).
+            steps = round(new_r / RADIUS_STEP_M)
+            new_r = min(RADIUS_MAX_M, max(RADIUS_MIN_M, steps * RADIUS_STEP_M))
+            if abs(new_r - float(config.auto_move_radius_m)) < 1e-9:
+                return
+            config.auto_move_radius_m = new_r
+            if overlay is not None:
+                overlay.set_radius_m(new_r)
+            logger.info("活动半径已设为 %.3g m", new_r)
+
+        def _reset_radius() -> None:
+            if not config.auto_move:
+                return
+            if abs(float(config.auto_move_radius_m) - radius_default_m) < 1e-9:
+                return
+            config.auto_move_radius_m = radius_default_m
+            if overlay is not None:
+                overlay.set_radius_m(radius_default_m)
+            logger.info("活动半径已重置为 %.3g m", radius_default_m)
+
         hotkey_thread = threading.Thread(
             target=_hotkey_listener,
             args=(_toggle, app_stop),
+            kwargs={
+                "is_idle": _is_idle,
+                "on_radius_delta": _adjust_radius if config.auto_move else None,
+                "on_radius_reset": _reset_radius if config.auto_move else None,
+            },
             name="hotkey",
             daemon=True,
         )

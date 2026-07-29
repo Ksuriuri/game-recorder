@@ -73,9 +73,33 @@ class Config:
     wukong_camera_sync: bool = True
     cp2077_camera_sync: bool = True
 
+    # OS-level WASD + mouse wander (hybrid: SendInput drive + camera pose feedback).
+    # On by default; disable with ``--no-auto-move``.
+    auto_move: bool = True
+    auto_move_tick_hz: float = 250.0
+    auto_move_stuck_speed_mps: float = 0.15
+    auto_move_stuck_s: float = 1.5
+    auto_move_turn_deg_s: float = 55.0
+    # ``balanced`` = inverse-freq 81-bin actions inside a radius; ``wander`` = legacy W-hold.
+    auto_move_policy: str = "balanced"
+    auto_move_radius_m: float = 3.0
+    auto_move_freq_alpha: float = 1.0
+    auto_move_action_hold_min_s: float = 0.35
+    auto_move_action_hold_max_s: float = 1.0
+    auto_move_look_yaw_deg_s: float = 45.0
+    auto_move_look_pitch_deg_s: float = 18.0
+    # Coverage × inverse-freq fusion gains (see BalancedRadiusPolicy).
+    auto_move_cover_move_beta: float = 1.5
+    auto_move_cover_look_gamma: float = 1.5
+
     def __post_init__(self) -> None:
         self.output_dir = Path(self.output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        if self.auto_move:
+            # Constant WASD hold would trip idle/stuck; smooth scripted look can
+            # still look "violent" to the shake detector — disable both in auto mode.
+            self.idle_timeout_s = 0.0
+            self.violent_duration_s = 0.0
 
 
 def find_ffmpeg() -> str:

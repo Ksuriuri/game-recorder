@@ -83,6 +83,7 @@ def test_video_encoder_args_cover_all_backends(tmp_path) -> None:
         video_quality=23,
         video_preset="p4",
         x264_threads=2,
+        auto_move=False,
     )
     assert _video_encoder_args("h264_nvenc", cfg)[:2] == ["-c:v", "h264_nvenc"]
     assert "-cq" in _video_encoder_args("h264_nvenc", cfg)
