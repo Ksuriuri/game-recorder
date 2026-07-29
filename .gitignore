@@ -40,8 +40,7 @@ modelscope-sample/wheels/
 modelscope-sample/data/
 modelscope-sample-portable-*.zip
 
-# S3/OSS upload secrets (distributed via s3-upload-secrets.zip + update.bat)
+# S3/OSS upload secrets (oss_credentials.zip in s3-upload/; upload.bat extracts it)
 s3-upload/oss_credentials.json
 s3-upload/.venv/
-s3-upload-secrets.zip
 s3-upload-portable-*.zip
