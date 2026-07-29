@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import sys
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from time import sleep
@@ -258,6 +260,75 @@ def format_mib(size_bytes: int) -> str:
     return f"{size_bytes / (1024 * 1024):.2f}MB"
 
 
+def format_speed(bytes_per_sec: float) -> str:
+    return f"{bytes_per_sec / (1024 * 1024):.2f} MB/s"
+
+
+def format_duration(seconds: float) -> str:
+    if seconds != seconds or seconds < 0 or seconds == float("inf"):  # NaN / invalid
+        return "--"
+    total = int(round(seconds))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours > 0:
+        return f"{hours}h{minutes:02d}m{secs:02d}s"
+    if minutes > 0:
+        return f"{minutes}m{secs:02d}s"
+    return f"{secs}s"
+
+
+class TransferProgress:
+    """boto3 upload Callback: live speed (MB/s) and ETA on one console line."""
+
+    def __init__(self, total_bytes: int) -> None:
+        self.total_bytes = max(0, int(total_bytes))
+        self.uploaded = 0
+        self._lock = threading.Lock()
+        self._started = time.perf_counter()
+        self._last_print = 0.0
+        self._current_name = ""
+
+    def begin_file(self, name: str) -> None:
+        with self._lock:
+            self._current_name = name
+            self._render(force=True)
+
+    def __call__(self, bytes_amount: int) -> None:
+        with self._lock:
+            self.uploaded += int(bytes_amount)
+            now = time.perf_counter()
+            if now - self._last_print >= 0.25 or self.uploaded >= self.total_bytes:
+                self._render(force=True)
+                self._last_print = now
+
+    def finish_file(self) -> None:
+        with self._lock:
+            self._render(force=True, newline=True)
+
+    def summary_line(self) -> str:
+        elapsed = max(time.perf_counter() - self._started, 1e-6)
+        speed = self.uploaded / elapsed
+        return (
+            f"{format_mib(self.uploaded)} 用时 {format_duration(elapsed)}  "
+            f"平均 {format_speed(speed)}"
+        )
+
+    def _render(self, *, force: bool = False, newline: bool = False) -> None:
+        del force  # always called under lock when needed
+        elapsed = max(time.perf_counter() - self._started, 1e-6)
+        speed = self.uploaded / elapsed
+        remaining = max(self.total_bytes - self.uploaded, 0)
+        eta = remaining / speed if speed > 0 else float("inf")
+        pct = (100.0 * self.uploaded / self.total_bytes) if self.total_bytes else 100.0
+        name = self._current_name or "..."
+        line = (
+            f"    {name}  {format_mib(self.uploaded)}/{format_mib(self.total_bytes)} "
+            f"({pct:5.1f}%)  {format_speed(speed)}  预计剩余 {format_duration(eta)}"
+        )
+        end = "\n" if newline else "\r"
+        print(f"\r{line:<140}", end=end, flush=True)
+
+
 def try_load_baidu_access_token(
     *,
     pack_root: Path,
@@ -348,14 +419,31 @@ def upload_session_files(
     bucket: str,
     prefix: str,
     folder: Path,
-) -> None:
+    progress: TransferProgress | None = None,
+) -> TransferProgress:
     session_root = remote_session_prefix(folder.name, prefix=prefix)
     local_files = local_session_manifest(folder)
-    total = len(local_files)
+    total_files = len(local_files)
+    total_bytes = sum(item.size for item in local_files.values())
+    tracker = progress or TransferProgress(total_bytes)
+    print(
+        f"    共 {total_files} 个文件，合计 {format_mib(total_bytes)}",
+        flush=True,
+    )
     for index, (relative, local_file) in enumerate(local_files.items(), start=1):
         key = f"{session_root}/{relative}"
-        print(f"    ({index}/{total}) {relative}", flush=True)
-        client.upload_file(str(local_file.path), bucket, key)
+        label = f"({index}/{total_files}) {relative}"
+        tracker.begin_file(label)
+        try:
+            client.upload_file(
+                str(local_file.path),
+                bucket,
+                key,
+                Callback=tracker,
+            )
+        finally:
+            tracker.finish_file()
+    return tracker
 
 
 def upload_session_with_retries(
@@ -369,7 +457,6 @@ def upload_session_with_retries(
     verify_size: bool,
 ) -> tuple[bool, str]:
     name = folder.name
-    remote_path = remote_session_prefix(name, prefix=prefix)
     last_detail = "未知错误"
 
     for attempt in range(1, max_attempts + 1):
@@ -377,9 +464,13 @@ def upload_session_with_retries(
         if attempt > 1:
             print(f"  开始第 {attempt}/{max_attempts} 次 session 上传尝试...", flush=True)
         try:
-            upload_session_files(client, bucket=bucket, prefix=prefix, folder=folder)
+            tracker = upload_session_files(
+                client, bucket=bucket, prefix=prefix, folder=folder
+            )
+            print(f"  本 session 上传完成：{tracker.summary_line()}", flush=True)
         except Exception as exc:
             upload_error = exc
+            print(file=sys.stderr)  # end progress line if interrupted
 
         try:
             remote_files = call_with_retries(
@@ -671,11 +762,32 @@ def main() -> None:
         print("待传:", ", ".join(d.name for d in to_upload))
         return
 
+    batch_bytes = 0
+    for folder in to_upload:
+        batch_bytes += sum(item.size for item in local_session_manifest(folder).values())
+    print(
+        f"开始上传：{len(to_upload)} 个 session，合计 {format_mib(batch_bytes)}",
+        flush=True,
+    )
+
     failed: list[str] = []
+    batch_uploaded = 0
+    batch_started = time.perf_counter()
     for i, folder in enumerate(to_upload, start=1):
         name = folder.name
         remote_path = remote_session_prefix(name, prefix=prefix)
-        print(f"[{i}/{len(to_upload)}] {remote_path}")
+        session_bytes = sum(item.size for item in local_session_manifest(folder).values())
+        remaining_bytes = max(batch_bytes - batch_uploaded, 0)
+        elapsed = max(time.perf_counter() - batch_started, 1e-6)
+        avg_speed = batch_uploaded / elapsed if batch_uploaded else 0.0
+        batch_eta = remaining_bytes / avg_speed if avg_speed > 0 else float("inf")
+        print(
+            f"[{i}/{len(to_upload)}] {remote_path}  "
+            f"({format_mib(session_bytes)})  "
+            f"总剩余 {format_mib(remaining_bytes)}  "
+            f"预计总剩余 {format_duration(batch_eta)}",
+            flush=True,
+        )
         try:
             success, detail = upload_session_with_retries(
                 client,
@@ -689,6 +801,8 @@ def main() -> None:
             if not success:
                 print(f"  最终失败: {detail}", file=sys.stderr)
                 failed.append(name)
+            else:
+                batch_uploaded += session_bytes
         except PermissionError as exc:
             print(f"  失败: {exc}", file=sys.stderr)
             failed.append(name)
@@ -696,10 +810,16 @@ def main() -> None:
             print(f"  失败: {exc}", file=sys.stderr)
             failed.append(name)
 
+    batch_elapsed = max(time.perf_counter() - batch_started, 1e-6)
     if failed:
         print(f"完成，{len(failed)} 个失败: {', '.join(failed)}", file=sys.stderr)
         sys.exit(1)
-    print(f"完成，已上传 {len(to_upload)} 个文件夹。")
+    print(
+        f"完成，已上传 {len(to_upload)} 个文件夹，"
+        f"合计 {format_mib(batch_uploaded)}，"
+        f"用时 {format_duration(batch_elapsed)}，"
+        f"平均 {format_speed(batch_uploaded / batch_elapsed)}。"
+    )
 
 
 if __name__ == "__main__":
