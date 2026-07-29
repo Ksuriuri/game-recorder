@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import threading
 import time
@@ -13,14 +14,16 @@ from time import sleep
 from typing import Callable, TypeVar
 
 # ---------------------------------------------------------------------------
-# Defaults for one-click distribution to recording operators.
+# Non-secret defaults. Access keys come from s3-upload/oss_credentials.json
+# (extracted by update.bat from s3-upload-secrets.zip — not committed to git).
 # ---------------------------------------------------------------------------
-S3_ENDPOINT = "http://117.145.189.131:3535"
-S3_BUCKET = "noiz"
-S3_PREFIX = "game-data-raw"
-S3_ACCESS_KEY = "1WR2PL6P0CHO0US11ICG"
-S3_SECRET_KEY = "0Kkz1aPFmDViKOAufYheWoM7GTHnx4pDkQ0oJTlL"
-S3_REGION = "us-east-1"
+S3_ENDPOINT = "https://oss-cn-shenzhen.aliyuncs.com"
+S3_BUCKET = "aws-kelei"
+S3_PREFIX = "game-raw-data"
+S3_ACCESS_KEY = ""
+S3_SECRET_KEY = ""
+S3_REGION = "cn-shenzhen"
+OSS_CREDENTIALS_FILE = "oss_credentials.json"
 
 DEFAULT_SKIP_DIRS = frozenset({"overlay"})
 DEFAULT_MIN_VIDEO_MB = 10
@@ -29,6 +32,9 @@ DEFAULT_RETRY_DELAY_SECONDS = 5.0
 UPLOAD_INTERNAL_FILES = frozenset({".ms_upload_cache", ".ms_upload_progress", ".s3_upload_cache"})
 UPLOAD_IGNORED_DIRS = frozenset({".git", ".cache"})
 BAIDU_GAME_DATA_DIR = "/game-data"
+MODELSCOPE_REPO_ID = "kusriri/world-game-data"
+MODELSCOPE_DATASET_DIR = "recordings"
+MODELSCOPE_TOKEN = "ms-54fac99a-5958-42d4-879d-b9445227cb51"
 
 T = TypeVar("T")
 
@@ -56,6 +62,53 @@ def _pack_root() -> Path:
 
 def _game_recorder_root() -> Path:
     return _pack_root().parent
+
+
+def load_oss_credentials(cred_path: Path | None = None) -> dict[str, str]:
+    """Load OSS settings from oss_credentials.json (written by update.bat)."""
+    path = cred_path or (_pack_root() / OSS_CREDENTIALS_FILE)
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"无法读取 {path.name}：{exc}") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError(f"{path.name} 格式错误：根节点必须是 JSON 对象")
+    out: dict[str, str] = {}
+    for key in (
+        "endpoint",
+        "bucket",
+        "prefix",
+        "access_key",
+        "secret_key",
+        "region",
+    ):
+        value = data.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            out[key] = text
+    return out
+
+
+def apply_oss_credentials_defaults() -> None:
+    """Fill empty module-level OSS defaults from oss_credentials.json if present."""
+    global S3_ENDPOINT, S3_BUCKET, S3_PREFIX, S3_ACCESS_KEY, S3_SECRET_KEY, S3_REGION
+    try:
+        data = load_oss_credentials()
+    except RuntimeError:
+        return
+    S3_ENDPOINT = data.get("endpoint", S3_ENDPOINT)
+    S3_BUCKET = data.get("bucket", S3_BUCKET)
+    S3_PREFIX = data.get("prefix", S3_PREFIX)
+    S3_ACCESS_KEY = data.get("access_key", S3_ACCESS_KEY)
+    S3_SECRET_KEY = data.get("secret_key", S3_SECRET_KEY)
+    S3_REGION = data.get("region", S3_REGION)
+
+
+apply_oss_credentials_defaults()
 
 
 def iter_session_dirs(recordings: Path, *, skip_dirs: set[str]) -> list[Path]:
@@ -111,13 +164,20 @@ def make_s3_client(
     import boto3
     from botocore.client import Config
 
+    # Aliyun OSS needs virtual-hosted URLs and does not support newer AWS
+    # default checksum / streaming trailer encodings used by recent botocore.
     return boto3.client(
         "s3",
         endpoint_url=endpoint,
         aws_access_key_id=access_key,
         aws_secret_access_key=secret_key,
         region_name=region,
-        config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
+        config=Config(
+            signature_version="s3v4",
+            s3={"addressing_style": "virtual"},
+            request_checksum_calculation="when_required",
+            response_checksum_validation="when_required",
+        ),
     )
 
 
@@ -403,10 +463,139 @@ def filter_complete_on_baidu(
             check = ManifestCheck(False, f"无法校验百度清单: {exc}")
 
         if check.complete:
-            print(f"    百度已完整，跳过上传 S3：{check.detail}", flush=True)
+            print(f"    百度已完整，跳过上传 OSS：{check.detail}", flush=True)
             skipped.append(folder)
         else:
-            print(f"    百度不完整，继续走 S3：{check.detail}", flush=True)
+            print(f"    百度不完整，继续走 OSS：{check.detail}", flush=True)
+            incomplete.append((folder, check.detail))
+            remaining.append(folder)
+
+    return remaining, skipped, incomplete
+
+
+def check_modelscope_manifest(
+    local: dict[str, LocalFile],
+    remote: dict[str, object],
+    *,
+    verify_size: bool,
+) -> ManifestCheck:
+    """Compare local session files to ModelScope metadata (names/sizes + CRLF)."""
+    from modelscope_remote import RemoteFile, matches_after_crlf_normalize
+
+    if not local:
+        return ManifestCheck(False, "本地文件夹为空")
+
+    missing = sorted(set(local) - set(remote))
+    pending: list[str] = []
+    size_mismatches: list[str] = []
+
+    for relative_path, local_file in local.items():
+        remote_file = remote.get(relative_path)
+        if remote_file is None:
+            continue
+        assert isinstance(remote_file, RemoteFile)
+        if remote_file.in_check:
+            pending.append(relative_path)
+            continue
+        if not verify_size:
+            continue
+        if local_file.size == remote_file.size:
+            continue
+        if matches_after_crlf_normalize(
+            local_file.path, local_file.size, remote_file.size
+        ):
+            continue
+        size_mismatches.append(
+            f"{relative_path} (本地 {local_file.size} / 远程 {remote_file.size})"
+        )
+
+    problems: list[str] = []
+    if missing:
+        problems.append(f"缺少文件: {_short_path_list(missing)}")
+    if pending:
+        problems.append(f"服务器仍在校验: {_short_path_list(sorted(pending))}")
+    if size_mismatches:
+        problems.append(f"大小不一致: {_short_path_list(sorted(size_mismatches))}")
+    if problems:
+        return ManifestCheck(False, "；".join(problems))
+
+    size_note = "、大小" if verify_size else ""
+    return ManifestCheck(True, f"{len(local)} 个文件的名称{size_note}一致")
+
+
+def filter_complete_on_modelscope(
+    folders: list[Path],
+    *,
+    api,
+    repo_id: str,
+    token: str,
+    dataset_dir: str,
+    verify_size: bool,
+    max_attempts: int,
+    retry_delay: float,
+) -> tuple[list[Path], list[Path], list[tuple[Path, str]]]:
+    """Split folders into (remaining, skipped_complete, incomplete_on_modelscope)."""
+    from modelscope_remote import list_session_files, list_session_folders
+
+    ms_folders = call_with_retries(
+        lambda: list_session_folders(
+            api, repo_id, token, dataset_dir=dataset_dir
+        ),
+        description="读取 ModelScope session 列表",
+        max_attempts=max_attempts,
+        retry_delay=retry_delay,
+    )
+
+    remaining: list[Path] = []
+    skipped: list[Path] = []
+    incomplete: list[tuple[Path, str]] = []
+    existing = [folder for folder in folders if folder.name in ms_folders]
+
+    if existing:
+        checks = "文件名和大小" if verify_size else "文件名"
+        print(
+            f"正在校验 {len(existing)} 个 ModelScope 同名 session 的{checks}"
+            "（只读取元数据，不下载远程视频）...",
+            flush=True,
+        )
+
+    existing_index = 0
+    for folder in folders:
+        if folder.name not in ms_folders:
+            remaining.append(folder)
+            continue
+
+        existing_index += 1
+        print(
+            f"  [ModelScope {existing_index}/{len(existing)}] {folder.name}",
+            flush=True,
+        )
+        try:
+            remote_files = call_with_retries(
+                lambda folder=folder: list_session_files(
+                    api,
+                    repo_id,
+                    token,
+                    folder.name,
+                    dataset_dir=dataset_dir,
+                ),
+                description=f"读取 ModelScope 清单 {folder.name}",
+                max_attempts=max_attempts,
+                retry_delay=retry_delay,
+            )
+            check = check_modelscope_manifest(
+                local_session_manifest(folder),
+                remote_files,
+                verify_size=verify_size,
+            )
+        except Exception as exc:
+            check = ManifestCheck(False, f"无法校验 ModelScope 清单: {exc}")
+
+        if check.complete:
+            print(f"    ModelScope 已完整，跳过上传 OSS：{check.detail}", flush=True)
+            skipped.append(folder)
+        else:
+            print(f"    ModelScope 不完整，继续走 OSS：{check.detail}", flush=True)
             incomplete.append((folder, check.detail))
             remaining.append(folder)
 
@@ -581,8 +770,38 @@ def main() -> None:
         "(default: bundled credentials in the script; refreshed token "
         "is written to s3-upload/)",
     )
+    ap.add_argument(
+        "--skip-modelscope-check",
+        action="store_true",
+        help="do not skip sessions that are already complete on ModelScope",
+    )
+    ap.add_argument(
+        "--modelscope-repo-id",
+        default=MODELSCOPE_REPO_ID,
+        help=f"ModelScope dataset repo (default: {MODELSCOPE_REPO_ID})",
+    )
+    ap.add_argument(
+        "--modelscope-dataset-dir",
+        default=MODELSCOPE_DATASET_DIR,
+        help=f"remote subdirectory in the ModelScope dataset (default: {MODELSCOPE_DATASET_DIR})",
+    )
+    ap.add_argument(
+        "--modelscope-token",
+        default=MODELSCOPE_TOKEN,
+        help="ModelScope access token (default: bundled token)",
+    )
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
+
+    if not args.access_key or not args.secret_key:
+        cred_file = _pack_root() / OSS_CREDENTIALS_FILE
+        print(
+            "错误：缺少 OSS AccessKey。\n"
+            f"请先在项目根目录运行 update.bat（解压密钥包），"
+            f"或手动放置 {cred_file}。",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     recordings = args.recordings.resolve()
     if not recordings.is_dir():
@@ -648,6 +867,8 @@ def main() -> None:
     verify_size = not args.no_verify_size
     skipped_baidu: list[Path] = []
     incomplete_baidu: list[tuple[Path, str]] = []
+    skipped_modelscope: list[Path] = []
+    incomplete_modelscope: list[tuple[Path, str]] = []
     candidates = eligible_dirs
 
     if args.skip_baidu_check:
@@ -667,7 +888,7 @@ def main() -> None:
         baidu_dir = args.baidu_dir if args.baidu_dir.startswith("/") else f"/{args.baidu_dir}"
         try:
             candidates, skipped_baidu, incomplete_baidu = filter_complete_on_baidu(
-                eligible_dirs,
+                candidates,
                 access_token=access_token,
                 game_data_dir=baidu_dir,
                 verify_size=verify_size,
@@ -678,6 +899,46 @@ def main() -> None:
             print(f"错误：百度完整性检查失败：{exc}", file=sys.stderr)
             sys.exit(1)
 
+    if args.skip_modelscope_check:
+        print("已跳过 ModelScope 完整性检查（--skip-modelscope-check）。", flush=True)
+    else:
+        try:
+            from modelscope.hub.api import HubApi  # noqa: F401
+            from modelscope_remote import make_api
+        except ImportError:
+            print(
+                "错误：未安装 modelscope，请重新运行 s3-upload\\install.bat。",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        try:
+            ms_api = make_api(args.modelscope_token)
+        except Exception as exc:
+            print(f"错误：登录 ModelScope 失败：{exc}", file=sys.stderr)
+            sys.exit(1)
+
+        print(
+            f"已启用 ModelScope 完整性检查（{args.modelscope_repo_id}/"
+            f"{args.modelscope_dataset_dir.strip('/')}）",
+            flush=True,
+        )
+        try:
+            candidates, skipped_modelscope, incomplete_modelscope = (
+                filter_complete_on_modelscope(
+                    candidates,
+                    api=ms_api,
+                    repo_id=args.modelscope_repo_id,
+                    token=args.modelscope_token,
+                    dataset_dir=args.modelscope_dataset_dir,
+                    verify_size=verify_size,
+                    max_attempts=args.max_attempts,
+                    retry_delay=args.retry_delay,
+                )
+            )
+        except Exception as exc:
+            print(f"错误：ModelScope 完整性检查失败：{exc}", file=sys.stderr)
+            sys.exit(1)
+
     skipped_remote: list[Path] = []
     to_upload: list[Path] = []
     incomplete_remote: list[tuple[Path, str]] = []
@@ -686,7 +947,7 @@ def main() -> None:
     if existing_dirs:
         checks = "文件名和大小" if verify_size else "文件名"
         print(
-            f"正在校验 {len(existing_dirs)} 个 S3 同名 session 的{checks}"
+            f"正在校验 {len(existing_dirs)} 个 OSS 同名 session 的{checks}"
             "（只读取元数据，不下载远程视频）...",
             flush=True,
         )
@@ -698,13 +959,13 @@ def main() -> None:
             continue
 
         existing_index += 1
-        print(f"  [S3 {existing_index}/{len(existing_dirs)}] {folder.name}", flush=True)
+        print(f"  [OSS {existing_index}/{len(existing_dirs)}] {folder.name}", flush=True)
         try:
             remote_files = call_with_retries(
                 lambda folder=folder: list_remote_session_files(
                     client, args.bucket, folder.name, prefix=prefix
                 ),
-                description=f"读取 S3 清单 {folder.name}",
+                description=f"读取 OSS 清单 {folder.name}",
                 max_attempts=args.max_attempts,
                 retry_delay=args.retry_delay,
             )
@@ -720,10 +981,10 @@ def main() -> None:
             check = ManifestCheck(False, f"无法校验远程清单: {exc}")
 
         if check.complete:
-            print(f"    S3 已完整，跳过：{check.detail}", flush=True)
+            print(f"    OSS 已完整，跳过：{check.detail}", flush=True)
             skipped_remote.append(folder)
         else:
-            print(f"    S3 不完整，将重新上传：{check.detail}", flush=True)
+            print(f"    OSS 不完整，将重新上传：{check.detail}", flush=True)
             incomplete_remote.append((folder, check.detail))
             to_upload.append(folder)
 
@@ -732,19 +993,28 @@ def main() -> None:
         f"{dest}  "
         f"上传 {len(to_upload)}  "
         f"跳过百度完整 {len(skipped_baidu)}  "
-        f"跳过 S3 完整 {len(skipped_remote)}  "
+        f"跳过 ModelScope 完整 {len(skipped_modelscope)}  "
+        f"跳过 OSS 完整 {len(skipped_remote)}  "
         f"跳过过小 {len(too_small)}"
     )
     if skipped_baidu:
         print("跳过(百度已完整):", ", ".join(d.name for d in skipped_baidu))
     if incomplete_baidu:
         for folder, detail in incomplete_baidu:
-            print(f"百度不完整(继续 S3): {folder.name} - {detail}")
+            print(f"百度不完整(继续 OSS): {folder.name} - {detail}")
+    if skipped_modelscope:
+        print(
+            "跳过(ModelScope 已完整):",
+            ", ".join(d.name for d in skipped_modelscope),
+        )
+    if incomplete_modelscope:
+        for folder, detail in incomplete_modelscope:
+            print(f"ModelScope 不完整(继续 OSS): {folder.name} - {detail}")
     if skipped_remote:
-        print("跳过(S3 已完整):", ", ".join(d.name for d in skipped_remote))
+        print("跳过(OSS 已完整):", ", ".join(d.name for d in skipped_remote))
     if incomplete_remote:
         for folder, detail in incomplete_remote:
-            print(f"重传(S3 不完整): {folder.name} - {detail}")
+            print(f"重传(OSS 不完整): {folder.name} - {detail}")
     if too_small:
         threshold = format_mib(min_video_bytes)
         for folder, mp4_bytes in too_small:

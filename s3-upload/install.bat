@@ -18,7 +18,7 @@ set "REQUIREMENTS=%PACK_DIR%\requirements.txt"
 
 REM Offline only when the wheel set looks complete.
 set "OFFLINE_MODE=0"
-if exist "%WHEELS_DIR%\boto3-*.whl" if exist "%WHEELS_DIR%\botocore-*.whl" if exist "%WHEELS_DIR%\s3transfer-*.whl" if exist "%UV_EXE%" (
+if exist "%WHEELS_DIR%\boto3-*.whl" if exist "%WHEELS_DIR%\botocore-*.whl" if exist "%WHEELS_DIR%\s3transfer-*.whl" if exist "%WHEELS_DIR%\modelscope-*.whl" if exist "%UV_EXE%" (
     set "OFFLINE_MODE=1"
 )
 if "%OFFLINE_MODE%"=="1" (
@@ -29,7 +29,7 @@ if "%OFFLINE_MODE%"=="1" (
     set "UV_PYTHON_DOWNLOADS="
     if exist "%WHEELS_DIR%\boto3-*.whl" (
         if not defined S3_UPLOAD_QUIET (
-            echo WARNING: s3-upload\wheels is incomplete ^(need botocore + s3transfer^).
+            echo WARNING: s3-upload\wheels is incomplete ^(need botocore + s3transfer + modelscope^).
             echo Falling back to online install.
         )
     )
