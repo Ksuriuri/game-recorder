@@ -6,3 +6,9 @@ python-dateutil==2.9.0.post0
 s3transfer==0.13.0
 six==1.17.0
 urllib3==2.5.0
+# ModelScope skip-if-complete check (same pins as modelscope-upload).
+# colorama: Windows-only transitive dep of tqdm; pin explicitly so offline wheels/
+# always include it (missing colorama makes uv report unsatisfiable on win32).
+modelscope==1.38.0
+modelscope-hub==0.1.6
+colorama==0.4.6

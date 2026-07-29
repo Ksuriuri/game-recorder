@@ -22,26 +22,34 @@ S3 录制数据上传包 - 使用说明
     - 只解压出 s3-upload 里的文件，没有和 recordings 同级
 
 【运行哪个文件】
-  双击：s3-upload\upload.bat
+  首次 / 换密钥后：先把 s3-upload-secrets.zip 放到项目根目录，双击 update.bat
+  日常上传：双击 s3-upload\upload.bat
 
   作用：
     1. 首次运行会自动安装上传所需环境（有 wheels\ 则离线，否则联网）
     2. 读取上一级目录的 recordings\ 里各 session 文件夹
     3. 自动检查百度网盘 /game-data/：本地同名 session 若已完整则跳过
        （凭证已内置，无需再配 keys.txt）
-    4. 其余 session 上传到 S3 存储桶 noiz 的 game-data-raw/ 目录
-    5. S3 上同名 session 也会核对文件清单和大小，确认完整才跳过
+    4. 自动检查 ModelScope 数据集 recordings/：同名 session 完整则跳过
+       （凭证已内置）
+    5. 其余 session 上传到阿里云 OSS 存储桶 aws-kelei 的 game-raw-data/ 目录
+       （OSS AccessKey 来自 update.bat 解压出的 oss_credentials.json）
+    6. OSS 上同名 session 也会核对文件清单和大小，确认完整才跳过
        （只读取远程元数据，不会下载远程视频）
-    6. 遇到网络波动会自动重试；远程不完整的 session 会自动补传
+    7. 遇到网络波动会自动重试；远程不完整的 session 会自动补传
 
 【使用前请确认】
   1. 本电脑已经安装过游戏录制器（根目录运行过 install.bat）
-  2. recordings\ 里已有要上传的 session 文件夹
-  3. 上传需要联网（公网 S3 + 百度接口）
+  2. 已运行过根目录 update.bat（存在 s3-upload\oss_credentials.json）
+  3. recordings\ 里已有要上传的 session 文件夹
+  4. 上传需要联网（阿里云 OSS + 百度接口 + ModelScope）
 
 【其他文件说明】
+  update.bat（项目根） 解压 s3-upload-secrets.zip 写入 OSS 密钥
   upload.bat           一键安装 + 上传（日常使用这个）
   install.bat          仅安装上传环境，不上传
-  upload_recordings.py 上传脚本（含 S3 默认凭证）
+  upload_recordings.py 上传脚本
+  oss_credentials.json OSS 密钥（不进 git，由 update.bat 生成）
   baidu_remote.py      百度去重（含内置凭证）
+  modelscope_remote.py ModelScope 去重（含内置凭证）
   wheels\              离线安装包（若有），请勿删除
