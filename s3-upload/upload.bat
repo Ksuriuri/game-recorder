@@ -35,7 +35,7 @@ if exist "%CRED_ZIP%" (
 
 if not exist "%CRED_JSON%" (
     echo ERROR: missing OSS credentials.
-    echo Put oss_credentials.zip in this folder, then run upload.bat again.
+    echo Expected oss_credentials.zip next to upload.bat.
     goto :fail
 )
 
