@@ -14,8 +14,8 @@ from time import sleep
 from typing import Callable, TypeVar
 
 # ---------------------------------------------------------------------------
-# Non-secret defaults. Access keys come from s3-upload/oss_credentials.json
-# (extracted by update.bat from s3-upload-secrets.zip — not committed to git).
+# Non-secret defaults. Access keys come from oss_credentials.json
+# (auto-extracted by upload.bat from oss_credentials.zip in this folder).
 # ---------------------------------------------------------------------------
 S3_ENDPOINT = "https://oss-cn-shenzhen.aliyuncs.com"
 S3_BUCKET = "aws-kelei"
@@ -797,8 +797,8 @@ def main() -> None:
         cred_file = _pack_root() / OSS_CREDENTIALS_FILE
         print(
             "错误：缺少 OSS AccessKey。\n"
-            f"请先在项目根目录运行 update.bat（解压密钥包），"
-            f"或手动放置 {cred_file}。",
+            f"请将 oss_credentials.zip 放进本目录后重新运行 upload.bat\n"
+            f"（或手动放置 {cred_file}）。",
             file=sys.stderr,
         )
         sys.exit(1)
