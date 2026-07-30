@@ -1,5 +1,5 @@
 .venv/
 *.zip
-!oss_credentials.zip
 keys.txt
 token.json
+oss_credentials.json

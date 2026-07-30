@@ -10,7 +10,6 @@ for %%I in ("%PACK_DIR%\..") do set "GAME_ROOT=%%~fI"
 set "RECORDINGS=%GAME_ROOT%\recordings"
 set "PYTHON_EXE=%PACK_DIR%\.venv\Scripts\python.exe"
 set "UPLOAD_SCRIPT=%PACK_DIR%\upload_recordings.py"
-set "CRED_ZIP=%PACK_DIR%\oss_credentials.zip"
 set "CRED_JSON=%PACK_DIR%\oss_credentials.json"
 
 if not exist "%RECORDINGS%\" (
@@ -23,19 +22,10 @@ if not exist "%UPLOAD_SCRIPT%" (
     goto :fail
 )
 
-REM Extract OSS keys from zip next to this script (zip is not committed to git).
-if exist "%CRED_ZIP%" (
-    powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-      "Expand-Archive -LiteralPath '%CRED_ZIP%' -DestinationPath '%PACK_DIR%' -Force"
-    if errorlevel 1 (
-        echo ERROR: failed to extract "%CRED_ZIP%"
-        goto :fail
-    )
-)
-
 if not exist "%CRED_JSON%" (
     echo ERROR: missing OSS credentials.
-    echo Expected oss_credentials.zip next to upload.bat.
+    echo Place oss_credentials.json next to upload.bat
+    echo ^(copy from oss_credentials.example.json and fill in keys^).
     goto :fail
 )
 

@@ -14,8 +14,8 @@ from time import sleep
 from typing import Callable, TypeVar
 
 # ---------------------------------------------------------------------------
-# Non-secret defaults. Access keys come from oss_credentials.json
-# (auto-extracted by upload.bat from oss_credentials.zip in this folder).
+# Non-secret defaults. Access keys come from local oss_credentials.json
+# (gitignored; copy from oss_credentials.example.json).
 # ---------------------------------------------------------------------------
 S3_ENDPOINT = "https://oss-cn-shenzhen.aliyuncs.com"
 S3_BUCKET = "aws-kelei"
@@ -65,7 +65,7 @@ def _game_recorder_root() -> Path:
 
 
 def load_oss_credentials(cred_path: Path | None = None) -> dict[str, str]:
-    """Load OSS settings from oss_credentials.json (written by update.bat)."""
+    """Load OSS settings from local oss_credentials.json."""
     path = cred_path or (_pack_root() / OSS_CREDENTIALS_FILE)
     if not path.is_file():
         return {}
@@ -797,8 +797,8 @@ def main() -> None:
         cred_file = _pack_root() / OSS_CREDENTIALS_FILE
         print(
             "错误：缺少 OSS AccessKey。\n"
-            f"请将 oss_credentials.zip 放进本目录后重新运行 upload.bat\n"
-            f"（或手动放置 {cred_file}）。",
+            f"请将 {cred_file.name} 放进本目录后重新运行 upload.bat\n"
+            f"（可参考 oss_credentials.example.json）。",
             file=sys.stderr,
         )
         sys.exit(1)
