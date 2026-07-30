@@ -31,6 +31,11 @@ DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_RETRY_DELAY_SECONDS = 5.0
 UPLOAD_INTERNAL_FILES = frozenset({".ms_upload_cache", ".ms_upload_progress", ".s3_upload_cache"})
 UPLOAD_IGNORED_DIRS = frozenset({".git", ".cache"})
+# Baidu Netdisk client temp files (e.g. foo.mp4.baiduyun.uploading.cfg).
+UPLOAD_IGNORED_NAME_SUFFIXES = (
+    ".baiduyun.uploading.cfg",
+    ".baiduyun.downloading.cfg",
+)
 BAIDU_GAME_DATA_DIR = "/game-data"
 MODELSCOPE_REPO_ID = "kusriri/world-game-data"
 MODELSCOPE_DATASET_DIR = "recordings"
@@ -256,13 +261,20 @@ def list_remote_session_files(
     return remote
 
 
+def _is_ignored_upload_file(name: str) -> bool:
+    if name in UPLOAD_INTERNAL_FILES:
+        return True
+    lower = name.lower()
+    return any(lower.endswith(suffix) for suffix in UPLOAD_IGNORED_NAME_SUFFIXES)
+
+
 def local_session_manifest(folder: Path) -> dict[str, LocalFile]:
     manifest: dict[str, LocalFile] = {}
     for path in sorted(folder.rglob("*")):
         if not path.is_file():
             continue
         relative = path.relative_to(folder)
-        if path.name in UPLOAD_INTERNAL_FILES:
+        if _is_ignored_upload_file(path.name):
             continue
         if any(part in UPLOAD_IGNORED_DIRS for part in relative.parts):
             continue
