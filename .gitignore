@@ -40,7 +40,7 @@ modelscope-sample/wheels/
 modelscope-sample/data/
 modelscope-sample-portable-*.zip
 
-# S3/OSS upload: extracted credentials stay local; zip with keys is tracked
+# S3/OSS upload: credentials stay local, never commit
 s3-upload/oss_credentials.json
 s3-upload/.venv/
 s3-upload-portable-*.zip

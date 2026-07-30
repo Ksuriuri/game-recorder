@@ -1,10 +1,10 @@
 S3 录制数据上传包 - 使用说明
 ====================================
 
-【解压位置】
-  将本 zip 解压到 game-recorder 文件夹的根目录。
+【放置位置】
+  将本文件夹放在 game-recorder 文件夹的根目录。
 
-  正确示例（解压后应能看到 s3-upload 文件夹）：
+  正确示例（应能看到 s3-upload 文件夹）：
 
     D:\game-recorder\
       install.bat
@@ -12,21 +12,21 @@ S3 录制数据上传包 - 使用说明
       recordings\          <-- 录制好的数据在这里
       .tools\
       .venv\
-      s3-upload\           <-- 本压缩包解压出来的文件夹
+      s3-upload\           <-- 本文件夹
         使用方式.txt       <-- 本文件
         upload.bat         <-- 双击这个上传
-        oss_credentials.zip <-- OSS 密钥包（仓库自带，upload.bat 自动解压）
+        oss_credentials.json <-- OSS 密钥（本地放置，勿提交 git）
         ...
 
   错误示例：
-    - 解压到桌面、下载文件夹（旁边没有 recordings 文件夹）
-    - 只解压出 s3-upload 里的文件，没有和 recordings 同级
+    - 放到桌面、下载文件夹（旁边没有 recordings 文件夹）
+    - 只拷贝出 s3-upload 里的文件，没有和 recordings 同级
 
 【运行哪个文件】
   双击：s3-upload\upload.bat
 
   作用：
-    1. 自动解压同目录 oss_credentials.zip 得到 OSS 密钥
+    1. 读取同目录 oss_credentials.json 中的 OSS 密钥
     2. 首次运行会自动安装上传所需环境（有 wheels\ 则离线，否则联网）
     3. 读取上一级目录的 recordings\ 里各 session 文件夹
     4. 自动检查百度网盘 /game-data/：本地同名 session 若已完整则跳过
@@ -38,12 +38,14 @@ S3 录制数据上传包 - 使用说明
 【使用前请确认】
   1. 本电脑已经安装过游戏录制器（根目录运行过 install.bat）
   2. recordings\ 里已有要上传的 session 文件夹
-  3. 上传需要联网（阿里云 OSS + 百度接口 + ModelScope）
+  3. 同目录已有 oss_credentials.json（可参考 oss_credentials.example.json）
+  4. 上传需要联网（阿里云 OSS + 百度接口 + ModelScope）
 
 【其他文件说明】
-  upload.bat           一键解压密钥 + 安装 + 上传
+  upload.bat           一键安装 + 上传
   install.bat          仅安装上传环境，不上传
-  oss_credentials.zip  OSS 密钥（随仓库分发）
+  oss_credentials.json OSS 密钥（本地文件，勿提交 git）
+  oss_credentials.example.json  密钥模板
   upload_recordings.py 上传脚本
   baidu_remote.py      百度去重（含内置凭证）
   modelscope_remote.py ModelScope 去重（含内置凭证）
