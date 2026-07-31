@@ -2,6 +2,10 @@
 
 Video and audio are muxed in the same FFmpeg process so A/V sync is handled
 internally by FFmpeg — no manual timestamp alignment needed.
+
+Audio selection walks a fallback chain (WASAPI → soundcard → ranked DirectShow
+→ silent).  Sources that previously caused ``encoder_failed`` can be skipped via
+``Config.audio_skip_sources`` / ``audio_prefer_source``.
 """
 
 from __future__ import annotations
@@ -13,7 +17,10 @@ import re
 import subprocess
 import sys
 import threading
+import time
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from game_recorder.config import (
     Config,
@@ -24,6 +31,17 @@ from game_recorder.config import (
 from game_recorder.encoder import python_loopback as _pyloop
 
 logger = logging.getLogger(__name__)
+
+AudioKind = Literal["wasapi", "pyloop", "dshow", "none"]
+
+
+@dataclass(frozen=True)
+class AudioPlan:
+    """One audio input strategy for a single FFmpeg launch attempt."""
+
+    kind: AudioKind
+    source_id: str | None = None  # meta.json / skip-list key; None = silent
+    dshow_name: str | None = None
 
 _ENCODER_LABEL = {
     "h264_nvenc": "NVIDIA NVENC",
@@ -104,6 +122,33 @@ def _is_likely_microphone_only(name: str) -> bool:
     )
 
 
+def dshow_device_rank(name: str) -> int:
+    """Lower = better for *system* audio. Mics last; VoiceMeeter last among non-mics."""
+    if _is_likely_microphone_only(name):
+        return 300
+    n = name.lower()
+    if any(k in n for k in ("stereo mix", "what u hear", "wave out mix")):
+        return 0
+    if "loopback" in n and "voicemeeter" not in n:
+        return 1
+    if "virtual cable" in n or "vb-audio cable" in n:
+        return 2
+    if any(k in n for k in ("cable output", "wave out")):
+        return 3
+    if "voicemeeter" in n or "vb-audio" in n:
+        return 50
+    return 10
+
+
+def ranked_dshow_devices(ffmpeg: str, *, include_mics: bool = False) -> list[str]:
+    """DirectShow capture devices sorted for game-audio capture."""
+    devices = _list_dshow_devices(ffmpeg)
+    ranked = sorted(devices, key=dshow_device_rank)
+    if include_mics:
+        return ranked
+    return [d for d in ranked if dshow_device_rank(d) < 300]
+
+
 @functools.lru_cache(maxsize=4)
 def _ffmpeg_has_wasapi_demuxer(ffmpeg: str) -> bool:
     """True if this FFmpeg build has the ``wasapi`` *demuxer* (rare in upstream static builds)."""
@@ -173,31 +218,53 @@ def _wasapi_loopback_usable(ffmpeg: str) -> bool:
         return False
 
 
+def _dshow_device_usable(ffmpeg: str, device: str) -> bool:
+    """True if FFmpeg can open this DirectShow audio device briefly."""
+    try:
+        result = subprocess.run(
+            [
+                ffmpeg,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "dshow",
+                "-i",
+                f"audio={device}",
+                "-t",
+                "0.15",
+                "-f",
+                "null",
+                "-",
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=12,
+        )
+        if result.returncode == 0:
+            return True
+        err = (result.stderr or "").strip().splitlines()
+        logger.info(
+            "DirectShow 音频探测失败 %r（rc=%d）：%s",
+            device,
+            result.returncode,
+            err[-1] if err else "<无 stderr>",
+        )
+        return False
+    except Exception as e:
+        logger.info("DirectShow 音频探测异常 %r：%s", device, e)
+        return False
+
+
 def _find_loopback_device(ffmpeg: str) -> str | None:
     """Pick a DirectShow capture device likely to carry desktop/game audio."""
-    devices = _list_dshow_devices(ffmpeg)
-    if not devices:
+    ranked = ranked_dshow_devices(ffmpeg, include_mics=True)
+    if not ranked:
         return None
-
-    def rank(name: str) -> int:
-        """Lower = better for *system* audio. Mics last; VoiceMeeter last among non-mics."""
-        if _is_likely_microphone_only(name):
-            return 300
-        n = name.lower()
-        if any(k in n for k in ("stereo mix", "what u hear", "wave out mix")):
-            return 0
-        if "loopback" in n and "voicemeeter" not in n:
-            return 1
-        if "virtual cable" in n or "vb-audio cable" in n:
-            return 2
-        if any(k in n for k in ("cable output", "wave out")):
-            return 3
-        if "voicemeeter" in n or "vb-audio" in n:
-            return 50
-        return 10
-
-    best = min(devices, key=rank)
-    r = rank(best)
+    best = ranked[0]
+    r = dshow_device_rank(best)
     if r >= 300:
         logger.warning(
             "仅找到类似麦克风的 DirectShow 设备，跳过音频。请在 Windows 中"
@@ -216,6 +283,97 @@ def _find_loopback_device(ffmpeg: str) -> str | None:
             best,
         )
     return best
+
+
+def build_audio_plans(
+    ffmpeg: str,
+    *,
+    explicit_device: str | None = None,
+    skip_sources: frozenset[str] | set[str] = frozenset(),
+    prefer_source: str | None = None,
+    probe_dshow: bool = True,
+) -> list[AudioPlan]:
+    """Ordered audio strategies to try until one keeps FFmpeg alive.
+
+    Never includes a silent (video-only) plan — recordings without real audio
+    are considered unusable.
+    """
+    skip = frozenset(skip_sources)
+    plans: list[AudioPlan] = []
+    seen: set[str] = set()
+
+    def _add(plan: AudioPlan) -> None:
+        key = plan.source_id
+        if key is None or key in seen:
+            return
+        if key in skip:
+            return
+        seen.add(key)
+        plans.append(plan)
+
+    if explicit_device:
+        _add(
+            AudioPlan(
+                kind="dshow",
+                source_id=f"dshow:{explicit_device}",
+                dshow_name=explicit_device,
+            )
+        )
+        return plans
+
+    # Prefer a previously-working / next-fallback source first when still available.
+    if prefer_source and prefer_source not in skip:
+        if prefer_source == "wasapi:default":
+            if _ffmpeg_has_wasapi_demuxer(ffmpeg) and _wasapi_loopback_usable(ffmpeg):
+                _add(AudioPlan(kind="wasapi", source_id="wasapi:default"))
+        elif prefer_source == "soundcard:default":
+            if _pyloop.loopback_usable():
+                _add(AudioPlan(kind="pyloop", source_id="soundcard:default"))
+        elif prefer_source.startswith("dshow:"):
+            name = prefer_source[len("dshow:") :]
+            if name and (not probe_dshow or _dshow_device_usable(ffmpeg, name)):
+                _add(AudioPlan(kind="dshow", source_id=prefer_source, dshow_name=name))
+
+    if (
+        "wasapi:default" not in skip
+        and _ffmpeg_has_wasapi_demuxer(ffmpeg)
+        and _wasapi_loopback_usable(ffmpeg)
+    ):
+        _add(AudioPlan(kind="wasapi", source_id="wasapi:default"))
+
+    if "soundcard:default" not in skip and _pyloop.loopback_usable():
+        _add(AudioPlan(kind="pyloop", source_id="soundcard:default"))
+
+    for name in ranked_dshow_devices(ffmpeg, include_mics=False):
+        sid = f"dshow:{name}"
+        if sid in skip or sid in seen:
+            continue
+        if probe_dshow and not _dshow_device_usable(ffmpeg, name):
+            continue
+        _add(AudioPlan(kind="dshow", source_id=sid, dshow_name=name))
+
+    return plans
+
+
+def next_audio_source_after(
+    plans: list[AudioPlan],
+    failed_source: str | None,
+) -> str | None:
+    """Return the next plan's ``source_id`` after *failed_source*, or ``None`` if exhausted."""
+    if not plans:
+        return None
+    if failed_source is None:
+        return plans[0].source_id if plans else None
+    for i, plan in enumerate(plans):
+        if plan.source_id == failed_source:
+            if i + 1 < len(plans):
+                return plans[i + 1].source_id
+            return None
+    # Failed source not in current plan list (already skipped); use first remaining.
+    for plan in plans:
+        if plan.source_id != failed_source:
+            return plan.source_id
+    return None
 
 
 class FFmpegEncoder:
@@ -287,51 +445,89 @@ class FFmpegEncoder:
         return self._proc.poll() is None
 
     def start(self, width: int, height: int, output_path: Path) -> None:
-        """Launch the FFmpeg subprocess."""
+        """Launch the FFmpeg subprocess, walking the audio fallback chain if needed.
+
+        Refuses to start without a working audio source — silent video is unusable.
+        """
         self._intentional_stop = False
         self._failed = False
         self._stdin_broken_logged = False
         self._frame_size = width * height * 3  # BGR24
 
         cfg = self.config
-        use_wasapi = False
-        use_pyloop = False
+        skip = frozenset(cfg.audio_skip_sources)
+        plans = build_audio_plans(
+            self._ffmpeg_path,
+            explicit_device=cfg.audio_device,
+            skip_sources=skip,
+            prefer_source=cfg.audio_prefer_source,
+            probe_dshow=cfg.audio_device is None,
+        )
+        # If every known source was blacklisted, give them another chance once.
+        if not plans and skip and cfg.audio_device is None:
+            logger.warning("音频候选已全部跳过，清空跳过列表后重新探测 …")
+            plans = build_audio_plans(
+                self._ffmpeg_path,
+                explicit_device=None,
+                skip_sources=frozenset(),
+                prefer_source=cfg.audio_prefer_source,
+                probe_dshow=True,
+            )
+        if not plans:
+            self._failed = True
+            raise RuntimeError(
+                "无可用音频捕获设备，拒绝无声录制。"
+                "请运行 --list-audio-devices，启用 Stereo Mix，或通过 --audio-device 指定设备。"
+            )
+
+        last_error: str | None = None
+        for index, plan in enumerate(plans):
+            if index > 0:
+                logger.warning(
+                    "音频方案失败（%s），改试 %s …",
+                    last_error or "未知原因",
+                    plan.source_id,
+                )
+            ok, err = self._try_start_plan(plan, width, height, output_path)
+            if ok:
+                if index > 0:
+                    logger.info("已切换音频方案：%s", self._audio_source)
+                return
+            last_error = err
+            self._cleanup_failed_launch()
+
+        self._failed = True
+        raise RuntimeError(
+            f"所有音频方案均失败，拒绝无声录制：{last_error or '未知错误'}。"
+            "请运行 --list-audio-devices 或改用 --audio-device。"
+        )
+
+    def _try_start_plan(
+        self,
+        plan: AudioPlan,
+        width: int,
+        height: int,
+        output_path: Path,
+    ) -> tuple[bool, str | None]:
+        """Attempt one audio plan. Returns (ok, error_detail)."""
+        cfg = self.config
+        use_wasapi = plan.kind == "wasapi"
+        use_pyloop = plan.kind == "pyloop"
         pyloop_port = 0
-        dshow_device: str | None = None
+        dshow_device = plan.dshow_name if plan.kind == "dshow" else None
+        if plan.kind == "none":
+            return False, "拒绝无声录制"
 
-        if cfg.audio_device:
-            # Explicit override always wins, even if it's silent — user asked for it.
-            dshow_device = cfg.audio_device
-        else:
-            # Selection priority for zero-config game-audio capture:
-            #   1) FFmpeg native WASAPI demuxer  (single process; only some builds ship it)
-            #   2) Python soundcard loopback     (zero-config on every Win10+; default on
-            #      BtbN/upstream static FFmpeg, which has no wasapi demuxer)
-            #   3) DirectShow auto-pick          (Stereo Mix / VB-CABLE / VoiceMeeter)
-            if _ffmpeg_has_wasapi_demuxer(
-                self._ffmpeg_path
-            ) and _wasapi_loopback_usable(self._ffmpeg_path):
-                use_wasapi = True
-                logger.info("音频：FFmpeg WASAPI 环回（默认 Windows 播放设备）。")
-            elif _pyloop.loopback_usable():
-                use_pyloop = True
-                pyloop_port = _pyloop.free_tcp_port()
-                logger.info(
-                    "音频：Python WASAPI 环回（soundcard，默认扬声器 → TCP 127.0.0.1:%d → FFmpeg）。",
-                    pyloop_port,
-                )
-            else:
-                logger.info(
-                    "音频：无可用 WASAPI 环回 "
-                    "（FFmpeg wasapi 解复用器与 soundcard 均不可用）— 回退至 DirectShow。"
-                )
-                dshow_device = _find_loopback_device(self._ffmpeg_path)
-
-        has_audio = use_wasapi or use_pyloop or dshow_device is not None
         if use_wasapi:
             self._audio_source = "wasapi:default"
+            logger.info("音频：FFmpeg WASAPI 环回（默认 Windows 播放设备）。")
         elif use_pyloop:
+            pyloop_port = _pyloop.free_tcp_port()
             self._audio_source = "soundcard:default"
+            logger.info(
+                "音频：Python WASAPI 环回（soundcard，默认扬声器 → TCP 127.0.0.1:%d → FFmpeg）。",
+                pyloop_port,
+            )
         elif dshow_device is not None:
             self._audio_source = f"dshow:{dshow_device}"
             if not cfg.audio_device and "voicemeeter" in dshow_device.lower():
@@ -343,13 +539,10 @@ class FFmpegEncoder:
                     "或运行 game-recorder --list-audio-devices 复制准确设备名。",
                     dshow_device,
                 )
+            else:
+                logger.info("音频：DirectShow %r", dshow_device)
         else:
-            self._audio_source = None
-            logger.warning(
-                "未找到可用音频捕获设备 — 录制将无声。"
-                "请确认 `soundcard` 包导入正常（Python WASAPI 环回），"
-                "或启用 Stereo Mix / 安装 VB-CABLE。"
-            )
+            return False, "音频方案缺少设备名"
 
         cmd: list[str] = [self._ffmpeg_path, "-y", "-hide_banner", "-loglevel", "warning"]
 
@@ -384,17 +577,14 @@ class FFmpegEncoder:
             "pipe:0",
         ]
 
-        # --- Encoder settings ---
         cmd += _video_encoder_args(self._encoder, cfg)
-
         cmd += ["-pix_fmt", "yuv420p"]
 
-        if has_audio:
-            cmd += ["-c:a", "aac", "-b:a", cfg.audio_bitrate]
-            # Input order: 0 = audio (dshow or wasapi), 1 = rawvideo from pipe
-            cmd += ["-map", "1:v", "-map", "0:a"]
-            # Output muxer option: before any -i, FFmpeg misparses it as an input option (dshow err).
-            cmd.append("-shortest")
+        cmd += ["-c:a", "aac", "-b:a", cfg.audio_bitrate]
+        # Input order: 0 = audio (dshow or wasapi), 1 = rawvideo from pipe
+        cmd += ["-map", "1:v", "-map", "0:a"]
+        # Output muxer option: before any -i, FFmpeg misparses it as an input option (dshow err).
+        cmd.append("-shortest")
 
         cmd.append(str(output_path))
 
@@ -405,6 +595,7 @@ class FFmpegEncoder:
         )
         logger.debug("FFmpeg 命令：%s", " ".join(cmd))
 
+        self._ffmpeg_stderr.clear()
         self._proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
@@ -415,17 +606,27 @@ class FFmpegEncoder:
         self._start_stderr_drain()
 
         if use_pyloop:
-            self._start_pyloop_pump(pyloop_port)
+            pump_ok, pump_err = self._start_pyloop_pump(pyloop_port)
+            if not pump_ok:
+                return False, pump_err or "Python 环回启动失败"
 
-    def _start_pyloop_pump(self, port: int) -> None:
-        """Spawn the soundcard→TCP worker; downgrade to silent on failure.
+        # dshow / wasapi: device open failures usually kill FFmpeg before first frame.
+        if not use_pyloop:
+            time.sleep(0.35)
+            if self._proc is not None and self._proc.poll() is not None:
+                detail = f"FFmpeg 启动后立即退出 returncode={self._proc.returncode}"
+                self._dump_stderr()
+                return False, detail
 
-        Failure modes that get us here:
+        return True, None
+
+    def _start_pyloop_pump(self, port: int) -> tuple[bool, str | None]:
+        """Spawn the soundcard→TCP worker. Returns (ok, error).
+
+        Failure modes:
           * FFmpeg exited before binding the TCP port (encoder rejected video args, etc.)
           * `soundcard` cannot open the default speaker's loopback (driver / exclusive mode)
-        Either way we kill the FFmpeg process and let the caller observe an empty audio
-        track — but we MUST NOT leave the Popen running with `tcp://?listen` blocking
-        for 15 s, that would make every recording start visibly hang.
+        On failure the caller walks the next audio plan (or silent).
         """
         thread, q, stop = _pyloop.start_tcp_pump(port, _PYLOOP_SAMPLERATE, _PYLOOP_CHANNELS)
         self._pyloop_thread = thread
@@ -438,12 +639,9 @@ class FFmpegEncoder:
             connect_msg = TimeoutError("环回 worker 未报告连接结果")
 
         if isinstance(connect_msg, BaseException):
-            logger.error(
-                "Python 环回无法连接 FFmpeg（%s）。中止此 FFmpeg 进程，继续无音频录制。",
-                connect_msg,
-            )
-            self._abort_pyloop_and_ffmpeg()
-            return
+            err = f"Python 环回无法连接 FFmpeg（{connect_msg}）"
+            logger.error("%s", err)
+            return False, err
 
         try:
             stream_msg = q.get(timeout=_PYLOOP_STARTUP_TIMEOUT_S)
@@ -451,18 +649,19 @@ class FFmpegEncoder:
             stream_msg = TimeoutError("环回 worker 已连接但未打开录音器")
 
         if isinstance(stream_msg, BaseException):
-            logger.error(
-                "Python 环回已连接 FFmpeg 但无法打开扬声器（%s）。中止并继续无音频录制。",
-                stream_msg,
-            )
-            self._abort_pyloop_and_ffmpeg()
-            return
+            err = f"Python 环回无法打开扬声器（{stream_msg}）"
+            logger.error("%s", err)
+            return False, err
 
-        logger.info("Python 环回正在向 FFmpeg 推流（s16le %d Hz x%d）。",
-                    _PYLOOP_SAMPLERATE, _PYLOOP_CHANNELS)
+        logger.info(
+            "Python 环回正在向 FFmpeg 推流（s16le %d Hz x%d）。",
+            _PYLOOP_SAMPLERATE,
+            _PYLOOP_CHANNELS,
+        )
+        return True, None
 
-    def _abort_pyloop_and_ffmpeg(self) -> None:
-        """Stop the loopback worker and kill FFmpeg so the caller can resort to silent retry."""
+    def _cleanup_failed_launch(self) -> None:
+        """Tear down a failed start attempt so the next audio plan can launch cleanly."""
         if self._pyloop_stop is not None:
             self._pyloop_stop.set()
         if self._pyloop_thread is not None:
@@ -470,13 +669,30 @@ class FFmpegEncoder:
         self._pyloop_thread = None
         self._pyloop_stop = None
         self._pyloop_queue = None
-        if self._proc is not None and self._proc.poll() is None:
-            try:
-                self._proc.kill()
-            except OSError:
-                pass
-        # Mark this encoder instance as silent so callers / meta.json reflect reality.
+        if self._proc is not None:
+            if self._proc.poll() is None:
+                try:
+                    if self._proc.stdin:
+                        try:
+                            self._proc.stdin.close()
+                        except OSError:
+                            pass
+                    self._proc.kill()
+                except OSError:
+                    pass
+                try:
+                    self._proc.wait(timeout=3.0)
+                except Exception:
+                    pass
+            self._proc = None
+        self._ffmpeg_stderr.clear()
         self._audio_source = None
+        self._failed = False
+        self._intentional_stop = False
+
+    def _abort_pyloop_and_ffmpeg(self) -> None:
+        """Stop the loopback worker and kill FFmpeg (legacy helper for cleanup)."""
+        self._cleanup_failed_launch()
 
     def _start_stderr_drain(self) -> None:
         """Read FFmpeg stderr in a thread so the pipe never fills and blocks the child."""

@@ -28,7 +28,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 
-from game_recorder.config import Config
+from game_recorder.config import Config, find_ffmpeg
 from game_recorder.hotkeys import (
     HOTKEY_DEBOUNCE_SECONDS,
     HOTKEY_HINT,
@@ -45,6 +45,7 @@ from game_recorder.hotkeys import (
     VK_OEM_6,
 )
 from game_recorder.capture.window_region import restore_window_focus
+from game_recorder.encoder.ffmpeg_pipe import build_audio_plans, next_audio_source_after
 from game_recorder.overlay import RecordingStatusOverlay
 from game_recorder.process_guard import replace_existing_instance
 from game_recorder.relaunch import (
@@ -54,6 +55,11 @@ from game_recorder.relaunch import (
     write_pending_focus,
 )
 from game_recorder.session import AutoStopReason, Session
+from game_recorder.storage.audio_fallback import (
+    load_audio_fallback,
+    mark_audio_source_failed,
+    mark_audio_source_ok,
+)
 from game_recorder.storage.pending_notice import PendingAutoStopNotice, consume_pending_notice, write_pending_notice
 
 logger = logging.getLogger(__name__)
@@ -352,6 +358,14 @@ def main() -> None:
 
     segment_seconds = max(0, int(round(args.segment_minutes * 60)))
 
+    audio_fb = load_audio_fallback(Path(args.output))
+    if audio_fb.skipped or audio_fb.preferred:
+        logger.info(
+            "音频回退状态：优先=%s 跳过=%s",
+            audio_fb.preferred or "<默认>",
+            ", ".join(audio_fb.skipped) or "<无>",
+        )
+
     config = Config(
         fps=args.fps,
         output_dir=Path(args.output),
@@ -359,6 +373,8 @@ def main() -> None:
         video_quality=args.quality,
         x264_threads=max(1, args.x264_threads),
         audio_device=args.audio_device,
+        audio_skip_sources=tuple(audio_fb.skipped),
+        audio_prefer_source=audio_fb.preferred,
         mouse_poll_interval_ms=1000.0 / args.mouse_hz,
         segment_seconds=segment_seconds,
         capture_mode=args.capture_mode,
@@ -418,6 +434,18 @@ def main() -> None:
             extra = (
                 "编码可能只写入了开头极短一段；若反复出现，请检查系统音频设备或改用 --audio-device"
             )
+            if pending.next_audio is not None or pending.failed_audio:
+                failed = pending.failed_audio or "<未知>"
+                if pending.next_audio:
+                    extra = (
+                        f"已自动跳过故障音频 {failed}，下次录制将优先尝试 {pending.next_audio}。"
+                        "请再按热键开始录制"
+                    )
+                else:
+                    extra = (
+                        f"已跳过故障音频 {failed}，但没有更多可用音频设备。"
+                        "请运行 --list-audio-devices 或启用 Stereo Mix 后再试"
+                    )
             if pending.discarded_short:
                 extra = (
                     f"本次有效时长不足 {config.min_recording_duration_s:g} 秒，数据已丢弃。"
@@ -495,18 +523,61 @@ def main() -> None:
 
     def _finish_manual_session_stop() -> None:
         """Manual stop: save, cold-restart (no red notice in the dying process)."""
-        _stop_session(reason="正在停止 …")
+        audio_src = session.audio_source if session is not None else None
+        saved = _stop_session(reason="正在停止 …")
+        if saved and audio_src:
+            mark_audio_source_ok(config.output_dir, audio_src)
         _request_session_relaunch()
 
     def _finish_auto_session_stop(reason: AutoStopReason) -> None:
         """Auto-stop: save, persist notice, cold-restart; red box shows in the new process."""
+        failed_audio: str | None = None
+        next_audio: str | None = None
+        if session is not None:
+            failed_audio = session.audio_source
         saved = _stop_session(reason=_AUTO_STOP_REASON_LOG[reason])
+        if reason == "encoder_failed" and config.audio_device is None:
+            # Walk remaining audio candidates across the cold restart.
+            try:
+                plans = build_audio_plans(
+                    find_ffmpeg(),
+                    explicit_device=None,
+                    skip_sources=frozenset(config.audio_skip_sources),
+                    prefer_source=config.audio_prefer_source,
+                    probe_dshow=False,  # avoid multi-second probes during stop path
+                )
+            except Exception as exc:
+                logger.warning("构建音频候选失败：%s", exc)
+                plans = []
+            next_audio = next_audio_source_after(plans, failed_audio)
+            if (
+                failed_audio is not None
+                and next_audio is None
+                and not any(p.source_id == failed_audio for p in plans)
+                and plans
+            ):
+                # Failed source already absent from plans; use the first remaining candidate.
+                next_audio = plans[0].source_id
+            mark_audio_source_failed(
+                config.output_dir,
+                failed_audio,
+                next_preferred=next_audio,
+            )
+            logger.info(
+                "编码失败后音频回退：%s → %s",
+                failed_audio or "<未知>",
+                next_audio or "<已无更多设备>",
+            )
+        elif saved and failed_audio:
+            mark_audio_source_ok(config.output_dir, failed_audio)
         write_pending_notice(
             config.output_dir,
             PendingAutoStopNotice(
                 reason=reason,
                 saved=saved,
                 discarded_short=not saved,
+                next_audio=next_audio if reason == "encoder_failed" else None,
+                failed_audio=failed_audio if reason == "encoder_failed" else None,
             ),
         )
         _request_session_relaunch()

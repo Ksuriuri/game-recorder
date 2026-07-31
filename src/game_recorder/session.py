@@ -364,6 +364,11 @@ class Session:
     def capture_target(self) -> CaptureTarget | None:
         return self._capture_target
 
+    @property
+    def audio_source(self) -> str | None:
+        """Audio input id used for this session (e.g. ``soundcard:default``)."""
+        return self._audio_source
+
     # ── Public lifecycle ─────────────────────────────────────────────────
 
     def start(self) -> None:
@@ -1217,7 +1222,7 @@ class Session:
         elif reason == "encoder_failed":
             logger.error(
                 "视频编码进程异常退出（可能为音频环回中断），触发自动停止；"
-                "请重新按热键开始录制"
+                "将自动跳过当前音频源并在下次录制尝试其它设备"
             )
         elif reason == "forbidden_key":
             logger.info("检测到非人物移动操作（按键或鼠标点击/滚轮），触发自动停止")

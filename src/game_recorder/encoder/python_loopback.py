@@ -125,7 +125,11 @@ def _audio_worker(
     out_q: queue.Queue[Exception | type[None] | str],
     stop: threading.Event,
 ) -> None:
-    """Connect to FFmpeg TCP, open loopback, stream until *stop* is set or socket breaks."""
+    """Connect to FFmpeg TCP, open loopback, stream until *stop* is set or socket breaks.
+
+    Audio must stay live: on capture failure we close the socket (FFmpeg ``-shortest``
+    ends the mux) so the session can auto-stop and try the next audio device.
+    """
     s: socket.socket | None = None
     try:
         s = _connect_with_retry(port, stop)

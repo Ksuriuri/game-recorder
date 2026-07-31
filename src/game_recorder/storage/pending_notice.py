@@ -22,6 +22,9 @@ class PendingAutoStopNotice:
     reason: AutoStopReason
     saved: bool
     discarded_short: bool = False
+    # After encoder_failed: next audio source the restarted process will prefer.
+    next_audio: str | None = None
+    failed_audio: str | None = None
 
 
 def pending_notice_path(output_dir: Path) -> Path:
@@ -63,10 +66,14 @@ def consume_pending_notice(output_dir: Path) -> PendingAutoStopNotice | None:
         ):
             logger.warning("忽略无效的 pending notice：%r", reason)
             return None
+        next_audio = raw.get("next_audio")
+        failed_audio = raw.get("failed_audio")
         notice = PendingAutoStopNotice(
             reason=reason,
             saved=bool(raw.get("saved", False)),
             discarded_short=bool(raw.get("discarded_short", False)),
+            next_audio=str(next_audio) if isinstance(next_audio, str) else None,
+            failed_audio=str(failed_audio) if isinstance(failed_audio, str) else None,
         )
         return notice
     except (OSError, json.JSONDecodeError, TypeError) as exc:

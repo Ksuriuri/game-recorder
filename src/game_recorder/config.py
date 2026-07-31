@@ -26,6 +26,10 @@ class Config:
     # Audio
     audio_device: str | None = None  # None = auto-detect WASAPI loopback
     audio_bitrate: str = "128k"
+    # Auto-fallback across cold restarts (populated from recordings/.audio_fallback.json).
+    # When a source causes encoder_failed, it is skipped and the next candidate is preferred.
+    audio_skip_sources: tuple[str, ...] = ()
+    audio_prefer_source: str | None = None
 
     # Input capture
     mouse_poll_interval_ms: float = 1000.0 / 30.0  # throttle mouse-move events (30 Hz)
