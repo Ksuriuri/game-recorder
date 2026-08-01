@@ -112,8 +112,8 @@ def translation_keys(translation: str) -> frozenset[int]:
 def rotation_rates(
     rotation: str,
     *,
-    yaw_deg_s: float = 45.0,
-    pitch_deg_s: float = 18.0,
+    yaw_deg_s: float = 25.0,
+    pitch_deg_s: float = 10.0,
 ) -> tuple[float, float]:
     """Map a discrete rotation label to (yaw_deg_s, pitch_deg_s).
 

@@ -31,10 +31,10 @@ class BalancedRadiusPolicy:
     # Start cutting outward walks earlier so small radii do not feel oversized.
     soft_radius_frac: float = 0.5
     freq_alpha: float = 1.0
-    hold_min_s: float = 0.35
-    hold_max_s: float = 1.0
-    look_yaw_deg_s: float = 45.0
-    look_pitch_deg_s: float = 18.0
+    hold_min_s: float = 0.8
+    hold_max_s: float = 2.0
+    look_yaw_deg_s: float = 25.0
+    look_pitch_deg_s: float = 10.0
     # When outside radius, blend a stronger yaw toward the anchor.
     return_yaw_deg_s: float = 55.0
     # Estimated walk speed used to cap hold length near the boundary.
@@ -42,7 +42,7 @@ class BalancedRadiusPolicy:
     stuck_speed_mps: float = 0.15
     stuck_s: float = 1.5
     # Soften commanded look so discrete bins do not jerk the mouse.
-    rate_track_hz: float = 8.0
+    rate_track_hz: float = 4.0
     # Coverage reweight: w_final = prior × (1+β·move) × (1+γ·look).
     cover_move_beta: float = 1.5
     cover_look_gamma: float = 1.5

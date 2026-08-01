@@ -26,6 +26,7 @@ recordings/
 .gta_camera/
 .wukong_camera/
 .cp2077_camera/
+.rdr2_camera/
 cp2077-camera/vendor/**/*.zip
 
 # ModelScope upload pack artifacts
