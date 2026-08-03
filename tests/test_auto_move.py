@@ -393,7 +393,7 @@ class BalancedRadiusPolicyTests(unittest.TestCase):
         self.assertIn(action.translation, ("backward", "none", "left", "right",
                                            "backward_left", "backward_right",
                                            "forward_left", "forward_right"))
-        # Specifically must not keep walking further away.
+        # Soft zone now requires clearly-inward motion (not tangential).
         score = translation_inward_score(
             action.translation or "none",
             pos_x=0.0,
@@ -403,7 +403,71 @@ class BalancedRadiusPolicyTests(unittest.TestCase):
             forward_x=0.0,
             forward_y=1.0,
         )
-        self.assertGreaterEqual(score, -0.05)
+        if action.translation != "none":
+            self.assertGreaterEqual(score, policy.soft_inward_min)
+
+    def test_soft_zone_rejects_tangential_drift(self) -> None:
+        """Tangential strafe near soft must not keep holding past the boundary."""
+        catalog = load_action_catalog(alpha=1.0)
+        left_none = catalog.by_pair[("left", "none")]
+        policy = BalancedRadiusPolicy(
+            radius_m=3.0,
+            soft_radius_frac=0.5,
+            soft_inward_min=0.15,
+            hold_min_s=5.0,
+            hold_max_s=5.0,
+            rate_track_hz=100.0,
+            look_yaw_deg_s=0.0,
+            look_pitch_deg_s=0.0,
+            return_yaw_deg_s=0.0,
+            catalog=catalog,
+            rng=random.Random(0),
+        )
+        policy.reset()
+        anchor = UnifiedPose(
+            0, 0.0, 0.0, 0.0, "gta", forward_x=0.0, forward_y=1.0, forward_z=0.0
+        )
+        policy.step(anchor, dt=0.05, now=1.0)
+        policy._current = left_none
+        policy._hold_until = 1e9
+        soft = UnifiedPose(
+            50, 0.0, 2.0, 0.0, "gta", forward_x=0.0, forward_y=1.0, forward_z=0.0
+        )
+        action = policy.step(soft, dt=0.05, now=2.0)
+        self.assertNotEqual(action.translation, "left")
+        allowed = policy._allowed_translations(soft, force_stuck=False)
+        self.assertNotIn("left", allowed)
+        self.assertNotIn("right", allowed)
+        self.assertNotIn("forward", allowed)
+        self.assertIn("backward", allowed)
+
+    def test_outside_prefers_strafe_recovery_over_idle(self) -> None:
+        """When outside, take a weakly-inward strafe instead of freezing."""
+        policy = BalancedRadiusPolicy(
+            radius_m=3.0,
+            soft_radius_frac=0.5,
+            hold_min_s=0.01,
+            hold_max_s=0.01,
+            rate_track_hz=100.0,
+            look_yaw_deg_s=0.0,
+            look_pitch_deg_s=0.0,
+            return_yaw_deg_s=0.0,
+            rng=random.Random(2),
+        )
+        policy.reset()
+        anchor = UnifiedPose(
+            0, 0.0, 0.0, 0.0, "gta", forward_x=0.0, forward_y=1.0, forward_z=0.0
+        )
+        policy.step(anchor, dt=0.05, now=1.0)
+        # Outside on +X while facing +Y → left (-X? wait: right is +X in cam).
+        # Facing +Y: right=+X, left=-X. Outside at +X=4 → need left (toward origin).
+        outside = UnifiedPose(
+            100, 4.0, 0.0, 0.0, "gta", forward_x=0.0, forward_y=1.0, forward_z=0.0
+        )
+        policy._hold_until = 0.0
+        action = policy.step(outside, dt=0.05, now=2.0)
+        self.assertEqual(action.translation, "left")
+        self.assertIn(VK_A, action.keys)
 
 
 class WanderPolicyTests(unittest.TestCase):
