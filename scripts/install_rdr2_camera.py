@@ -554,21 +554,24 @@ def resolve_rdr2_dir(explicit: Path | None, *, prompt: bool) -> Path:
         _print(f"[错误] 目录中没有 RDR2.exe：{explicit}")
 
     candidates = find_rdr2_candidates()
-    if len(candidates) == 1 and explicit is None:
-        return candidates[0]
-    if candidates:
+    if candidates and explicit is None:
+        if len(candidates) == 1:
+            _print("检测到 RDR2 安装：")
+        else:
+            _print("检测到多个 RDR2 安装：")
+        for index, path in enumerate(candidates, 1):
+            _print(f"  [{index}] {path}")
         if not prompt:
             _print(f"[自动] 使用检测到的 RDR2：{candidates[0]}")
             return candidates[0]
-        _print("检测到 RDR2 安装：")
-        for index, path in enumerate(candidates, 1):
-            _print(f"  [{index}] {path}")
         answer = input(
-            f"选择 [1-{len(candidates)}]，或输入完整路径："
+            f"选择 [1-{len(candidates)}] 安装，或输入完整路径；直接回车跳过："
         ).strip().strip('"')
+        if not answer:
+            raise InstallerSkipped("用户跳过 RDR2 相机插件安装")
         if answer.isdigit() and 1 <= int(answer) <= len(candidates):
             return candidates[int(answer) - 1]
-        chosen = Path(answer) if answer else candidates[0]
+        chosen = Path(answer)
         if is_rdr2_dir(chosen):
             return chosen.resolve()
         raise InstallerError(f"目录中没有 RDR2.exe：{chosen}")

@@ -301,10 +301,11 @@ def resolve_gta_dir(explicit: Path | None, *, prompt: bool) -> tuple[Path | None
         _print("请重新输入，或直接回车跳过 GTA 相机插件安装。")
 
     cands = [p for p in find_gta_candidates() if is_gta_dir(p)]
-    if len(cands) == 1 and explicit is None:
-        return cands[0].resolve(), False
-    if len(cands) > 1 and explicit is None:
-        _print("检测到多个 GTA V 安装：")
+    if cands and explicit is None:
+        if len(cands) == 1:
+            _print("检测到 GTA V 安装：")
+        else:
+            _print("检测到多个 GTA V 安装：")
         for i, p in enumerate(cands, 1):
             _print(f"  [{i}] {p}")
         if not prompt:
@@ -312,7 +313,7 @@ def resolve_gta_dir(explicit: Path | None, *, prompt: bool) -> tuple[Path | None
             return cands[0].resolve(), False
         try:
             choice = input(
-                f"选择 [1-{len(cands)}]，或输入完整路径；直接回车跳过: "
+                f"选择 [1-{len(cands)}] 安装，或输入完整路径；直接回车跳过: "
             ).strip().strip('"')
         except EOFError:
             choice = ""

@@ -109,6 +109,29 @@ class GtaInstallerPathDiscoveryTests(unittest.TestCase):
             self.assertFalse(skipped)
             self.assertEqual(chosen, first.resolve())
 
+    def test_resolve_gta_dir_prompts_even_for_single_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            game = Path(temporary) / "steam"
+            game.mkdir()
+            (game / "GTA5.exe").write_bytes(b"x")
+            with mock.patch.object(
+                installer,
+                "find_gta_candidates",
+                return_value=[game],
+            ), mock.patch("builtins.input", return_value=""):
+                chosen, skipped = installer.resolve_gta_dir(None, prompt=True)
+            self.assertTrue(skipped)
+            self.assertIsNone(chosen)
+
+            with mock.patch.object(
+                installer,
+                "find_gta_candidates",
+                return_value=[game],
+            ), mock.patch("builtins.input", return_value="1"):
+                chosen, skipped = installer.resolve_gta_dir(None, prompt=True)
+            self.assertFalse(skipped)
+            self.assertEqual(chosen, game.resolve())
+
 
 if __name__ == "__main__":
     unittest.main()

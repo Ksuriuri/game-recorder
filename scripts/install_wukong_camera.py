@@ -352,10 +352,11 @@ def resolve_wukong_dir(
             key=lambda item: not (item.root / STATE_DIRNAME / STATE_FILENAME).is_file()
         )
 
-    if len(layouts) == 1 and explicit is None:
-        return ResolveResult(layouts[0], False)
-    if len(layouts) > 1 and explicit is None:
-        _print("检测到多个《黑神话：悟空》安装：")
+    if layouts and explicit is None:
+        if len(layouts) == 1:
+            _print("检测到《黑神话：悟空》安装：")
+        else:
+            _print("检测到多个《黑神话：悟空》安装：")
         for index, layout in enumerate(layouts, 1):
             _print(f"  [{index}] {layout.root}")
         if not prompt:
@@ -363,7 +364,7 @@ def resolve_wukong_dir(
             return ResolveResult(layouts[0], False)
         try:
             choice = input(
-                f"选择 [1-{len(layouts)}]，或输入完整路径；直接回车跳过: "
+                f"选择 [1-{len(layouts)}] 安装，或输入完整路径；直接回车跳过: "
             ).strip().strip('"')
         except EOFError:
             choice = ""

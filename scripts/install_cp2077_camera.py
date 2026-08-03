@@ -189,18 +189,22 @@ def resolve_cp2077_dir(explicit: Path | None, *, prompt: bool) -> tuple[Path | N
             return None, False
 
     cands = find_cp2077_candidates()
-    if len(cands) == 1 and explicit is None:
-        return cands[0], False
-    if len(cands) > 1 and explicit is None:
-        _print("检测到多个赛博朋克 2077 安装：")
+    if cands and explicit is None:
+        if len(cands) == 1:
+            _print("检测到赛博朋克 2077 安装：")
+        else:
+            _print("检测到多个赛博朋克 2077 安装：")
         for i, path in enumerate(cands, 1):
             _print(f"  [{i}] {path}")
         if not prompt:
+            if len(cands) == 1:
+                _print(f"[自动] 无人值守模式使用：{cands[0]}")
+                return cands[0], False
             _print("请用 --cp2077-dir 指定，或设置环境变量 CP2077_DIR。")
             return None, False
         try:
             choice = input(
-                f"选择 [1-{len(cands)}]，或输入完整路径；直接回车跳过: "
+                f"选择 [1-{len(cands)}] 安装，或输入完整路径；直接回车跳过: "
             ).strip().strip('"')
         except EOFError:
             choice = ""
