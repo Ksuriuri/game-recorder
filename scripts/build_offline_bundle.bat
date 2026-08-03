@@ -20,7 +20,8 @@ REM     .tools\          uv.exe + managed Python 3.11 + uv cache
 REM     ffmpeg\          BtbN gpl FFmpeg (NVENC/AMF/QSV + libx264 + dshow)
 REM     wheels\          pre-downloaded dependency wheels (numpy, opencv-headless,
 REM                      dxcam, soundcard, cffi, pycparser …)
-REM     src\, scripts\, gta-camera\, rdr2-camera\, wukong-camera\, cp2077-camera\, pyproject.toml
+REM     src\, scripts\, gta-camera\, rdr2-camera\, wukong-camera\, cp2077-camera\,
+REM     s3-upload\（不含 .venv / oss_credentials.json）, pyproject.toml
 REM     根目录全部 *.bat / *.vbs / *.md / *.txt（install.bat、run.bat、录制操作手册.txt 等）
 REM
 REM   What is NOT shipped:
@@ -181,12 +182,31 @@ if exist "%BUNDLE_TMP%" del /q "%BUNDLE_TMP%" 2>nul
 
 REM Write to .tools\ first, then move — avoids Compress-Archive failing when an
 REM older portable zip in the project root is open in Explorer or the IDE.
+REM s3-upload is appended separately so we can skip .venv / __pycache__ / oss_credentials.json.
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
     "$ErrorActionPreference='Stop';" ^
+    "Add-Type -AssemblyName System.IO.Compression;" ^
+    "Add-Type -AssemblyName System.IO.Compression.FileSystem;" ^
     "$core = @('.tools','ffmpeg','wheels','src','scripts','gta-camera','rdr2-camera','wukong-camera','cp2077-camera','pyproject.toml');" ^
     "$root = Get-ChildItem -LiteralPath '.' -File | Where-Object { $_.Extension -in @('.bat','.vbs','.md','.txt') } | ForEach-Object { $_.Name };" ^
     "$items = ($core + $root) | Select-Object -Unique | Where-Object { Test-Path $_ };" ^
-    "Compress-Archive -Path $items -DestinationPath '%BUNDLE_TMP%' -CompressionLevel Optimal -Force"
+    "Compress-Archive -Path $items -DestinationPath '%BUNDLE_TMP%' -CompressionLevel Optimal -Force;" ^
+    "if (Test-Path -LiteralPath 's3-upload') {" ^
+    "  $zip = [System.IO.Compression.ZipFile]::Open('%BUNDLE_TMP%', [System.IO.Compression.ZipArchiveMode]::Update);" ^
+    "  try {" ^
+    "    $skipDirs = @('.venv','__pycache__');" ^
+    "    $skipFiles = @('oss_credentials.json');" ^
+    "    $rootPath = (Resolve-Path -LiteralPath 's3-upload').Path;" ^
+    "    Get-ChildItem -LiteralPath 's3-upload' -Recurse -Force -File | ForEach-Object {" ^
+    "      $rel = $_.FullName.Substring($rootPath.Length).TrimStart('\','/');" ^
+    "      $parts = $rel -split '[\\/]';" ^
+    "      if ($parts | Where-Object { $_ -in $skipDirs }) { return };" ^
+    "      if ($_.Name -in $skipFiles) { return };" ^
+    "      $entry = ('s3-upload/' + ($rel -replace '\\','/'));" ^
+    "      [void][System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $_.FullName, $entry, [System.IO.Compression.CompressionLevel]::Optimal);" ^
+    "    };" ^
+    "  } finally { $zip.Dispose() };" ^
+    "}"
 if errorlevel 1 (
     echo [错误] Compress-Archive 失败。
     exit /b 1
