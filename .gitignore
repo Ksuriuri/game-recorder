@@ -28,6 +28,7 @@ recordings/
 .cp2077_camera/
 .rdr2_camera/
 cp2077-camera/vendor/**/*.zip
+cp2077-camera/vendor/**/*.exe
 
 # Native/MSVC intermediate build outputs (keep dist/*.asi for installers)
 **/obj/

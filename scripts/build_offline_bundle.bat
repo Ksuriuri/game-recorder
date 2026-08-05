@@ -16,7 +16,9 @@ REM     3) Double-click install.bat       (~10 s, no network).
 REM     4) Double-click run.bat, then start GTA V or Black Myth: Wukong.
 REM
 REM   What goes into the zip:
-REM     .tools\          uv.exe + managed Python 3.11 + uv cache
+REM     .tools\uv\       uv.exe
+REM     .tools\python\   managed Python 3.11
+REM     .tools\uv-cache\ uv resolution cache (offline fallback)
 REM     ffmpeg\          BtbN gpl FFmpeg (NVENC/AMF/QSV + libx264 + dshow)
 REM     wheels\          pre-downloaded dependency wheels (numpy, opencv-headless,
 REM                      dxcam, soundcard, cffi, pycparser …)
@@ -27,7 +29,9 @@ REM
 REM   What is NOT shipped:
 REM     .venv\           path-bound; install.bat recreates it offline from wheels\
 REM     recordings\      user data
-REM     this script and any *.zip
+REM     .tools\llvm-mingw\ / vs2022-buildtools\ / *.zip / installer exes
+REM                     (local ASI compile toolchains — not needed on cafe PCs)
+REM     this script and any portable *.zip
 REM ============================================================
 
 cd /d "%~dp0\.."
@@ -82,16 +86,24 @@ if not exist "%UV_EXE%"           goto :missing_uv
 if not exist "%VENV_DIR%\Scripts\python.exe" goto :missing_venv
 
 echo.
-echo [1b/4] 正在预下载赛博朋克 2077 相机依赖 ^(RED4ext + CET^) ...
+echo [1b/4] 正在预下载赛博朋克 2077 相机依赖 ^(RED4ext + CET + ReShade^) ...
 "%VENV_DIR%\Scripts\python.exe" "%PROJECT_DIR%\scripts\install_cp2077_camera.py" --prefetch-deps
 if errorlevel 1 (
     echo [警告] CP2077 依赖预下载失败；离线包中赛博朋克相机可能无法一键安装。
 ) else (
+    if not exist "%PROJECT_DIR%\cp2077-camera\vendor\RED4ext" mkdir "%PROJECT_DIR%\cp2077-camera\vendor\RED4ext"
+    if not exist "%PROJECT_DIR%\cp2077-camera\vendor\CET" mkdir "%PROJECT_DIR%\cp2077-camera\vendor\CET"
+    if not exist "%PROJECT_DIR%\cp2077-camera\vendor\ReShade" mkdir "%PROJECT_DIR%\cp2077-camera\vendor\ReShade"
     if exist "%PROJECT_DIR%\.tools\cp2077-camera-cache\red4ext-1.30.0.zip" (
         copy /Y "%PROJECT_DIR%\.tools\cp2077-camera-cache\red4ext-1.30.0.zip" "%PROJECT_DIR%\cp2077-camera\vendor\RED4ext\" >nul
     )
     if exist "%PROJECT_DIR%\.tools\cp2077-camera-cache\cet_1.37.1.zip" (
         copy /Y "%PROJECT_DIR%\.tools\cp2077-camera-cache\cet_1.37.1.zip" "%PROJECT_DIR%\cp2077-camera\vendor\CET\" >nul
+    )
+    if exist "%PROJECT_DIR%\.tools\cp2077-camera-cache\ReShade_Setup_6.7.3_Addon.exe" (
+        copy /Y "%PROJECT_DIR%\.tools\cp2077-camera-cache\ReShade_Setup_6.7.3_Addon.exe" "%PROJECT_DIR%\cp2077-camera\vendor\ReShade\" >nul
+    ) else (
+        echo [警告] 缺少 ReShade_Setup_6.7.3_Addon.exe；离线安装 CP2077 深度捕获会失败。
     )
 )
 
@@ -180,35 +192,49 @@ set "BUNDLE=%PROJECT_DIR%\game-recorder-portable-%DATESTAMP%.zip"
 set "BUNDLE_TMP=%TOOLS_DIR%\bundle-%DATESTAMP%.zip"
 if exist "%BUNDLE_TMP%" del /q "%BUNDLE_TMP%" 2>nul
 
-REM Write to .tools\ first, then move — avoids Compress-Archive failing when an
-REM older portable zip in the project root is open in Explorer or the IDE.
-REM s3-upload is appended separately so we can skip .venv / __pycache__ / oss_credentials.json.
+REM Write to .tools\ first, then move — avoids zip failing when an older portable
+REM zip in the project root is open in Explorer or the IDE.
+REM Pack selectively: only runtime .tools subdirs (skip local ASI compile toolchains).
+REM s3-upload is included with .venv / __pycache__ / oss_credentials.json skipped.
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
     "$ErrorActionPreference='Stop';" ^
     "Add-Type -AssemblyName System.IO.Compression;" ^
     "Add-Type -AssemblyName System.IO.Compression.FileSystem;" ^
-    "$core = @('.tools','ffmpeg','wheels','src','scripts','gta-camera','rdr2-camera','wukong-camera','cp2077-camera','pyproject.toml');" ^
-    "$root = Get-ChildItem -LiteralPath '.' -File | Where-Object { $_.Extension -in @('.bat','.vbs','.md','.txt') } | ForEach-Object { $_.Name };" ^
-    "$items = ($core + $root) | Select-Object -Unique | Where-Object { Test-Path $_ };" ^
-    "Compress-Archive -Path $items -DestinationPath '%BUNDLE_TMP%' -CompressionLevel Optimal -Force;" ^
-    "if (Test-Path -LiteralPath 's3-upload') {" ^
-    "  $zip = [System.IO.Compression.ZipFile]::Open('%BUNDLE_TMP%', [System.IO.Compression.ZipArchiveMode]::Update);" ^
-    "  try {" ^
-    "    $skipDirs = @('.venv','__pycache__');" ^
-    "    $skipFiles = @('oss_credentials.json');" ^
-    "    $rootPath = (Resolve-Path -LiteralPath 's3-upload').Path;" ^
-    "    Get-ChildItem -LiteralPath 's3-upload' -Recurse -Force -File | ForEach-Object {" ^
-    "      $rel = $_.FullName.Substring($rootPath.Length).TrimStart('\','/');" ^
-    "      $parts = $rel -split '[\\/]';" ^
-    "      if ($parts | Where-Object { $_ -in $skipDirs }) { return };" ^
-    "      if ($_.Name -in $skipFiles) { return };" ^
-    "      $entry = ('s3-upload/' + ($rel -replace '\\','/'));" ^
-    "      [void][System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $_.FullName, $entry, [System.IO.Compression.CompressionLevel]::Optimal);" ^
-    "    };" ^
-    "  } finally { $zip.Dispose() };" ^
-    "}"
+    "function Add-Tree([System.IO.Compression.ZipArchive]$zip, [string]$dirPath, [string]$entryPrefix, [string[]]$skipDirs=@(), [string[]]$skipFiles=@()) {" ^
+    "  if (-not (Test-Path -LiteralPath $dirPath)) { return };" ^
+    "  $rootPath = (Resolve-Path -LiteralPath $dirPath).Path;" ^
+    "  Get-ChildItem -LiteralPath $dirPath -Recurse -Force -File | ForEach-Object {" ^
+    "    $rel = $_.FullName.Substring($rootPath.Length).TrimStart('\','/');" ^
+    "    $parts = $rel -split '[\\/]';" ^
+    "    if ($parts | Where-Object { $_ -in $skipDirs }) { return };" ^
+    "    if ($_.Name -in $skipFiles) { return };" ^
+    "    $entry = ($entryPrefix + ($rel -replace '\\','/'));" ^
+    "    [void][System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $_.FullName, $entry, [System.IO.Compression.CompressionLevel]::Optimal);" ^
+    "  };" ^
+    "};" ^
+    "if (Test-Path -LiteralPath '%BUNDLE_TMP%') { Remove-Item -LiteralPath '%BUNDLE_TMP%' -Force };" ^
+    "$zip = [System.IO.Compression.ZipFile]::Open('%BUNDLE_TMP%', [System.IO.Compression.ZipArchiveMode]::Create);" ^
+    "try {" ^
+    "  foreach ($name in @('uv','python','uv-cache')) {" ^
+    "    Add-Tree $zip (Join-Path '.tools' $name) ('.tools/' + $name + '/') ;" ^
+    "  };" ^
+    "  foreach ($name in @('ffmpeg','wheels','src','scripts')) {" ^
+    "    Add-Tree $zip $name ($name + '/') @('__pycache__','.venv');" ^
+    "  };" ^
+    "  $camSkip = @('__pycache__','.venv','bin','obj','.vs');" ^
+    "  foreach ($name in @('gta-camera','rdr2-camera','wukong-camera','cp2077-camera')) {" ^
+    "    Add-Tree $zip $name ($name + '/') $camSkip;" ^
+    "  };" ^
+    "  if (Test-Path -LiteralPath 'pyproject.toml') {" ^
+    "    [void][System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, (Resolve-Path -LiteralPath 'pyproject.toml').Path, 'pyproject.toml', [System.IO.Compression.CompressionLevel]::Optimal);" ^
+    "  };" ^
+    "  Get-ChildItem -LiteralPath '.' -File | Where-Object { $_.Extension -in @('.bat','.vbs','.md','.txt') } | ForEach-Object {" ^
+    "    [void][System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $_.FullName, $_.Name, [System.IO.Compression.CompressionLevel]::Optimal);" ^
+    "  };" ^
+    "  Add-Tree $zip 's3-upload' 's3-upload/' @('.venv','__pycache__') @('oss_credentials.json');" ^
+    "} finally { $zip.Dispose() }"
 if errorlevel 1 (
-    echo [错误] Compress-Archive 失败。
+    echo [错误] 压缩打包失败。
     exit /b 1
 )
 move /Y "%BUNDLE_TMP%" "%BUNDLE%" >nul
@@ -229,22 +255,21 @@ echo ============================================================
 echo   文件 : %BUNDLE%
 echo   大小 : %BUNDLE_MB% MB
 echo.
-echo   网吧部署：
-echo     1. 将 zip 复制到目标 PC 的 D 盘，不要用 C 盘
-echo     2. 右键 - 全部提取到纯英文目录，如 D:\game-recorder
-echo     3. 双击 install.bat（离线重建环境；可自动发现或提示输入 GTA/黑神话目录）
-echo     4. 双击 run.bat 后再进入对应游戏录制；session 内应有 camera.jsonl
+echo   Cafe deploy:
+echo     1. Copy the zip to D: on the target PC ^(not C:^)
+echo     2. Extract to an ASCII-only path, e.g. D:\game-recorder
+echo     3. Double-click "install.bat" ^(offline venv rebuild^)
+echo     4. Double-click "run.bat", then enter the game to record
 echo.
-echo   注意：
-echo     - 目标机需已安装 GTA V；ScriptHookV 版本需匹配当前游戏版本
-echo     - 游戏大更新后若进故事模式报 Unknown game version，需更新
-echo       gta-camera\vendor\ScriptHookV\ 后再跑一次 gta-camera\install.bat
-echo     - 黑神话插件完全离线分发；安装/卸载时必须先关闭游戏，写入受保护目录
-echo       时会请求 UAC。版本不匹配时请先验证兼容性，不要盲目强制安装
+echo   Notes:
+echo     - Target PC needs GTA V; ScriptHookV must match the game build
+echo     - After a big GTA update, refresh gta-camera\vendor\ScriptHookV
+echo       then re-run "gta-camera\install.bat"
+echo     - Wukong plugin is fully offline; close the game before install/uninstall
 echo.
-echo   本机构建后：
-echo     .venv\ 已删除，zip 中不包含路径绑定的 venv。
-echo     运行一次 install.bat 可从 wheels\ 离线重建 .venv\。
+echo   After this build:
+echo     Local .venv was removed ^(not shipped; path-bound^).
+echo     On the target PC, run "install.bat" to rebuild .venv from wheels.
 echo ============================================================
 exit /b 0
 

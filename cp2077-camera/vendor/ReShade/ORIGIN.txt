@@ -1,0 +1,3 @@
+﻿ReShade (full add-on support) — https://reshade.me
+Installed automatically by scripts/install_cp2077_camera.py when not vendored locally.
+Place ReShade_Setup_*_Addon.exe in this folder for offline cafe installs.
