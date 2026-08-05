@@ -44,7 +44,9 @@ class BalancedRadiusPolicy:
     return_yaw_deg_s: float = 55.0
     # Cap holds assuming run/sprint so we cannot plan a walk that tunnels out.
     walk_speed_mps: float = 5.0
+    # Fallback when ``movement_speed_scales`` has no entry for a slowed source.
     movement_speed_scale: float = 0.1
+    movement_speed_scales: dict[str, float] = field(default_factory=dict)
     slowed_sources: tuple[str, ...] = ("gta", "rdr2", "cp2077")
     # Near hard boundary: only clearly-inward moves (dot with to-anchor).
     soft_inward_min: float = 0.15
@@ -410,7 +412,12 @@ class BalancedRadiusPolicy:
     def _estimated_walk_speed(self, pose: UnifiedPose | None) -> float:
         scale = 1.0
         if pose is not None and pose.source_key in self.slowed_sources:
-            scale = max(0.05, min(1.0, float(self.movement_speed_scale)))
+            scale = float(
+                self.movement_speed_scales.get(
+                    pose.source_key, self.movement_speed_scale
+                )
+            )
+            scale = max(0.05, min(1.0, scale))
         return max(0.5, float(self.walk_speed_mps) * scale)
 
     def _resample(

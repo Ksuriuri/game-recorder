@@ -91,7 +91,12 @@ class Config:
     auto_move_action_hold_min_s: float = 2.5
     auto_move_action_hold_max_s: float = 4.5
     # Applied in-game for GTA5/RDR2/CP2077; Wukong keeps native keyboard speed.
+    # Prefer the per-game fields below; ``auto_move_speed_scale`` is the fallback
+    # used when a per-game value is unset (and for older callers/tests).
     auto_move_speed_scale: float = 0.1
+    auto_move_speed_scale_gta: float = 0.1
+    auto_move_speed_scale_rdr2: float = 0.35
+    auto_move_speed_scale_cp2077: float = 0.15
     auto_move_look_yaw_min_deg_s: float = 15.0
     auto_move_look_yaw_max_deg_s: float = 30.0
     auto_move_look_pitch_min_deg_s: float = 6.0
@@ -108,6 +113,26 @@ class Config:
             # still look "violent" to the shake detector — disable both in auto mode.
             self.idle_timeout_s = 0.0
             self.violent_duration_s = 0.0
+
+    def movement_speed_scale_for(self, source_key: str) -> float:
+        """In-game speed multiplier for a camera source (1.0 = native)."""
+        key = (source_key or "").strip().lower()
+        if key == "gta":
+            value = self.auto_move_speed_scale_gta
+        elif key == "rdr2":
+            value = self.auto_move_speed_scale_rdr2
+        elif key == "cp2077":
+            value = self.auto_move_speed_scale_cp2077
+        else:
+            return 1.0
+        return max(0.05, min(1.0, float(value)))
+
+    def movement_speed_scales(self) -> dict[str, float]:
+        return {
+            "gta": self.movement_speed_scale_for("gta"),
+            "rdr2": self.movement_speed_scale_for("rdr2"),
+            "cp2077": self.movement_speed_scale_for("cp2077"),
+        }
 
 
 def find_ffmpeg() -> str:

@@ -525,7 +525,7 @@ class Session:
                     start_epoch_ms=self._t0_epoch_ms,
                     fps=self.config.fps,
                     movement_speed_scale=(
-                        float(self.config.auto_move_speed_scale)
+                        self.config.movement_speed_scale_for(camera_source.key)
                         if self.config.auto_move
                         and camera_source.key in ("gta", "rdr2", "cp2077")
                         else 1.0
@@ -585,6 +585,7 @@ class Session:
                 hold_min_s=float(self.config.auto_move_action_hold_min_s),
                 hold_max_s=float(self.config.auto_move_action_hold_max_s),
                 movement_speed_scale=float(self.config.auto_move_speed_scale),
+                movement_speed_scales=self.config.movement_speed_scales(),
                 look_yaw_min_deg_s=float(self.config.auto_move_look_yaw_min_deg_s),
                 look_yaw_max_deg_s=float(self.config.auto_move_look_yaw_max_deg_s),
                 look_pitch_min_deg_s=float(self.config.auto_move_look_pitch_min_deg_s),

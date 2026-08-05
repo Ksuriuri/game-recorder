@@ -460,14 +460,26 @@ class BalancedRadiusPolicyTests(unittest.TestCase):
         self.assertNotEqual(first, second)
 
     def test_speed_estimate_only_slows_supported_games(self) -> None:
-        policy = BalancedRadiusPolicy(walk_speed_mps=5.0, movement_speed_scale=0.5)
+        policy = BalancedRadiusPolicy(
+            walk_speed_mps=5.0,
+            movement_speed_scale=0.5,
+            movement_speed_scales={"gta": 0.5, "rdr2": 0.2, "cp2077": 0.4},
+        )
         gta = UnifiedPose(
             0, 0.0, 0.0, 0.0, "gta", forward_x=0.0, forward_y=1.0, forward_z=0.0
+        )
+        rdr2 = UnifiedPose(
+            0, 0.0, 0.0, 0.0, "rdr2", forward_x=0.0, forward_y=1.0, forward_z=0.0
+        )
+        cp2077 = UnifiedPose(
+            0, 0.0, 0.0, 0.0, "cp2077", forward_x=0.0, forward_y=1.0, forward_z=0.0
         )
         wukong = UnifiedPose(
             0, 0.0, 0.0, 0.0, "wukong", forward_x=0.0, forward_y=1.0, forward_z=0.0
         )
         self.assertEqual(policy._estimated_walk_speed(gta), 2.5)
+        self.assertEqual(policy._estimated_walk_speed(rdr2), 1.0)
+        self.assertEqual(policy._estimated_walk_speed(cp2077), 2.0)
         self.assertEqual(policy._estimated_walk_speed(wukong), 5.0)
 
     def test_step_without_pose_does_not_crash(self) -> None:
@@ -718,6 +730,13 @@ class ConfigAutoMoveTests(unittest.TestCase):
             self.assertEqual(cfg.auto_move_action_hold_min_s, 2.5)
             self.assertEqual(cfg.auto_move_action_hold_max_s, 4.5)
             self.assertEqual(cfg.auto_move_speed_scale, 0.1)
+            self.assertEqual(cfg.auto_move_speed_scale_gta, 0.1)
+            self.assertEqual(cfg.auto_move_speed_scale_rdr2, 0.35)
+            self.assertEqual(cfg.auto_move_speed_scale_cp2077, 0.15)
+            self.assertEqual(cfg.movement_speed_scale_for("gta"), 0.1)
+            self.assertEqual(cfg.movement_speed_scale_for("rdr2"), 0.35)
+            self.assertEqual(cfg.movement_speed_scale_for("cp2077"), 0.15)
+            self.assertEqual(cfg.movement_speed_scale_for("wukong"), 1.0)
             self.assertEqual(cfg.auto_move_look_yaw_min_deg_s, 15.0)
             self.assertEqual(cfg.auto_move_look_yaw_max_deg_s, 30.0)
             self.assertEqual(cfg.auto_move_look_pitch_min_deg_s, 6.0)

@@ -307,8 +307,29 @@ def main() -> None:
     parser.add_argument(
         "--auto-move-speed-scale",
         type=float,
-        default=0.1,
-        help="GTA5/RDR2/赛博朋克 2077 自动移动速度倍率（默认：0.1）",
+        default=None,
+        help=(
+            "统一设置 GTA5/RDR2/赛博朋克 2077 速度倍率；"
+            "不指定则用各游戏独立默认（GTA 0.1 / RDR2 0.35 / 2077 0.15）"
+        ),
+    )
+    parser.add_argument(
+        "--auto-move-speed-scale-gta",
+        type=float,
+        default=None,
+        help="GTA5 自动移动速度倍率（默认：0.1）",
+    )
+    parser.add_argument(
+        "--auto-move-speed-scale-rdr2",
+        type=float,
+        default=None,
+        help="荒野大镖客 2 自动移动速度倍率（默认：0.35）",
+    )
+    parser.add_argument(
+        "--auto-move-speed-scale-cp2077",
+        type=float,
+        default=None,
+        help="赛博朋克 2077 自动移动速度倍率（默认：0.15）",
     )
     parser.add_argument(
         "--list-audio-devices",
@@ -384,6 +405,26 @@ def main() -> None:
             ", ".join(audio_fb.skipped) or "<无>",
         )
 
+    def _clamp_speed_scale(value: float) -> float:
+        return max(0.05, min(1.0, float(value)))
+
+    shared_speed = args.auto_move_speed_scale
+    speed_gta = (
+        args.auto_move_speed_scale_gta
+        if args.auto_move_speed_scale_gta is not None
+        else (shared_speed if shared_speed is not None else 0.1)
+    )
+    speed_rdr2 = (
+        args.auto_move_speed_scale_rdr2
+        if args.auto_move_speed_scale_rdr2 is not None
+        else (shared_speed if shared_speed is not None else 0.35)
+    )
+    speed_cp2077 = (
+        args.auto_move_speed_scale_cp2077
+        if args.auto_move_speed_scale_cp2077 is not None
+        else (shared_speed if shared_speed is not None else 0.15)
+    )
+
     config = Config(
         fps=args.fps,
         output_dir=Path(args.output),
@@ -409,7 +450,12 @@ def main() -> None:
         auto_move_policy=str(args.auto_move_policy),
         auto_move_action_hold_min_s=max(0.05, float(args.auto_move_hold_min)),
         auto_move_action_hold_max_s=max(0.05, float(args.auto_move_hold_max)),
-        auto_move_speed_scale=max(0.05, min(1.0, float(args.auto_move_speed_scale))),
+        auto_move_speed_scale=_clamp_speed_scale(
+            shared_speed if shared_speed is not None else speed_gta
+        ),
+        auto_move_speed_scale_gta=_clamp_speed_scale(speed_gta),
+        auto_move_speed_scale_rdr2=_clamp_speed_scale(speed_rdr2),
+        auto_move_speed_scale_cp2077=_clamp_speed_scale(speed_cp2077),
     )
 
     session: Session | None = None
@@ -684,7 +730,9 @@ def main() -> None:
         print(
             f"  自动移动: 已启用（{config.auto_move_tick_hz:g} Hz，"
             f"policy={config.auto_move_policy}，半径 {config.auto_move_radius_m:g} m，"
-            f"GTA5/RDR2/2077 速度 ×{config.auto_move_speed_scale:g}，"
+            f"速度 GTA×{config.auto_move_speed_scale_gta:g}/"
+            f"RDR2×{config.auto_move_speed_scale_rdr2:g}/"
+            f"2077×{config.auto_move_speed_scale_cp2077:g}，"
             f"WASD + 鼠标视角；{when}；空闲/僵滞/剧烈检测已关闭）"
         )
     else:
