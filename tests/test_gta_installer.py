@@ -81,6 +81,30 @@ class GtaInstallerPathDiscoveryTests(unittest.TestCase):
                 with self.assertRaisesRegex(FileNotFoundError, "Enhanced"):
                     installer.install_scripthookv_from_vendor(gta)
 
+    def test_close_gta_processes_kills_detected_images(self) -> None:
+        calls: list[list[str]] = []
+        checks = {"n": 0}
+
+        def fake_running() -> list[str]:
+            checks["n"] += 1
+            return ["GTA5_Enhanced.exe"] if checks["n"] == 1 else []
+
+        def fake_run(cmd, **_kwargs):  # type: ignore[no-untyped-def]
+            calls.append(list(cmd))
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        with mock.patch.object(
+            installer, "running_gta_processes", side_effect=fake_running
+        ), mock.patch.object(
+            installer, "_gta_process_pids", return_value=[19848]
+        ), mock.patch.object(
+            installer, "_run_silent", side_effect=lambda cmd: calls.append(list(cmd))
+        ), mock.patch("time.sleep", return_value=None):
+            closed = installer.close_gta_processes(wait_seconds=0.1)
+        self.assertEqual(closed, ["GTA5_Enhanced.exe"])
+        self.assertTrue(any("taskkill" in cmd for cmd in calls), calls)
+        self.assertTrue(any("wmic" in cmd for cmd in calls), calls)
+
     def test_write_config_puts_file_in_game_root(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

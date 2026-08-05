@@ -68,6 +68,13 @@ GTA_EXE_NAMES = (
     "GTA5_Enhanced.exe",
     "PlayGTAV.exe",
 )
+# Processes that lock ScriptHookV.dll / ASI files while running.
+GTA_PROCESS_NAMES = (
+    "GTA5.exe",
+    "GTA5_Enhanced.exe",
+    "GTA5_Enhanced_BE.exe",
+    "PlayGTAV.exe",
+)
 # Enhanced Edition must use ScriptHookV's xinput1_4 ASI loader (or OpenRPF's
 # dsound.dll). Classic dinput8.dll on Enhanced commonly prevents launch,
 # especially when stacked with an existing Enhanced loader / crack proxies.
@@ -335,6 +342,147 @@ def asi_loader_present(gta: Path) -> bool:
     if is_enhanced_gta(gta):
         return any((gta / name).is_file() for name in ENHANCED_ASI_LOADERS)
     return (gta / CLASSIC_ASI_LOADER).is_file()
+
+
+def running_gta_processes() -> list[str]:
+    """Return running GTA-related image names (case-preserved from tasklist)."""
+    if os.name != "nt":
+        return []
+    creation_no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        result = subprocess.run(
+            ["tasklist", "/FO", "CSV", "/NH"],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=creation_no_window,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if result.returncode != 0:
+        return []
+
+    import csv
+    import io
+
+    wanted = {name.casefold() for name in GTA_PROCESS_NAMES}
+    found: set[str] = set()
+    for row in csv.reader(io.StringIO(result.stdout)):
+        if not row:
+            continue
+        image = row[0].strip().strip('"')
+        if image.casefold() in wanted:
+            found.add(image)
+    return sorted(found, key=str.casefold)
+
+
+def _gta_process_pids(image: str) -> list[int]:
+    """Return PIDs for one image name via tasklist."""
+    if os.name != "nt":
+        return []
+    creation_no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        result = subprocess.run(
+            ["tasklist", "/FI", f"IMAGENAME eq {image}", "/FO", "CSV", "/NH"],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=creation_no_window,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if result.returncode != 0 or not result.stdout.strip():
+        return []
+
+    import csv
+    import io
+
+    pids: list[int] = []
+    for row in csv.reader(io.StringIO(result.stdout)):
+        if len(row) < 2:
+            continue
+        name = row[0].strip().strip('"')
+        if name.casefold() != image.casefold():
+            continue
+        pid_text = row[1].strip().strip('"')
+        if pid_text.isdigit():
+            pids.append(int(pid_text))
+    return pids
+
+
+def _run_silent(cmd: list[str]) -> None:
+    creation_no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        subprocess.run(
+            cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=creation_no_window,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def close_gta_processes(*, wait_seconds: float = 3.0) -> list[str]:
+    """Force-close leftover GTA processes that lock ScriptHookV/ASI files.
+
+    Returns the image names that were detected before killing.
+    """
+    import time
+
+    running = running_gta_processes()
+    if not running:
+        return []
+
+    _print("检测到游戏仍在运行，正在结束进程以免占用插件文件：")
+    for image in running:
+        _print(f"  结束 {image}")
+        _run_silent(["taskkill", "/F", "/IM", image, "/T"])
+        for pid in _gta_process_pids(image):
+            _run_silent(["taskkill", "/F", "/PID", str(pid), "/T"])
+        # Hung Enhanced processes sometimes ignore /IM but accept WMI terminate.
+        _run_silent(
+            ["wmic", "process", "where", f"name='{image}'", "call", "terminate"]
+        )
+
+    deadline = time.monotonic() + max(0.5, wait_seconds)
+    while time.monotonic() < deadline:
+        if not running_gta_processes():
+            break
+        time.sleep(0.25)
+
+    leftover = running_gta_processes()
+    if leftover:
+        _print(
+            "[警告] 仍有进程未退出："
+            + "、".join(leftover)
+            + "；若复制失败请到任务管理器手动结束后再试。"
+        )
+    else:
+        _print("  游戏进程已结束。")
+    return running
+
+
+def _copy_replace(src: Path, dst: Path) -> None:
+    """Copy ``src`` onto ``dst``, with a clearer lock error if Permission denied."""
+    try:
+        shutil.copy2(src, dst)
+    except PermissionError as exc:
+        raise PermissionError(
+            f"无法写入 {dst}（文件被占用）。\n"
+            "  通常是 GTA5 / PlayGTAV 仍在运行；安装器已尝试结束进程，"
+            "请确认任务管理器中无残留后重试。"
+        ) from exc
 
 
 def _prompt_gta_edition(
@@ -781,24 +929,28 @@ def build_asi_plugin() -> Path:
     return PREBUILT_ASI
 
 
-def install_asi_plugin(gta: Path, asi: Path) -> Path:
-    dest = gta / "CameraPoseLogger.asi"
-    shutil.copy2(asi, dest)
-    return dest
-
-
 def remove_shvdn_stack(gta: Path) -> None:
     """Remove SHVDN (.NET) stack that hangs GTA V Enhanced on startup."""
     removed = False
     for name in SHVDN_FILES:
         path = gta / name
         if path.is_file():
-            path.unlink()
+            try:
+                path.unlink()
+            except PermissionError as exc:
+                raise PermissionError(
+                    f"无法删除 {path}（仍被占用）。请确认游戏已退出后重试。"
+                ) from exc
             removed = True
             _print(f"  已移除 {name}")
     legacy_dll = gta / "scripts" / "CameraPoseLogger.dll"
     if legacy_dll.is_file():
-        legacy_dll.unlink()
+        try:
+            legacy_dll.unlink()
+        except PermissionError as exc:
+            raise PermissionError(
+                f"无法删除 {legacy_dll}（仍被占用）。请确认游戏已退出后重试。"
+            ) from exc
         removed = True
         _print("  已移除 scripts\\CameraPoseLogger.dll")
     if removed:
@@ -827,9 +979,14 @@ def quarantine_enhanced_incompatible_mods(gta: Path) -> None:
             continue
         quarantine.mkdir(parents=True, exist_ok=True)
         dest = quarantine / name
-        if dest.exists():
-            dest.unlink()
-        src.rename(dest)
+        try:
+            if dest.exists():
+                dest.unlink()
+            src.rename(dest)
+        except PermissionError as exc:
+            raise PermissionError(
+                f"无法移动 {src}（仍被占用）。请确认游戏已退出后重试。"
+            ) from exc
         moved = True
         _print(f"  已隔离 {name} → _mods_incompatible_enhanced\\")
     # Prefer a single Enhanced ASI loader; dsound + xinput together is fragile.
@@ -837,9 +994,14 @@ def quarantine_enhanced_incompatible_mods(gta: Path) -> None:
     if dsound.is_file() and (gta / "xinput1_4.dll").is_file():
         quarantine.mkdir(parents=True, exist_ok=True)
         dest = quarantine / "dsound.dll"
-        if dest.exists():
-            dest.unlink()
-        dsound.rename(dest)
+        try:
+            if dest.exists():
+                dest.unlink()
+            dsound.rename(dest)
+        except PermissionError as exc:
+            raise PermissionError(
+                f"无法移动 {dsound}（仍被占用）。请确认游戏已退出后重试。"
+            ) from exc
         moved = True
         _print("  已隔离 dsound.dll（与 xinput1_4 双加载器冲突）")
     if moved:
@@ -877,7 +1039,7 @@ def install_scripthookv_from_vendor(gta: Path) -> None:
         ver = ver_path.read_text(encoding="utf-8", errors="ignore").splitlines()[0].strip()
     edition = "Enhanced" if enhanced else "Legacy"
     _print(f"正在安装 ScriptHookV{(' (' + ver + ')') if ver else ''} [{edition}] …")
-    shutil.copy2(dll, gta / "ScriptHookV.dll")
+    _copy_replace(dll, gta / "ScriptHookV.dll")
     _print("  已复制 ScriptHookV.dll")
 
     if enhanced:
@@ -885,7 +1047,12 @@ def install_scripthookv_from_vendor(gta: Path) -> None:
         # xinput1_4/dsound (or crack version.dll proxies).
         stray = gta / CLASSIC_ASI_LOADER
         if stray.is_file():
-            stray.unlink()
+            try:
+                stray.unlink()
+            except PermissionError as exc:
+                raise PermissionError(
+                    f"无法删除冲突文件 {stray}（仍被占用）。请确认游戏已退出后重试。"
+                ) from exc
             _print(f"  已移除冲突的 {CLASSIC_ASI_LOADER}（Enhanced 不能用经典加载器）")
         present = [name for name in ENHANCED_ASI_LOADERS if (gta / name).is_file()]
         if not present:
@@ -897,8 +1064,14 @@ def install_scripthookv_from_vendor(gta: Path) -> None:
         _print(f"  使用已有 Enhanced ASI 加载器: {', '.join(present)}")
         return
 
-    shutil.copy2(dinput, gta / CLASSIC_ASI_LOADER)
+    _copy_replace(dinput, gta / CLASSIC_ASI_LOADER)
     _print(f"  已复制 {CLASSIC_ASI_LOADER}")
+
+
+def install_asi_plugin(gta: Path, asi: Path) -> Path:
+    dest = gta / "CameraPoseLogger.asi"
+    _copy_replace(asi, dest)
+    return dest
 
 
 def install_one_gta(gta: Path, recordings_dir: Path, *, asi: Path) -> int:
@@ -906,19 +1079,22 @@ def install_one_gta(gta: Path, recordings_dir: Path, *, asi: Path) -> int:
     edition = gta_edition_label(gta)
     _print()
     _print(f"---- 安装到 [{edition}] {gta} ----")
+    close_gta_processes()
 
     try:
         install_scripthookv_from_vendor(gta)
-    except FileNotFoundError as exc:
+    except (FileNotFoundError, PermissionError, OSError) as exc:
         _print(f"[错误] {exc}")
         return 1
 
-    remove_shvdn_stack(gta)
-    quarantine_enhanced_incompatible_mods(gta)
-
     try:
+        remove_shvdn_stack(gta)
+        quarantine_enhanced_incompatible_mods(gta)
         dest = install_asi_plugin(gta, asi)
         cfg = write_config(gta, recordings_dir)
+    except (PermissionError, OSError) as exc:
+        _print(f"[错误] {exc}")
+        return 1
     except Exception as exc:
         _print(f"[错误] {exc}")
         return 1
