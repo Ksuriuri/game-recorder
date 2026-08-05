@@ -38,6 +38,14 @@ class Cp2077CameraLoggerTests(unittest.TestCase):
         self.assertNotIn("CONTROL_POLL_MS", source)
         self.assertNotIn("join_path(control.session_dir", source)
 
+    def test_applies_and_restores_temporary_movement_speed_modifier(self) -> None:
+        source = LOGGER_PATH.read_text(encoding="utf-8")
+        self.assertIn("control.movement_speed_scale", source)
+        self.assertIn("gamedataStatType.MaxSpeed", source)
+        self.assertIn("gameStatModifierType.Multiplier", source)
+        self.assertIn("RemoveModifier(entity_id, modifier)", source)
+        self.assertIn("restore_movement_speed()", source)
+
 
 if __name__ == "__main__":
     unittest.main()

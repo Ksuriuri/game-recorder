@@ -8,7 +8,7 @@ it cannot be detected automatically.
 Usage::
 
     python scripts/install_gta_camera.py
-    python scripts/install_gta_camera.py --gta-dir "D:\\...\\Grand Theft Auto V"
+    python scripts/install_gta_camera.py --no-prompt
 """
 
 from __future__ import annotations
@@ -39,6 +39,23 @@ PLUGIN_PROJ = PROJECT_ROOT / "gta-camera" / "CameraPoseLogger" / "CameraPoseLogg
 VENDORED_SHVDN = PROJECT_ROOT / "gta-camera" / "vendor" / "ScriptHookVDotNet"
 VENDORED_SHV = PROJECT_ROOT / "gta-camera" / "vendor" / "ScriptHookV"
 PREBUILT_DLL = PROJECT_ROOT / "gta-camera" / "dist" / "CameraPoseLogger.dll"
+PREBUILT_ASI = PROJECT_ROOT / "gta-camera" / "dist" / "CameraPoseLogger.asi"
+ASI_BUILD_OUT = (
+    PROJECT_ROOT
+    / "gta-camera"
+    / "AsiCameraPoseLogger"
+    / "bin"
+    / "Release"
+    / "CameraPoseLogger.asi"
+)
+SHVDN_FILES = (
+    "ScriptHookVDotNet.asi",
+    "ScriptHookVDotNet.dll",
+    "ScriptHookVDotNet2.dll",
+    "ScriptHookVDotNet3.dll",
+    "ScriptHookVDotNet_README.txt",
+    "ScriptHookVDotNet_LICENSE.txt",
+)
 
 # Steam store app id for Grand Theft Auto V (classic).
 GTA_STEAM_APP_ID = "271590"
@@ -51,6 +68,11 @@ GTA_EXE_NAMES = (
     "GTA5_Enhanced.exe",
     "PlayGTAV.exe",
 )
+# Enhanced Edition must use ScriptHookV's xinput1_4 ASI loader (or OpenRPF's
+# dsound.dll). Classic dinput8.dll on Enhanced commonly prevents launch,
+# especially when stacked with an existing Enhanced loader / crack proxies.
+ENHANCED_ASI_LOADERS = ("xinput1_4.dll", "dsound.dll")
+CLASSIC_ASI_LOADER = "dinput8.dll"
 
 
 def _print(msg: str = "") -> None:
@@ -286,78 +308,145 @@ def is_gta_dir(path: Path) -> bool:
     return any((path / name).is_file() for name in GTA_EXE_NAMES)
 
 
-def resolve_gta_dir(explicit: Path | None, *, prompt: bool) -> tuple[Path | None, bool]:
-    """Return ``(gta_dir, skipped)``.
+def is_enhanced_gta(path: Path) -> bool:
+    """True when the install is GTA V Enhanced (not Legacy)."""
+    return (path / "GTA5_Enhanced.exe").is_file()
 
-    ``skipped=True`` means the user chose to skip (empty Enter).
-    ``(None, False)`` means unavailable / invalid without a voluntary skip.
-    """
-    if explicit is not None:
-        if is_gta_dir(explicit):
-            return explicit.resolve(), False
-        _print(f"[错误] 不是有效的 GTA V 目录：{explicit}")
-        if not prompt:
-            return None, False
-        _print("请重新输入，或直接回车跳过 GTA 相机插件安装。")
 
-    cands = [p for p in find_gta_candidates() if is_gta_dir(p)]
-    if cands and explicit is None:
-        if len(cands) == 1:
-            _print("检测到 GTA V 安装：")
-        else:
-            _print("检测到多个 GTA V 安装：")
-        for i, p in enumerate(cands, 1):
-            _print(f"  [{i}] {p}")
-        if not prompt:
-            _print(f"[自动] 无人值守模式使用：{cands[0]}")
-            return cands[0].resolve(), False
+def is_legacy_gta(path: Path) -> bool:
+    """True when the install has classic GTA5.exe."""
+    return (path / "GTA5.exe").is_file()
+
+
+def gta_edition_label(path: Path) -> str:
+    legacy = is_legacy_gta(path)
+    enhanced = is_enhanced_gta(path)
+    if legacy and enhanced:
+        return "Legacy+Enhanced"
+    if enhanced:
+        return "Enhanced"
+    if legacy:
+        return "Legacy"
+    return "GTA V"
+
+
+def asi_loader_present(gta: Path) -> bool:
+    """Return whether a ScriptHook-compatible ASI loader is already present."""
+    if is_enhanced_gta(gta):
+        return any((gta / name).is_file() for name in ENHANCED_ASI_LOADERS)
+    return (gta / CLASSIC_ASI_LOADER).is_file()
+
+
+def _prompt_gta_edition(
+    *,
+    title: str,
+    exe_names: tuple[str, ...],
+    candidates: list[Path],
+) -> Path | None:
+    """Ask once for one GTA edition. Empty Enter skips."""
+    _print()
+    _print(title)
+    if candidates:
+        for index, path in enumerate(candidates, 1):
+            _print(f"  [{index}] {path}")
+        hint = f"选择 [1-{len(candidates)}]、输入完整路径；直接回车跳过: "
+    else:
+        _print("  （未自动检测到）")
+        hint = f"请输入含 {' / '.join(exe_names)} 的目录；直接回车跳过: "
+
+    while True:
         try:
-            choice = input(
-                f"选择 [1-{len(cands)}] 安装，或输入完整路径；直接回车跳过: "
-            ).strip().strip('"')
+            choice = input(hint).strip().strip('"')
         except EOFError:
             choice = ""
         if not choice:
-            _print("[跳过] 未安装 GTA 相机插件。")
-            return None, True
-        if choice.isdigit():
+            return None
+        if choice.isdigit() and candidates:
             idx = int(choice) - 1
-            if 0 <= idx < len(cands):
-                return cands[idx].resolve(), False
-            _print("[错误] 无效选项。")
-            return None, False
+            if 0 <= idx < len(candidates):
+                return candidates[idx].resolve()
+            _print("[错误] 无效选项，请重试或直接回车跳过。")
+            continue
         path = Path(choice)
-        if is_gta_dir(path):
-            return path.resolve(), False
-        _print(f"[错误] 目录无效（需要含 GTA5.exe）：{path}")
-        return None, False
-
-    if not prompt:
-        _print("[错误] 未找到 GTA V。设置 GTAV_DIR 或传入 --gta-dir。")
-        return None, False
-
-    _print("未自动找到 GTA V。")
-    while True:
-        try:
-            typed = input(
-                "请输入 GTA 主目录路径（含 GTA5.exe 的文件夹；直接回车跳过）: "
-            ).strip().strip('"')
-        except EOFError:
-            typed = ""
-        if not typed:
-            _print("[跳过] 未安装 GTA 相机插件。")
-            return None, True
-        path = Path(typed)
-        if is_gta_dir(path):
-            return path.resolve(), False
-        _print(f"[错误] 不是有效目录（未找到 GTA5.exe）：{path}")
+        if any((path / name).is_file() for name in exe_names):
+            return path.resolve()
+        _print(f"[错误] 目录无效（需要含 {' / '.join(exe_names)}）：{path}")
         _print("请重新输入，或直接回车跳过。")
 
 
-def scripthookv_installed(gta: Path) -> bool:
-    return (gta / "ScriptHookV.dll").is_file() and (
-        (gta / "dinput8.dll").is_file() or (gta / "version.dll").is_file()
+def resolve_gta_dirs(
+    explicit: Path | None,
+    *,
+    prompt: bool,
+) -> tuple[list[Path], bool]:
+    """Return ``(dirs_to_install, skipped_all)``.
+
+    Interactive mode asks for Legacy and Enhanced separately (Enter skips each),
+    matching the other per-game installers.
+    """
+    if explicit is not None:
+        if is_gta_dir(explicit):
+            return [explicit.resolve()], False
+        _print(f"[错误] 不是有效的 GTA V 目录：{explicit}")
+        if not prompt:
+            return [], False
+        _print("改为交互询问经典版 / 增强版路径。")
+
+    cands = [p for p in find_gta_candidates() if is_gta_dir(p)]
+    if cands:
+        _print("检测到以下 GTA V 安装：")
+        for index, path in enumerate(cands, 1):
+            _print(f"  [{index}] {path}  ({gta_edition_label(path)})")
+    else:
+        _print("未自动找到 GTA V 安装。")
+
+    if not prompt:
+        if not cands:
+            _print("[错误] 未找到 GTA V。设置 GTAV_DIR 或传入 --gta-dir。")
+            return [], False
+        chosen = [path.resolve() for path in cands]
+        _print("[自动] 无人值守模式将安装到以上全部检测到的目录。")
+        return chosen, False
+
+    _print()
+    _print("将分别询问经典版与增强版（可只装其中一个；直接回车跳过该项）。")
+    legacy_cands = [p for p in cands if is_legacy_gta(p)]
+    enhanced_cands = [p for p in cands if is_enhanced_gta(p)]
+
+    selected: list[Path] = []
+    legacy = _prompt_gta_edition(
+        title="经典版 GTA V（GTA5.exe）",
+        exe_names=("GTA5.exe",),
+        candidates=legacy_cands,
     )
+    if legacy is not None:
+        selected.append(legacy)
+
+    enhanced = _prompt_gta_edition(
+        title="增强版 GTA V（GTA5_Enhanced.exe）",
+        exe_names=("GTA5_Enhanced.exe",),
+        candidates=enhanced_cands,
+    )
+    if enhanced is not None:
+        selected.append(enhanced)
+
+    unique = _unique_paths(selected)
+    if not unique:
+        _print("[跳过] 未安装 GTA 相机插件。")
+        return [], True
+    return unique, False
+
+
+def resolve_gta_dir(explicit: Path | None, *, prompt: bool) -> tuple[Path | None, bool]:
+    """Back-compat wrapper: first selected dir, or ``(None, skipped)``."""
+    dirs, skipped = resolve_gta_dirs(explicit, prompt=prompt)
+    if not dirs:
+        return None, skipped
+    return dirs[0], False
+
+
+def scripthookv_installed(gta: Path) -> bool:
+    return (gta / "ScriptHookV.dll").is_file() and asi_loader_present(gta)
 
 
 def shvdn_installed(gta: Path) -> bool:
@@ -609,9 +698,8 @@ def build_plugin(gta: Path) -> Path:
 
 
 def write_config(gta: Path, recordings_root: Path) -> Path:
-    scripts = gta / "scripts"
-    scripts.mkdir(parents=True, exist_ok=True)
-    cam_dir = (Path(recordings_root).resolve().parent / ".gta_camera")
+    """Write camera_pose_logger.config.json next to the ASI (game root)."""
+    cam_dir = Path(recordings_root).resolve().parent / ".gta_camera"
     cam_dir.mkdir(parents=True, exist_ok=True)
     control = cam_dir / "active_session.json"
     cfg = {
@@ -619,18 +707,143 @@ def write_config(gta: Path, recordings_root: Path) -> Path:
         "control_file": str(control).replace("\\", "/"),
         "follow_recorder": True,
         "sample_hz": 30,
+        "poll_interval_ms": 100,
+        "flush_every_samples": 30,
         "toggle_key": "none",
         "flush_key": "F9",
     }
-    path = scripts / "camera_pose_logger.config.json"
+    path = gta / "camera_pose_logger.config.json"
     path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    # Seed idle control file so plugin has a known path
+    # Keep a scripts/ copy for any leftover SHVDN setups.
+    scripts = gta / "scripts"
+    scripts.mkdir(parents=True, exist_ok=True)
+    (scripts / "camera_pose_logger.config.json").write_text(
+        path.read_text(encoding="utf-8"), encoding="utf-8"
+    )
     idle = {
         "status": "idle",
         "updated_at_ms": 0,
     }
     control.write_text(json.dumps(idle, indent=2) + "\n", encoding="utf-8")
     return path
+
+
+def find_asi_plugin() -> Path | None:
+    if PREBUILT_ASI.is_file():
+        return PREBUILT_ASI
+    if ASI_BUILD_OUT.is_file():
+        return ASI_BUILD_OUT
+    matches = list(
+        (PROJECT_ROOT / "gta-camera" / "AsiCameraPoseLogger").rglob("CameraPoseLogger.asi")
+    )
+    return matches[0] if matches else None
+
+
+def build_asi_plugin() -> Path:
+    existing = find_asi_plugin()
+    if existing is not None and existing.resolve() == PREBUILT_ASI.resolve():
+        _print(f"使用预编译原生插件：{existing}")
+        return existing
+
+    msbuild_candidates = [
+        PROJECT_ROOT / ".tools" / "vs2022-buildtools" / "MSBuild" / "Current" / "Bin" / "MSBuild.exe",
+        Path(r"C:\Program Files\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe"),
+        Path(r"C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe"),
+    ]
+    msbuild = next((p for p in msbuild_candidates if p.is_file()), None)
+    if msbuild is None:
+        if existing is not None:
+            _print(f"未找到 MSBuild，回退已有 ASI：{existing}")
+            return existing
+        raise RuntimeError(
+            "缺少 CameraPoseLogger.asi，且未找到 MSBuild。\n"
+            "  请先运行 gta-camera\\build_asi.bat，或把 ASI 放到 gta-camera\\dist\\"
+        )
+
+    proj = PROJECT_ROOT / "gta-camera" / "AsiCameraPoseLogger" / "CameraPoseLogger.vcxproj"
+    _print(f"正在编译原生 CameraPoseLogger.asi …\n  msbuild: {msbuild}")
+    result = subprocess.run(
+        [
+            str(msbuild),
+            str(proj),
+            "/m",
+            "/nologo",
+            "/p:Configuration=Release",
+            "/p:Platform=x64",
+        ],
+        cwd=str(proj.parent),
+        check=False,
+    )
+    if result.returncode != 0 or not ASI_BUILD_OUT.is_file():
+        raise RuntimeError("CameraPoseLogger.asi 编译失败")
+    PREBUILT_ASI.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(ASI_BUILD_OUT, PREBUILT_ASI)
+    return PREBUILT_ASI
+
+
+def install_asi_plugin(gta: Path, asi: Path) -> Path:
+    dest = gta / "CameraPoseLogger.asi"
+    shutil.copy2(asi, dest)
+    return dest
+
+
+def remove_shvdn_stack(gta: Path) -> None:
+    """Remove SHVDN (.NET) stack that hangs GTA V Enhanced on startup."""
+    removed = False
+    for name in SHVDN_FILES:
+        path = gta / name
+        if path.is_file():
+            path.unlink()
+            removed = True
+            _print(f"  已移除 {name}")
+    legacy_dll = gta / "scripts" / "CameraPoseLogger.dll"
+    if legacy_dll.is_file():
+        legacy_dll.unlink()
+        removed = True
+        _print("  已移除 scripts\\CameraPoseLogger.dll")
+    if removed:
+        _print("  （SHVDN/.NET 相机会导致 Enhanced 启动卡死，已改用原生 ASI）")
+
+
+# Crack bundles that commonly freeze Enhanced once ScriptHookV scripts start.
+ENHANCED_INCOMPATIBLE_ASIS = (
+    "NativeTrainer.asi",
+    "NativeTrainerConfig.xml",
+    "TrainerV.asi",
+    "trainerv.ini",
+    "OpenRPF.asi",
+)
+
+
+def quarantine_enhanced_incompatible_mods(gta: Path) -> None:
+    """Move known-hanging crack trainers out of the Enhanced game root."""
+    if not is_enhanced_gta(gta):
+        return
+    quarantine = gta / "_mods_incompatible_enhanced"
+    moved = False
+    for name in ENHANCED_INCOMPATIBLE_ASIS:
+        src = gta / name
+        if not src.is_file():
+            continue
+        quarantine.mkdir(parents=True, exist_ok=True)
+        dest = quarantine / name
+        if dest.exists():
+            dest.unlink()
+        src.rename(dest)
+        moved = True
+        _print(f"  已隔离 {name} → _mods_incompatible_enhanced\\")
+    # Prefer a single Enhanced ASI loader; dsound + xinput together is fragile.
+    dsound = gta / "dsound.dll"
+    if dsound.is_file() and (gta / "xinput1_4.dll").is_file():
+        quarantine.mkdir(parents=True, exist_ok=True)
+        dest = quarantine / "dsound.dll"
+        if dest.exists():
+            dest.unlink()
+        dsound.rename(dest)
+        moved = True
+        _print("  已隔离 dsound.dll（与 xinput1_4 双加载器冲突）")
+    if moved:
+        _print("  说明: 这些破解自带修改器在 Enhanced+当前 ScriptHookV 下会卡死启动")
 
 
 def install_plugin_dll(gta: Path, dll: Path) -> Path:
@@ -642,56 +855,57 @@ def install_plugin_dll(gta: Path, dll: Path) -> Path:
 
 
 def install_scripthookv_from_vendor(gta: Path) -> None:
-    """Copy vendored ScriptHookV.dll + dinput8.dll into the GTA root."""
+    """Copy vendored ScriptHookV into the GTA root with the correct ASI loader.
+
+    Legacy uses ``dinput8.dll``. Enhanced must keep ``xinput1_4.dll`` /
+    ``dsound.dll`` and must not receive classic ``dinput8.dll``.
+    """
     dll = VENDORED_SHV / "ScriptHookV.dll"
-    dinput = VENDORED_SHV / "dinput8.dll"
-    if not dll.is_file() or not dinput.is_file():
+    dinput = VENDORED_SHV / CLASSIC_ASI_LOADER
+    if not dll.is_file():
         raise FileNotFoundError(
-            f"项目缺少 ScriptHookV 文件，请放到:\n  {VENDORED_SHV}\\ScriptHookV.dll\n  {VENDORED_SHV}\\dinput8.dll"
+            f"项目缺少 ScriptHookV 文件，请放到:\n  {VENDORED_SHV}\\ScriptHookV.dll"
+        )
+    enhanced = is_enhanced_gta(gta)
+    if not enhanced and not dinput.is_file():
+        raise FileNotFoundError(
+            f"项目缺少 ScriptHookV ASI 加载器，请放到:\n  {VENDORED_SHV}\\{CLASSIC_ASI_LOADER}"
         )
     ver = ""
     ver_path = VENDORED_SHV / "VERSION.txt"
     if ver_path.is_file():
         ver = ver_path.read_text(encoding="utf-8", errors="ignore").splitlines()[0].strip()
-    _print(f"正在安装 ScriptHookV{(' (' + ver + ')') if ver else ''} …")
+    edition = "Enhanced" if enhanced else "Legacy"
+    _print(f"正在安装 ScriptHookV{(' (' + ver + ')') if ver else ''} [{edition}] …")
     shutil.copy2(dll, gta / "ScriptHookV.dll")
-    shutil.copy2(dinput, gta / "dinput8.dll")
     _print("  已复制 ScriptHookV.dll")
-    _print("  已复制 dinput8.dll")
+
+    if enhanced:
+        # Classic dinput8 on Enhanced commonly blocks launch when stacked with
+        # xinput1_4/dsound (or crack version.dll proxies).
+        stray = gta / CLASSIC_ASI_LOADER
+        if stray.is_file():
+            stray.unlink()
+            _print(f"  已移除冲突的 {CLASSIC_ASI_LOADER}（Enhanced 不能用经典加载器）")
+        present = [name for name in ENHANCED_ASI_LOADERS if (gta / name).is_file()]
+        if not present:
+            raise FileNotFoundError(
+                "检测到 GTA V Enhanced，但根目录没有 ASI 加载器。\n"
+                f"  请保留游戏自带的 {ENHANCED_ASI_LOADERS[0]}（ScriptHookV Enhanced）\n"
+                f"  或 {ENHANCED_ASI_LOADERS[1]}（OpenRPF），不要安装经典版 {CLASSIC_ASI_LOADER}。"
+            )
+        _print(f"  使用已有 Enhanced ASI 加载器: {', '.join(present)}")
+        return
+
+    shutil.copy2(dinput, gta / CLASSIC_ASI_LOADER)
+    _print(f"  已复制 {CLASSIC_ASI_LOADER}")
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="安装 GTA V 相机位姿采集插件")
-    parser.add_argument("--gta-dir", type=Path, default=None, help="GTA V 安装目录")
-    parser.add_argument(
-        "--recordings-dir",
-        type=Path,
-        default=PROJECT_ROOT / "recordings",
-        help="game-recorder 输出目录（默认项目 recordings/）",
-    )
-    parser.add_argument(
-        "--skip-shvdn-download",
-        action="store_true",
-        help="不联网下载 SHVDN（优先用项目内 vendor）",
-    )
-    parser.add_argument(
-        "--no-prompt",
-        action="store_true",
-        help="无人值守：找不到游戏时失败，不询问路径",
-    )
-    args = parser.parse_args(argv)
-
-    _print("============================================================")
-    _print("  GTA 相机轨迹插件安装")
-    _print("============================================================")
-
-    gta, skipped = resolve_gta_dir(args.gta_dir, prompt=not args.no_prompt)
-    if gta is None:
-        return 3 if skipped else 1
-    _print(f"GTA V: {gta}")
-
-    cache = PROJECT_ROOT / ".tools" / "gta-camera-cache"
-    cache.mkdir(parents=True, exist_ok=True)
+def install_one_gta(gta: Path, recordings_dir: Path, *, asi: Path) -> int:
+    """Install camera stack into one GTA root. Returns 0 on success."""
+    edition = gta_edition_label(gta)
+    _print()
+    _print(f"---- 安装到 [{edition}] {gta} ----")
 
     try:
         install_scripthookv_from_vendor(gta)
@@ -699,56 +913,105 @@ def main(argv: list[str] | None = None) -> int:
         _print(f"[错误] {exc}")
         return 1
 
-    if install_shvdn_from_vendor(gta):
-        pass
-    elif shvdn_installed(gta):
-        _print("ScriptHookVDotNet: 已安装（项目 vendor 中无副本，保留现有）")
-    elif args.skip_shvdn_download:
-        _print("[错误] 未安装 ScriptHookVDotNet，且项目 vendor 中也没有")
-        return 1
-    else:
-        try:
-            download_shvdn(gta, cache)
-        except (urllib.error.URLError, TimeoutError, RuntimeError, OSError) as exc:
-            _print(f"[错误] ScriptHookVDotNet 下载失败：{exc}")
-            _print(
-                "  可将官方 zip 解压到 gta-camera\\vendor\\ScriptHookVDotNet\\ 后重试。"
-            )
-            return 1
+    remove_shvdn_stack(gta)
+    quarantine_enhanced_incompatible_mods(gta)
 
     try:
-        dll = build_plugin(gta)
-        dest = install_plugin_dll(gta, dll)
-        cfg = write_config(gta, Path(args.recordings_dir))
+        dest = install_asi_plugin(gta, asi)
+        cfg = write_config(gta, recordings_dir)
     except Exception as exc:
         _print(f"[错误] {exc}")
         return 1
 
-    missing = []
-    for rel in (
+    missing: list[str] = []
+    required = [
         "ScriptHookV.dll",
-        "dinput8.dll",
-        "ScriptHookVDotNet.asi",
-        "ScriptHookVDotNet3.dll",
-        "scripts\\CameraPoseLogger.dll",
-        "scripts\\camera_pose_logger.config.json",
-    ):
+        "CameraPoseLogger.asi",
+        "camera_pose_logger.config.json",
+    ]
+    if is_enhanced_gta(gta):
+        if not asi_loader_present(gta):
+            missing.append(" 或 ".join(ENHANCED_ASI_LOADERS))
+        if (gta / CLASSIC_ASI_LOADER).is_file():
+            _print(f"[错误] Enhanced 目录仍存在冲突文件 {CLASSIC_ASI_LOADER}，请删除后重试")
+            return 1
+    else:
+        required.insert(1, CLASSIC_ASI_LOADER)
+    for rel in required:
         if not (gta / rel).is_file():
             missing.append(rel)
     if missing:
         _print("[错误] 安装后校验失败，缺少：")
-        for m in missing:
-            _print(f"  - {m}")
+        for item in missing:
+            _print(f"  - {item}")
         return 1
 
-    control = Path(args.recordings_dir).resolve().parent / ".gta_camera" / "active_session.json"
-    _print()
-    _print("安装完成（已校验文件齐全）。")
-    _print(f"  GTA 目录: {gta}")
     _print(f"  相机插件: {dest}")
-    _print(f"  同步信号: {control}")
-    _print("  下一步: 故事模式进 GTA → run.bat 录制 → session 内应有 camera.jsonl")
+    _print(f"  配置文件: {cfg}")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="安装 GTA V 相机位姿采集插件")
+    parser.add_argument(
+        "--gta-dir",
+        type=Path,
+        default=None,
+        help="仅安装到该目录（默认交互分别询问经典版/增强版）",
+    )
+    parser.add_argument(
+        "--recordings-dir",
+        type=Path,
+        default=PROJECT_ROOT / "recordings",
+        help="game-recorder 输出目录（默认项目 recordings/）",
+    )
+    parser.add_argument(
+        "--no-prompt",
+        action="store_true",
+        help="无人值守：不询问，自动安装到检测到的全部 GTA 目录",
+    )
+    args = parser.parse_args(argv)
+
     _print("============================================================")
+    _print("  GTA 相机轨迹插件安装（原生 ASI）")
+    _print("============================================================")
+
+    dirs, skipped = resolve_gta_dirs(args.gta_dir, prompt=not args.no_prompt)
+    if not dirs:
+        return 3 if skipped else 1
+
+    try:
+        asi = build_asi_plugin()
+    except Exception as exc:
+        _print(f"[错误] {exc}")
+        return 1
+
+    recordings = Path(args.recordings_dir)
+    succeeded: list[Path] = []
+    failed: list[Path] = []
+    for gta in dirs:
+        if install_one_gta(gta, recordings, asi=asi) == 0:
+            succeeded.append(gta)
+        else:
+            failed.append(gta)
+
+    control = recordings.resolve().parent / ".gta_camera" / "active_session.json"
+    _print()
+    if succeeded:
+        _print("安装完成：")
+        for gta in succeeded:
+            _print(f"  [OK] [{gta_edition_label(gta)}] {gta}")
+        _print(f"  同步信号: {control}")
+        _print("  下一步: 故事模式进 GTA → run.bat 录制 → session 内应有 camera.jsonl")
+    if failed:
+        _print("以下目录安装失败：")
+        for gta in failed:
+            _print(f"  [失败] [{gta_edition_label(gta)}] {gta}")
+    _print("============================================================")
+    if failed and not succeeded:
+        return 1
+    if failed:
+        return 1
     return 0
 
 

@@ -170,6 +170,7 @@ def publish_active_session(
     start_epoch_ms: int,
     fps: int,
     sample_hz: float | None = None,
+    movement_speed_scale: float = 1.0,
 ) -> Path:
     """Atomically publish a recording session for one in-game camera plugin."""
     payload: dict[str, Any] = {
@@ -180,6 +181,7 @@ def publish_active_session(
         "fps": int(fps),
         "sample_hz": float(sample_hz if sample_hz is not None else fps),
         "raw_file": source.raw_filename,
+        "movement_speed_scale": max(0.05, min(1.0, float(movement_speed_scale))),
         "updated_at_ms": int(time.time() * 1000),
     }
     if source.requires_windows_qpc:

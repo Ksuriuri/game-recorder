@@ -44,6 +44,71 @@ class GtaInstallerPathDiscoveryTests(unittest.TestCase):
             self.assertTrue(installer.is_gta_dir(classic))
             self.assertTrue(installer.is_gta_dir(enhanced))
             self.assertFalse(installer.is_gta_dir(root))
+            self.assertFalse(installer.is_enhanced_gta(classic))
+            self.assertTrue(installer.is_enhanced_gta(enhanced))
+
+    def test_install_scripthookv_uses_xinput_on_enhanced_not_dinput8(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            gta = root / "enhanced"
+            vendor = root / "vendor"
+            gta.mkdir()
+            vendor.mkdir()
+            (gta / "GTA5_Enhanced.exe").write_bytes(b"game")
+            (gta / "xinput1_4.dll").write_bytes(b"enhanced-loader")
+            (gta / "dinput8.dll").write_bytes(b"stray-classic-loader")
+            (vendor / "ScriptHookV.dll").write_bytes(b"shv")
+            (vendor / "dinput8.dll").write_bytes(b"classic-loader")
+            (vendor / "VERSION.txt").write_text("test\n", encoding="utf-8")
+            with mock.patch.object(installer, "VENDORED_SHV", vendor):
+                installer.install_scripthookv_from_vendor(gta)
+            self.assertEqual((gta / "ScriptHookV.dll").read_bytes(), b"shv")
+            self.assertFalse((gta / "dinput8.dll").exists())
+            self.assertEqual((gta / "xinput1_4.dll").read_bytes(), b"enhanced-loader")
+            self.assertTrue(installer.scripthookv_installed(gta))
+
+    def test_install_scripthookv_requires_enhanced_loader(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            gta = root / "enhanced"
+            vendor = root / "vendor"
+            gta.mkdir()
+            vendor.mkdir()
+            (gta / "GTA5_Enhanced.exe").write_bytes(b"game")
+            (vendor / "ScriptHookV.dll").write_bytes(b"shv")
+            (vendor / "dinput8.dll").write_bytes(b"classic-loader")
+            with mock.patch.object(installer, "VENDORED_SHV", vendor):
+                with self.assertRaisesRegex(FileNotFoundError, "Enhanced"):
+                    installer.install_scripthookv_from_vendor(gta)
+
+    def test_write_config_puts_file_in_game_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            gta = root / "gta"
+            recordings = root / "recordings"
+            gta.mkdir()
+            recordings.mkdir()
+            path = installer.write_config(gta, recordings)
+            self.assertEqual(path, gta / "camera_pose_logger.config.json")
+            self.assertTrue(path.is_file())
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("control_file", text)
+            self.assertTrue((gta / "scripts" / "camera_pose_logger.config.json").is_file())
+
+    def test_install_scripthookv_copies_dinput8_on_legacy(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            gta = root / "legacy"
+            vendor = root / "vendor"
+            gta.mkdir()
+            vendor.mkdir()
+            (gta / "GTA5.exe").write_bytes(b"game")
+            (vendor / "ScriptHookV.dll").write_bytes(b"shv")
+            (vendor / "dinput8.dll").write_bytes(b"classic-loader")
+            with mock.patch.object(installer, "VENDORED_SHV", vendor):
+                installer.install_scripthookv_from_vendor(gta)
+            self.assertEqual((gta / "dinput8.dll").read_bytes(), b"classic-loader")
+            self.assertTrue(installer.scripthookv_installed(gta))
 
     def test_find_gta_candidates_reads_registry_steam_and_vdf_libraries(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -92,7 +157,7 @@ class GtaInstallerPathDiscoveryTests(unittest.TestCase):
                             ]
             self.assertEqual(found, [game.resolve()])
 
-    def test_resolve_gta_dir_autopicks_first_candidate_without_prompt(self) -> None:
+    def test_resolve_gta_dirs_autopicks_all_candidates_without_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             first = root / "a"
@@ -105,11 +170,30 @@ class GtaInstallerPathDiscoveryTests(unittest.TestCase):
                 "find_gta_candidates",
                 return_value=[first, second],
             ):
-                chosen, skipped = installer.resolve_gta_dir(None, prompt=False)
+                chosen, skipped = installer.resolve_gta_dirs(None, prompt=False)
             self.assertFalse(skipped)
-            self.assertEqual(chosen, first.resolve())
+            self.assertEqual(chosen, [first.resolve(), second.resolve()])
 
-    def test_resolve_gta_dir_prompts_even_for_single_candidate(self) -> None:
+    def test_resolve_gta_dirs_asks_legacy_and_enhanced_separately(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            legacy = root / "legacy"
+            enhanced = root / "enhanced"
+            legacy.mkdir()
+            enhanced.mkdir()
+            (legacy / "GTA5.exe").write_bytes(b"x")
+            (enhanced / "GTA5_Enhanced.exe").write_bytes(b"x")
+            answers = iter(["1", "1"])
+            with mock.patch.object(
+                installer,
+                "find_gta_candidates",
+                return_value=[legacy, enhanced],
+            ), mock.patch("builtins.input", side_effect=lambda *_a, **_k: next(answers)):
+                chosen, skipped = installer.resolve_gta_dirs(None, prompt=True)
+            self.assertFalse(skipped)
+            self.assertEqual(chosen, [legacy.resolve(), enhanced.resolve()])
+
+    def test_resolve_gta_dirs_can_skip_both_prompts(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             game = Path(temporary) / "steam"
             game.mkdir()
@@ -119,18 +203,9 @@ class GtaInstallerPathDiscoveryTests(unittest.TestCase):
                 "find_gta_candidates",
                 return_value=[game],
             ), mock.patch("builtins.input", return_value=""):
-                chosen, skipped = installer.resolve_gta_dir(None, prompt=True)
+                chosen, skipped = installer.resolve_gta_dirs(None, prompt=True)
             self.assertTrue(skipped)
-            self.assertIsNone(chosen)
-
-            with mock.patch.object(
-                installer,
-                "find_gta_candidates",
-                return_value=[game],
-            ), mock.patch("builtins.input", return_value="1"):
-                chosen, skipped = installer.resolve_gta_dir(None, prompt=True)
-            self.assertFalse(skipped)
-            self.assertEqual(chosen, game.resolve())
+            self.assertEqual(chosen, [])
 
 
 if __name__ == "__main__":

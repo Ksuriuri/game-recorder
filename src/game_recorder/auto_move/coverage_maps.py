@@ -20,10 +20,6 @@ from game_recorder.auto_move.pose_live import UnifiedPose
 _PROBE_M = 0.6
 _DECAY_INTERVAL_S = 30.0
 _DECAY_FACTOR = 0.9
-_PITCH_UP_FZ = 0.25
-_PITCH_DOWN_FZ = -0.25
-
-
 def _clamp01(v: float) -> float:
     return max(0.0, min(1.0, float(v)))
 
@@ -45,14 +41,18 @@ class CoverageMaps:
     n_rings: int = 3
     n_sectors: int = 8
     n_yaw: int = 8
-    n_pitch: int = 3
+    n_pitch: int = 6
+    # Position rings are rebuilt from the active radius at roughly this width.
+    ring_width_m: float = 1.0
+    min_rings: int = 2
+    max_rings: int = 20
     probe_m: float = _PROBE_M
     decay_interval_s: float = _DECAY_INTERVAL_S
     decay_factor: float = _DECAY_FACTOR
 
     _anchor_x: float | None = field(default=None, init=False)
     _anchor_y: float | None = field(default=None, init=False)
-    _radius_m: float = field(default=3.0, init=False)
+    _radius_m: float = field(default=10.0, init=False)
     _pos_counts: list[float] = field(default_factory=list, init=False)
     _look_counts: list[float] = field(default_factory=list, init=False)
     _ref_yaw: float | None = field(default=None, init=False)
@@ -60,6 +60,8 @@ class CoverageMaps:
     _ready: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
+        self.n_rings = max(1, int(self.n_rings))
+        self.n_pitch = max(2, int(self.n_pitch))
         self._pos_counts = [0.0] * (self.n_rings * self.n_sectors)
         self._look_counts = [0.0] * (self.n_yaw * self.n_pitch)
 
@@ -67,10 +69,33 @@ class CoverageMaps:
     def ready(self) -> bool:
         return self._ready
 
+    def yaw_bin(self, forward_x: float, forward_y: float) -> int:
+        yaw_i, _ = self._yaw_pitch_bins(forward_x, forward_y, 0.0)
+        return yaw_i
+
+    def yaw_visit_counts(self) -> tuple[float, ...]:
+        return tuple(
+            sum(
+                self._look_counts[yaw_i * self.n_pitch + pitch_i]
+                for pitch_i in range(self.n_pitch)
+            )
+            for yaw_i in range(self.n_yaw)
+        )
+
+    def yaw_turn_to_bin(
+        self, forward_x: float, forward_y: float, target_yaw_i: int
+    ) -> str | None:
+        current = self.yaw_bin(forward_x, forward_y)
+        target = int(target_yaw_i) % self.n_yaw
+        clockwise = (target - current) % self.n_yaw
+        if clockwise == 0:
+            return None
+        return "yaw_right" if clockwise <= self.n_yaw / 2 else "yaw_left"
+
     def reset(self) -> None:
         self._anchor_x = None
         self._anchor_y = None
-        self._radius_m = 3.0
+        self._radius_m = 10.0
         self._pos_counts = [0.0] * (self.n_rings * self.n_sectors)
         self._look_counts = [0.0] * (self.n_yaw * self.n_pitch)
         self._ref_yaw = None
@@ -89,6 +114,11 @@ class CoverageMaps:
         self._anchor_x = float(anchor_x)
         self._anchor_y = float(anchor_y)
         self._radius_m = max(0.1, float(radius_m))
+        width = max(0.1, float(self.ring_width_m))
+        self.n_rings = max(
+            max(1, int(self.min_rings)),
+            min(max(1, int(self.max_rings)), int(math.ceil(self._radius_m / width))),
+        )
         self._ref_yaw = math.atan2(ref_forward_x, ref_forward_y)
         self._pos_counts = [0.0] * (self.n_rings * self.n_sectors)
         self._look_counts = [0.0] * (self.n_yaw * self.n_pitch)
@@ -147,7 +177,13 @@ class CoverageMaps:
         forward_z: float,
         rotations: tuple[str, ...] | list[str] | None = None,
     ) -> dict[str, float]:
-        """Per-rotation novelty in [0, 1]; higher = less visited target look bin."""
+        """Score rotations by coverage along the upcoming half-turn.
+
+        Looking only at the adjacent yaw bin can make the camera oscillate inside
+        one compass direction.  A yaw action therefore sees every bin along that
+        side of the next half-turn, so an under-covered side keeps attracting
+        samples until the camera actually reaches it.
+        """
         names = list(rotations) if rotations is not None else list(ROTATIONS)
         if not self._ready:
             return {n: 1.0 for n in names}
@@ -156,9 +192,48 @@ class CoverageMaps:
         raw: dict[str, float] = {}
         for name in names:
             ty, tp = self._target_look_bins(name, yaw_i, pitch_i)
-            idx = ty * self.n_pitch + tp
-            visits = self._look_counts[idx]
-            raw[name] = 1.0 / (1.0 + visits)
+            yaw_step = 0
+            if "yaw_right" in name:
+                yaw_step = 1
+            elif "yaw_left" in name:
+                yaw_step = -1
+
+            if yaw_step == 0:
+                yaw_visits = sum(
+                    self._look_counts[yaw_i * self.n_pitch + p]
+                    for p in range(self.n_pitch)
+                )
+                yaw_score = 1.0 / (1.0 + yaw_visits)
+            else:
+                yaw_score = 0.0
+                weight_sum = 0.0
+                for step in range(1, max(1, self.n_yaw // 2) + 1):
+                    # Marginalize pitch: changing elevation while still facing
+                    # east must not make east look globally unvisited again.
+                    weight = 1.0 / math.sqrt(step)
+                    route_yaw = (yaw_i + yaw_step * step) % self.n_yaw
+                    visits = sum(
+                        self._look_counts[route_yaw * self.n_pitch + p]
+                        for p in range(self.n_pitch)
+                    )
+                    yaw_score += weight / (1.0 + visits)
+                    weight_sum += weight
+                yaw_score /= weight_sum
+
+            has_pitch = "pitch_up" in name or "pitch_down" in name
+            if has_pitch:
+                pitch_visits = sum(
+                    self._look_counts[y * self.n_pitch + tp]
+                    for y in range(self.n_yaw)
+                )
+                pitch_score = 1.0 / (1.0 + pitch_visits)
+                raw[name] = (
+                    0.7 * yaw_score + 0.3 * pitch_score
+                    if yaw_step
+                    else pitch_score
+                )
+            else:
+                raw[name] = yaw_score
         return _normalize_scores(raw)
 
     def fuse_weight(
@@ -232,12 +307,10 @@ class CoverageMaps:
         rel = (yaw - ref) % (2.0 * math.pi)
         yaw_i = int(rel / (2.0 * math.pi) * self.n_yaw) % self.n_yaw
 
-        if fz >= _PITCH_UP_FZ:
-            pitch_i = 0  # up
-        elif fz <= _PITCH_DOWN_FZ:
-            pitch_i = 2  # down
-        else:
-            pitch_i = 1  # mid
+        # Equal angular bins from straight up (0) to straight down (n_pitch-1).
+        pitch = math.atan2(fz, max(1e-9, hn))
+        pitch_pos = (math.pi / 2.0 - pitch) / math.pi
+        pitch_i = min(self.n_pitch - 1, max(0, int(pitch_pos * self.n_pitch)))
         return yaw_i, pitch_i
 
     def _look_index(

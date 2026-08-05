@@ -19,6 +19,7 @@ from game_recorder.camera_sync import (
     active_session_path,
     align_samples_to_frames,
     finalize_session_cameras,
+    publish_active_session,
 )
 
 
@@ -94,6 +95,28 @@ class AlignSamplesTests(unittest.TestCase):
         self.assertEqual((matched, missing), (2, 0))
         self.assertEqual([record["frame"] for record in records], [0, 1])
         self.assertEqual(records[0]["pos"], records[1]["pos"])
+
+
+class CameraControlTests(unittest.TestCase):
+    def test_publishes_clamped_movement_speed_scale(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            recordings_dir = root / "recordings"
+            session_dir = recordings_dir / "session_test"
+            session_dir.mkdir(parents=True)
+
+            path = publish_active_session(
+                recordings_dir,
+                GTA_CAMERA_SOURCE,
+                session_id="session_test",
+                session_dir=session_dir,
+                start_epoch_ms=1_000,
+                fps=30,
+                movement_speed_scale=0.5,
+            )
+
+            control = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(control["movement_speed_scale"], 0.5)
 
 
 class FinalizeCameraTests(unittest.TestCase):

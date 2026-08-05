@@ -1,20 +1,33 @@
 @echo off
 setlocal EnableExtensions
+chcp 65001 >nul
+
 cd /d "%~dp0.."
-set "PROJECT_DIR=%cd%"
+set "PROJECT_DIR=%CD%"
+set "SCRIPT=%PROJECT_DIR%\scripts\install_gta_camera.py"
 
-set "PY="
-if exist "%PROJECT_DIR%\.venv\Scripts\python.exe" set "PY=%PROJECT_DIR%\.venv\Scripts\python.exe"
-if not defined PY (
-  for /d %%D in ("%PROJECT_DIR%\.tools\python\cpython-3.11*-windows-*") do (
-    if exist "%%D\python.exe" if not defined PY set "PY=%%D\python.exe"
-  )
-)
-if not defined PY set "PY=python"
+if exist "%PROJECT_DIR%\.venv\Scripts\python.exe" goto :run_venv
+if exist "%PROJECT_DIR%\.tools\uv\uv.exe" goto :run_uv
+where py >nul 2>&1
+if not errorlevel 1 goto :run_py
+where python >nul 2>&1
+if not errorlevel 1 goto :run_python
 
-if "%~1"=="" (
-  "%PY%" "%PROJECT_DIR%\scripts\install_gta_camera.py" --recordings-dir "%PROJECT_DIR%\recordings"
-) else (
-  "%PY%" "%PROJECT_DIR%\scripts\install_gta_camera.py" --recordings-dir "%PROJECT_DIR%\recordings" --gta-dir "%~1"
-)
+echo [错误] 未找到可用的 Python。请先运行项目根目录 install.bat。
+exit /b 1
+
+:run_venv
+"%PROJECT_DIR%\.venv\Scripts\python.exe" "%SCRIPT%" --recordings-dir "%PROJECT_DIR%\recordings" %*
+exit /b %ERRORLEVEL%
+
+:run_uv
+"%PROJECT_DIR%\.tools\uv\uv.exe" run --python 3.11 python "%SCRIPT%" --recordings-dir "%PROJECT_DIR%\recordings" %*
+exit /b %ERRORLEVEL%
+
+:run_py
+py -3.11 "%SCRIPT%" --recordings-dir "%PROJECT_DIR%\recordings" %*
+exit /b %ERRORLEVEL%
+
+:run_python
+python "%SCRIPT%" --recordings-dir "%PROJECT_DIR%\recordings" %*
 exit /b %ERRORLEVEL%

@@ -86,15 +86,19 @@ class Config:
     auto_move_turn_deg_s: float = 55.0
     # ``balanced`` = inverse-freq 81-bin actions inside a radius; ``wander`` = legacy W-hold.
     auto_move_policy: str = "balanced"
-    auto_move_radius_m: float = 3.0
+    auto_move_radius_m: float = 10.0
     auto_move_freq_alpha: float = 1.0
-    auto_move_action_hold_min_s: float = 0.8
-    auto_move_action_hold_max_s: float = 2.0
-    auto_move_look_yaw_deg_s: float = 25.0
-    auto_move_look_pitch_deg_s: float = 10.0
+    auto_move_action_hold_min_s: float = 2.5
+    auto_move_action_hold_max_s: float = 4.5
+    # Applied in-game for GTA5/RDR2/CP2077; Wukong keeps native keyboard speed.
+    auto_move_speed_scale: float = 0.1
+    auto_move_look_yaw_min_deg_s: float = 15.0
+    auto_move_look_yaw_max_deg_s: float = 30.0
+    auto_move_look_pitch_min_deg_s: float = 6.0
+    auto_move_look_pitch_max_deg_s: float = 15.0
     # Coverage × inverse-freq fusion gains (see BalancedRadiusPolicy).
     auto_move_cover_move_beta: float = 1.5
-    auto_move_cover_look_gamma: float = 1.5
+    auto_move_cover_look_gamma: float = 8.0
 
     def __post_init__(self) -> None:
         self.output_dir = Path(self.output_dir)

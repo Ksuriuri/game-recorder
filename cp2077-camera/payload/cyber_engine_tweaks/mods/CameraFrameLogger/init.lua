@@ -17,6 +17,9 @@ local transition_pending = false
 local rejected_session_key = nil
 local control_poll_accum_seconds = 0.0
 local active_camera_transform = nil
+local movement_speed_modifier = nil
+local movement_speed_entity_id = nil
+local movement_speed_scale = 1.0
 
 local JSON_NULL = {}
 
@@ -390,6 +393,72 @@ local function get_player()
     return nil
 end
 
+local function restore_movement_speed()
+    if movement_speed_modifier == nil or movement_speed_entity_id == nil then
+        movement_speed_modifier = nil
+        movement_speed_entity_id = nil
+        movement_speed_scale = 1.0
+        return
+    end
+
+    local modifier = movement_speed_modifier
+    local entity_id = movement_speed_entity_id
+    local scale = movement_speed_scale
+    movement_speed_modifier = nil
+    movement_speed_entity_id = nil
+    movement_speed_scale = 1.0
+
+    local removed = pcall(function()
+        Game.GetStatsSystem():RemoveModifier(entity_id, modifier)
+    end)
+    if not removed then
+        -- Older CET/game bindings may not expose RemoveModifier. A reciprocal
+        -- transient multiplier restores the effective stat without touching
+        -- unrelated player modifiers.
+        local restored, restore_error = pcall(function()
+            local inverse = RPGManager.CreateStatModifier(
+                gamedataStatType.MaxSpeed,
+                gameStatModifierType.Multiplier,
+                1.0 / scale
+            )
+            Game.GetStatsSystem():AddModifier(entity_id, inverse)
+        end)
+        if not restored then
+            log("Failed to restore movement speed: " .. tostring(restore_error))
+        end
+    end
+end
+
+local function apply_movement_speed(scale)
+    restore_movement_speed()
+    if not is_finite_number(scale) or scale >= 0.999 then
+        return
+    end
+
+    local player = get_player()
+    if player == nil then
+        return
+    end
+    local ok, apply_error = pcall(function()
+        local entity_id = player:GetEntityID()
+        local modifier = RPGManager.CreateStatModifier(
+            gamedataStatType.MaxSpeed,
+            gameStatModifierType.Multiplier,
+            scale
+        )
+        Game.GetStatsSystem():AddModifier(entity_id, modifier)
+        movement_speed_modifier = modifier
+        movement_speed_entity_id = entity_id
+        movement_speed_scale = scale
+    end)
+    if not ok then
+        movement_speed_modifier = nil
+        movement_speed_entity_id = nil
+        movement_speed_scale = 1.0
+        log("Failed to apply movement speed scale: " .. tostring(apply_error))
+    end
+end
+
 local function get_axis_vectors(player)
     local forward = call_method(player, "GetWorldForward")
     local right = call_method(player, "GetWorldRight")
@@ -719,6 +788,7 @@ local function close_session(reason)
         return
     end
     active_session = nil
+    restore_movement_speed()
 
     local end_unix_ms = session.last_t_unix_ms or session.anchor_unix_ms
     local footer = '{"type":"footer","end_unix_ms":'
@@ -889,6 +959,13 @@ local function validate_recording_control(control)
     if not is_finite_number(control.start_epoch_ms) then
         return nil, "recording control requires start_epoch_ms"
     end
+    if not is_finite_number(control.movement_speed_scale) then
+        control.movement_speed_scale = 1.0
+    end
+    control.movement_speed_scale = math.max(
+        0.05,
+        math.min(1.0, control.movement_speed_scale)
+    )
 
     control.session_dir = normalize_path(control.session_dir)
     control.raw_file = normalize_path(control.raw_file)
@@ -897,6 +974,7 @@ local function validate_recording_control(control)
         control.session_dir,
         control.raw_file,
         format_number(control.sample_hz),
+        format_number(control.movement_speed_scale),
         format_number(control.start_epoch_ms),
         format_number(control.updated_at_ms or control.start_epoch_ms)
     }, "\0")
@@ -965,6 +1043,7 @@ local function start_session(control)
         sample_count = 0
     }
     active_session = session
+    apply_movement_speed(control.movement_speed_scale)
     rejected_session_key = nil
     log("Session started: " .. control.session_id .. " -> " .. output_path)
     return true
@@ -1084,5 +1163,7 @@ end)
 registerForEvent("onShutdown", function()
     if active_session ~= nil then
         close_session("shutdown")
+    else
+        restore_movement_speed()
     end
 end)

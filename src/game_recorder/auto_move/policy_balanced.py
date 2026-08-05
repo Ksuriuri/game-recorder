@@ -27,18 +27,25 @@ from game_recorder.auto_move.pose_live import UnifiedPose
 class BalancedRadiusPolicy:
     """Sample rare human actions inside a fixed horizontal radius around an anchor."""
 
-    radius_m: float = 3.0
+    radius_m: float = 10.0
     # Start cutting outward walks earlier so small radii do not feel oversized.
     soft_radius_frac: float = 0.55
     freq_alpha: float = 1.0
-    hold_min_s: float = 0.8
-    hold_max_s: float = 2.0
-    look_yaw_deg_s: float = 25.0
-    look_pitch_deg_s: float = 10.0
+    hold_min_s: float = 2.5
+    hold_max_s: float = 4.5
+    look_yaw_min_deg_s: float = 15.0
+    look_yaw_max_deg_s: float = 30.0
+    look_pitch_min_deg_s: float = 6.0
+    look_pitch_max_deg_s: float = 15.0
+    # Optional fixed-rate overrides retained for callers/tests that need them.
+    look_yaw_deg_s: float | None = None
+    look_pitch_deg_s: float | None = None
     # When outside radius, blend a stronger yaw toward the anchor.
     return_yaw_deg_s: float = 55.0
     # Cap holds assuming run/sprint so we cannot plan a walk that tunnels out.
     walk_speed_mps: float = 5.0
+    movement_speed_scale: float = 0.1
+    slowed_sources: tuple[str, ...] = ("gta", "rdr2", "cp2077")
     # Near hard boundary: only clearly-inward moves (dot with to-anchor).
     soft_inward_min: float = 0.15
     # Outside hard radius: interrupt unless returning at least this strongly.
@@ -51,7 +58,21 @@ class BalancedRadiusPolicy:
     rate_track_hz: float = 4.0
     # Coverage reweight: w_final = prior × (1+β·move) × (1+γ·look).
     cover_move_beta: float = 1.5
-    cover_look_gamma: float = 1.5
+    cover_look_gamma: float = 8.0
+    yaw_sector_half_width_deg: float = 22.5
+    yaw_dwell_boost_after_s: float = 4.0
+    yaw_dwell_boost_per_s: float = 0.35
+    yaw_dwell_boost_max: float = 5.0
+    yaw_target_turn_boost: float = 8.0
+    yaw_target_opposite_weight: float = 0.25
+    yaw_target_idle_weight: float = 0.70
+    yaw_target_distance_gain: float = 0.50
+    pitch_action_base_weight: float = 0.30
+    pitch_angle_decay_deg: float = 25.0
+    pitch_same_direction_floor: float = 0.15
+    pitch_extreme_deg: float = 20.0
+    pitch_return_boost_per_s: float = 0.35
+    pitch_return_boost_max: float = 4.0
     catalog: ActionCatalog | None = None
     coverage: CoverageMaps | None = None
     rng: random.Random = field(default_factory=random.Random)
@@ -68,6 +89,13 @@ class BalancedRadiusPolicy:
     _stuck_since: float | None = field(default=None, init=False)
     _cmd_yaw_deg_s: float = field(default=0.0, init=False)
     _cmd_pitch_deg_s: float = field(default=0.0, init=False)
+    _action_yaw_deg_s: float = field(default=0.0, init=False)
+    _action_pitch_deg_s: float = field(default=0.0, init=False)
+    _yaw_dwell_center: float | None = field(default=None, init=False)
+    _yaw_dwell_since: float = field(default=0.0, init=False)
+    _yaw_target_bin: int | None = field(default=None, init=False)
+    _pitch_extreme_sign: int = field(default=0, init=False)
+    _pitch_extreme_since: float = field(default=0.0, init=False)
     _escape_until: float = field(default=0.0, init=False)
 
     def __post_init__(self) -> None:
@@ -89,6 +117,13 @@ class BalancedRadiusPolicy:
         self._stuck_since = None
         self._cmd_yaw_deg_s = 0.0
         self._cmd_pitch_deg_s = 0.0
+        self._action_yaw_deg_s = 0.0
+        self._action_pitch_deg_s = 0.0
+        self._yaw_dwell_center = None
+        self._yaw_dwell_since = 0.0
+        self._yaw_target_bin = None
+        self._pitch_extreme_sign = 0
+        self._pitch_extreme_since = 0.0
         self._escape_until = 0.0
         self._coverage.reset()
         self._resample(now, pose=None, force_stuck=False)
@@ -107,6 +142,8 @@ class BalancedRadiusPolicy:
             self._maybe_set_anchor(pose)
             self._observe_pose(pose, clock)
             self._coverage.observe(pose, now=clock)
+            self._observe_look_dwell(pose, clock)
+            self._update_yaw_target(pose)
 
         stuck = (
             self._stuck_since is not None
@@ -173,7 +210,7 @@ class BalancedRadiusPolicy:
         # cross soft while walking outward (do not use the full remaining hold,
         # or every outward walk would be aborted on the first tick).
         if tr != "none":
-            speed = max(0.5, float(self.walk_speed_mps))
+            speed = self._estimated_walk_speed(pose)
             horizon = 2.0 / 30.0
             score = self._inward_score(tr, pose)
             radial_out = max(0.0, -score) * speed * horizon
@@ -214,6 +251,167 @@ class BalancedRadiusPolicy:
         lo = min(self.hold_min_s, self.hold_max_s)
         hi = max(self.hold_min_s, self.hold_max_s)
         return self.rng.uniform(lo, hi)
+
+    def _observe_look_dwell(self, pose: UnifiedPose, clock: float) -> None:
+        yaw = math.atan2(pose.forward_x, pose.forward_y)
+        center = self._yaw_dwell_center
+        half_width = math.radians(max(1.0, float(self.yaw_sector_half_width_deg)))
+        if center is None:
+            self._yaw_dwell_center = yaw
+            self._yaw_dwell_since = clock
+        else:
+            delta = abs(math.atan2(math.sin(yaw - center), math.cos(yaw - center)))
+            if delta >= half_width:
+                self._yaw_dwell_center = yaw
+                self._yaw_dwell_since = clock
+
+        norm = math.sqrt(
+            pose.forward_x * pose.forward_x
+            + pose.forward_y * pose.forward_y
+            + pose.forward_z * pose.forward_z
+        )
+        pitch_deg = (
+            math.degrees(math.asin(max(-1.0, min(1.0, pose.forward_z / norm))))
+            if norm > 1e-6
+            else 0.0
+        )
+        threshold = max(1.0, float(self.pitch_extreme_deg))
+        sign = 1 if pitch_deg >= threshold else -1 if pitch_deg <= -threshold else 0
+        if sign == 0:
+            self._pitch_extreme_sign = 0
+            self._pitch_extreme_since = 0.0
+        elif sign != self._pitch_extreme_sign:
+            self._pitch_extreme_sign = sign
+            self._pitch_extreme_since = clock
+
+    def _look_behavior_weight(
+        self,
+        rotation: str,
+        *,
+        clock: float,
+        pose: UnifiedPose | None,
+    ) -> float:
+        """Soft priors for varied yaw and natural, non-saturating pitch."""
+        factor = 1.0
+        has_yaw = "yaw_right" in rotation or "yaw_left" in rotation
+        if (
+            pose is not None
+            and self._yaw_target_bin is not None
+            and self._coverage.ready
+        ):
+            desired = self._coverage.yaw_turn_to_bin(
+                pose.forward_x, pose.forward_y, self._yaw_target_bin
+            )
+            if desired is not None:
+                if desired in rotation:
+                    factor *= max(0.01, float(self.yaw_target_turn_boost))
+                elif has_yaw:
+                    factor *= max(0.01, float(self.yaw_target_opposite_weight))
+                else:
+                    factor *= max(0.01, float(self.yaw_target_idle_weight))
+
+        if has_yaw and self._yaw_dwell_since > 0.0:
+            overdue = max(
+                0.0,
+                clock
+                - self._yaw_dwell_since
+                - max(0.0, float(self.yaw_dwell_boost_after_s)),
+            )
+            max_extra = max(0.0, float(self.yaw_dwell_boost_max) - 1.0)
+            factor *= 1.0 + min(
+                max_extra, overdue * max(0.0, float(self.yaw_dwell_boost_per_s))
+            )
+
+        pitch_up = "pitch_up" in rotation
+        pitch_down = "pitch_down" in rotation
+        if not pitch_up and not pitch_down:
+            return factor
+
+        factor *= max(0.01, float(self.pitch_action_base_weight))
+        pitch_deg = 0.0
+        if pose is not None:
+            norm = math.sqrt(
+                pose.forward_x * pose.forward_x
+                + pose.forward_y * pose.forward_y
+                + pose.forward_z * pose.forward_z
+            )
+            if norm > 1e-6:
+                pitch_deg = math.degrees(
+                    math.asin(max(-1.0, min(1.0, pose.forward_z / norm)))
+                )
+
+        same_direction_angle = (
+            max(0.0, pitch_deg)
+            if pitch_up
+            else max(0.0, -pitch_deg)
+        )
+        if same_direction_angle > 0.0:
+            decay = math.exp(
+                -same_direction_angle / max(1.0, float(self.pitch_angle_decay_deg))
+            )
+            factor *= max(float(self.pitch_same_direction_floor), decay)
+        else:
+            factor *= 1.0 + min(1.5, abs(pitch_deg) / 30.0)
+
+        returning = (
+            self._pitch_extreme_sign > 0 and pitch_down
+        ) or (
+            self._pitch_extreme_sign < 0 and pitch_up
+        )
+        if returning and self._pitch_extreme_since > 0.0:
+            dwell = max(0.0, clock - self._pitch_extreme_since)
+            max_extra = max(0.0, float(self.pitch_return_boost_max) - 1.0)
+            factor *= 1.0 + min(
+                max_extra, dwell * max(0.0, float(self.pitch_return_boost_per_s))
+            )
+        return max(0.001, factor)
+
+    def _update_yaw_target(self, pose: UnifiedPose) -> None:
+        if not self._coverage.ready or self._coverage.n_yaw <= 1:
+            return
+        current = self._coverage.yaw_bin(pose.forward_x, pose.forward_y)
+        if self._yaw_target_bin == current:
+            self._yaw_target_bin = None
+        if self._yaw_target_bin is not None:
+            return
+
+        counts = self._coverage.yaw_visit_counts()
+        candidates = [i for i in range(self._coverage.n_yaw) if i != current]
+        weights: list[float] = []
+        for target in candidates:
+            clockwise = (target - current) % self._coverage.n_yaw
+            distance = min(clockwise, self._coverage.n_yaw - clockwise)
+            novelty = 1.0 / (1.0 + counts[target])
+            weights.append(
+                novelty
+                * (1.0 + max(0.0, float(self.yaw_target_distance_gain)) * distance)
+            )
+        self._yaw_target_bin = self.rng.choices(candidates, weights=weights, k=1)[0]
+
+    def _sample_look_rates(self) -> None:
+        if self.look_yaw_deg_s is None:
+            yaw_lo = max(0.0, min(self.look_yaw_min_deg_s, self.look_yaw_max_deg_s))
+            yaw_hi = max(0.0, max(self.look_yaw_min_deg_s, self.look_yaw_max_deg_s))
+            self._action_yaw_deg_s = self.rng.uniform(yaw_lo, yaw_hi)
+        else:
+            self._action_yaw_deg_s = max(0.0, abs(float(self.look_yaw_deg_s)))
+
+        if self.look_pitch_deg_s is None:
+            pitch_lo = max(
+                0.0, min(self.look_pitch_min_deg_s, self.look_pitch_max_deg_s)
+            )
+            pitch_hi = max(
+                0.0, max(self.look_pitch_min_deg_s, self.look_pitch_max_deg_s)
+            )
+            self._action_pitch_deg_s = self.rng.uniform(pitch_lo, pitch_hi)
+        else:
+            self._action_pitch_deg_s = max(0.0, abs(float(self.look_pitch_deg_s)))
+
+    def _estimated_walk_speed(self, pose: UnifiedPose | None) -> float:
+        scale = 1.0
+        if pose is not None and pose.source_key in self.slowed_sources:
+            scale = max(0.05, min(1.0, float(self.movement_speed_scale)))
+        return max(0.5, float(self.walk_speed_mps) * scale)
 
     def _resample(
         self,
@@ -271,6 +469,7 @@ class BalancedRadiusPolicy:
                 )
             else:
                 w = max(0.0, a.weight)
+            w *= self._look_behavior_weight(a.rotation, clock=clock, pose=pose)
             weights.append(w)
 
         if force_stuck:
@@ -302,6 +501,7 @@ class BalancedRadiusPolicy:
                 chosen = pair
 
         self._current = chosen
+        self._sample_look_rates()
         # Cap hold by remaining distance so long holds cannot tunnel out,
         # even before soft-zone interrupts fire.
         hold = self._sample_hold()
@@ -313,9 +513,9 @@ class BalancedRadiusPolicy:
             radius = max(0.1, float(self.radius_m))
             soft = radius * max(0.1, min(1.0, float(self.soft_radius_frac)))
             dist = math.hypot(pose.x - self._anchor_x, pose.y - self._anchor_y)
-            speed = max(0.5, float(self.walk_speed_mps))
+            speed = self._estimated_walk_speed(pose)
             boundary_hold = max(0.05, float(self.boundary_hold_s))
-            if forced is not None or dist >= soft:
+            if forced is not None:
                 hold = min(hold, boundary_hold)
             elif chosen.translation != "none":
                 score = self._inward_score(chosen.translation, pose)
@@ -323,10 +523,8 @@ class BalancedRadiusPolicy:
                 if score <= 0.0:
                     remaining = max(0.05, soft - dist)
                     hold = min(hold, remaining / speed)
-                else:
-                    # Inward is fine for longer, but still never plan past hard.
-                    remaining_hard = max(0.05, radius - dist)
-                    hold = min(hold, remaining_hard / speed)
+                # Clearly inward movement is safe to hold for the full sampled
+                # duration. Radius checks still run at 30 Hz if the camera turns.
         self._hold_until = clock + hold
 
     def _allowed_translations(
@@ -407,8 +605,8 @@ class BalancedRadiusPolicy:
     ) -> WanderAction:
         yaw, pitch = rotation_rates(
             discrete.rotation,
-            yaw_deg_s=self.look_yaw_deg_s,
-            pitch_deg_s=self.look_pitch_deg_s,
+            yaw_deg_s=self._action_yaw_deg_s,
+            pitch_deg_s=self._action_pitch_deg_s,
         )
 
         # Outside radius: add a return yaw toward the anchor if look is idle/weak.

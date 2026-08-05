@@ -29,6 +29,18 @@ recordings/
 .rdr2_camera/
 cp2077-camera/vendor/**/*.zip
 
+# Native/MSVC intermediate build outputs (keep dist/*.asi for installers)
+**/obj/
+**/*.tlog
+*.obj
+*.iobj
+*.ipdb
+*.pdb
+*.recipe
+*.lastbuildstate
+gta-camera/AsiCameraPoseLogger/bin/
+rdr2-camera/CameraPoseLogger/bin/
+
 # ModelScope upload pack artifacts
 modelscope-upload/.venv/
 modelscope-upload-portable-*.zip

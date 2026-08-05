@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import random
 import sys
 import tempfile
@@ -14,6 +15,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from game_recorder.auto_move.action_space import (
+    ActionCatalog,
+    DiscreteAction,
     TRANSLATIONS,
     load_action_catalog,
     nearest_inward_translation,
@@ -224,6 +227,27 @@ class ActionSpaceTests(unittest.TestCase):
 
 
 class CoverageMapsTests(unittest.TestCase):
+    def test_ring_count_tracks_active_radius(self) -> None:
+        maps = CoverageMaps()
+        maps.set_anchor(anchor_x=0.0, anchor_y=0.0, radius_m=10.0)
+        self.assertEqual(maps.n_rings, 10)
+        self.assertEqual(len(maps._pos_counts), 10 * maps.n_sectors)
+
+        maps.set_anchor(anchor_x=0.0, anchor_y=0.0, radius_m=2.2)
+        self.assertEqual(maps.n_rings, 3)
+        self.assertEqual(len(maps._pos_counts), 3 * maps.n_sectors)
+
+    def test_pitch_uses_six_angular_bins(self) -> None:
+        maps = CoverageMaps()
+        bins = []
+        for degrees in (75, 45, 15, -15, -45, -75):
+            pitch = math.radians(degrees)
+            _, pitch_i = maps._yaw_pitch_bins(
+                0.0, math.cos(pitch), math.sin(pitch)
+            )
+            bins.append(pitch_i)
+        self.assertEqual(bins, [0, 1, 2, 3, 4, 5])
+
     def test_visited_sector_lowers_move_novelty(self) -> None:
         maps = CoverageMaps()
         maps.set_anchor(
@@ -270,9 +294,31 @@ class CoverageMapsTests(unittest.TestCase):
             forward_y=1.0,
             forward_z=0.0,
         )
-        # yaw_right / yaw_left target neighbor bins; none targets current (visited).
+        # Either half-turn leaves the heavily visited current direction.
         self.assertLess(nov["none"], nov["yaw_right"])
         self.assertLess(nov["none"], nov["yaw_left"])
+
+    def test_look_novelty_prefers_undercovered_half_turn(self) -> None:
+        maps = CoverageMaps()
+        maps.set_anchor(
+            anchor_x=0.0,
+            anchor_y=0.0,
+            radius_m=10.0,
+            ref_forward_x=0.0,
+            ref_forward_y=1.0,
+        )
+        _, pitch_i = maps._yaw_pitch_bins(0.0, 1.0, 0.0)
+        # The left half is already covered; the right half is untouched.
+        for yaw_i in (7, 6, 5):
+            maps._look_counts[yaw_i * maps.n_pitch + pitch_i] = 100.0
+
+        nov = maps.novelty_look(
+            forward_x=0.0,
+            forward_y=1.0,
+            forward_z=0.0,
+        )
+
+        self.assertGreater(nov["yaw_right"], nov["yaw_left"])
 
     def test_fuse_keeps_rare_prior_advantage(self) -> None:
         maps = CoverageMaps()
@@ -313,6 +359,117 @@ class CoverageMapsTests(unittest.TestCase):
 
 
 class BalancedRadiusPolicyTests(unittest.TestCase):
+    def test_yaw_target_bias_is_persistent_but_not_forced(self) -> None:
+        policy = BalancedRadiusPolicy()
+        policy._coverage.set_anchor(
+            anchor_x=0.0,
+            anchor_y=0.0,
+            radius_m=10.0,
+            ref_forward_x=0.0,
+            ref_forward_y=1.0,
+        )
+        policy._yaw_target_bin = 3
+        facing_reference = UnifiedPose(
+            0, 0.0, 0.0, 0.0, "gta", forward_x=0.0, forward_y=1.0, forward_z=0.0
+        )
+
+        toward = policy._look_behavior_weight(
+            "yaw_right", clock=1.0, pose=facing_reference
+        )
+        opposite = policy._look_behavior_weight(
+            "yaw_left", clock=1.0, pose=facing_reference
+        )
+        idle = policy._look_behavior_weight(
+            "none", clock=1.0, pose=facing_reference
+        )
+
+        self.assertGreater(toward, idle)
+        self.assertGreater(idle, opposite)
+        self.assertGreater(opposite, 0.0)
+
+    def test_long_yaw_dwell_smoothly_boosts_turn_weight(self) -> None:
+        policy = BalancedRadiusPolicy(
+            yaw_dwell_boost_after_s=4.0,
+            yaw_dwell_boost_per_s=0.35,
+        )
+        policy._yaw_dwell_since = 1.0
+
+        early = policy._look_behavior_weight(
+            "yaw_right", clock=2.0, pose=None
+        )
+        late = policy._look_behavior_weight(
+            "yaw_right", clock=12.0, pose=None
+        )
+
+        self.assertEqual(early, 1.0)
+        self.assertGreater(late, early)
+        self.assertLessEqual(late, policy.yaw_dwell_boost_max)
+
+    def test_pitch_weights_are_soft_and_return_toward_level(self) -> None:
+        policy = BalancedRadiusPolicy()
+        level = UnifiedPose(
+            0, 0.0, 0.0, 0.0, "gta", forward_x=0.0, forward_y=1.0, forward_z=0.0
+        )
+        level_pitch = policy._look_behavior_weight(
+            "pitch_up", clock=1.0, pose=level
+        )
+        horizontal = policy._look_behavior_weight("none", clock=1.0, pose=level)
+        self.assertGreater(level_pitch, 0.0)
+        self.assertLess(level_pitch, horizontal)
+
+        upward = UnifiedPose(
+            0,
+            0.0,
+            0.0,
+            0.0,
+            "gta",
+            forward_x=0.0,
+            forward_y=math.sqrt(0.75),
+            forward_z=0.5,
+        )
+        policy._observe_look_dwell(upward, 1.0)
+        policy._observe_look_dwell(upward, 10.0)
+        keep_up = policy._look_behavior_weight(
+            "pitch_up", clock=10.0, pose=upward
+        )
+        return_down = policy._look_behavior_weight(
+            "pitch_down", clock=10.0, pose=upward
+        )
+        self.assertGreater(keep_up, 0.0)
+        self.assertGreater(return_down, keep_up)
+
+    def test_look_speed_is_sampled_once_per_action(self) -> None:
+        turn = DiscreteAction(0, "none", "yaw_right_pitch_down", 1.0, 1.0)
+        catalog = ActionCatalog(
+            actions=(turn,),
+            by_id={0: turn},
+            by_pair={("none", "yaw_right_pitch_down"): turn},
+            weights=(1.0,),
+        )
+        policy = BalancedRadiusPolicy(catalog=catalog, rng=random.Random(7))
+
+        policy._resample(1.0, pose=None, force_stuck=False)
+        first = (policy._action_yaw_deg_s, policy._action_pitch_deg_s)
+        self.assertGreaterEqual(first[0], 15.0)
+        self.assertLessEqual(first[0], 30.0)
+        self.assertGreaterEqual(first[1], 6.0)
+        self.assertLessEqual(first[1], 15.0)
+
+        policy._resample(2.0, pose=None, force_stuck=False)
+        second = (policy._action_yaw_deg_s, policy._action_pitch_deg_s)
+        self.assertNotEqual(first, second)
+
+    def test_speed_estimate_only_slows_supported_games(self) -> None:
+        policy = BalancedRadiusPolicy(walk_speed_mps=5.0, movement_speed_scale=0.5)
+        gta = UnifiedPose(
+            0, 0.0, 0.0, 0.0, "gta", forward_x=0.0, forward_y=1.0, forward_z=0.0
+        )
+        wukong = UnifiedPose(
+            0, 0.0, 0.0, 0.0, "wukong", forward_x=0.0, forward_y=1.0, forward_z=0.0
+        )
+        self.assertEqual(policy._estimated_walk_speed(gta), 2.5)
+        self.assertEqual(policy._estimated_walk_speed(wukong), 5.0)
+
     def test_step_without_pose_does_not_crash(self) -> None:
         policy = BalancedRadiusPolicy(
             hold_min_s=0.2,
@@ -441,6 +598,34 @@ class BalancedRadiusPolicyTests(unittest.TestCase):
         self.assertNotIn("forward", allowed)
         self.assertIn("backward", allowed)
 
+    def test_soft_zone_inward_action_keeps_full_hold(self) -> None:
+        """Safe inward movement must not be resampled every boundary tick."""
+        backward = DiscreteAction(0, "backward", "none", 1.0, 1.0)
+        catalog = ActionCatalog(
+            actions=(backward,),
+            by_id={0: backward},
+            by_pair={("backward", "none"): backward},
+            weights=(1.0,),
+        )
+        policy = BalancedRadiusPolicy(
+            radius_m=3.0,
+            soft_radius_frac=0.5,
+            hold_min_s=3.0,
+            hold_max_s=3.0,
+            catalog=catalog,
+            rng=random.Random(0),
+        )
+        policy._anchor_x = 0.0
+        policy._anchor_y = 0.0
+        soft = UnifiedPose(
+            50, 0.0, 2.0, 0.0, "gta", forward_x=0.0, forward_y=1.0, forward_z=0.0
+        )
+
+        policy._resample(10.0, pose=soft, force_stuck=False)
+
+        self.assertEqual(policy._current, backward)
+        self.assertAlmostEqual(policy._hold_until, 13.0)
+
     def test_outside_prefers_strafe_recovery_over_idle(self) -> None:
         """When outside, take a weakly-inward strafe instead of freezing."""
         policy = BalancedRadiusPolicy(
@@ -529,9 +714,16 @@ class ConfigAutoMoveTests(unittest.TestCase):
             )
             self.assertTrue(cfg.auto_move)
             self.assertEqual(cfg.auto_move_policy, "balanced")
-            self.assertEqual(cfg.auto_move_radius_m, 3.0)
+            self.assertEqual(cfg.auto_move_radius_m, 10.0)
+            self.assertEqual(cfg.auto_move_action_hold_min_s, 2.5)
+            self.assertEqual(cfg.auto_move_action_hold_max_s, 4.5)
+            self.assertEqual(cfg.auto_move_speed_scale, 0.1)
+            self.assertEqual(cfg.auto_move_look_yaw_min_deg_s, 15.0)
+            self.assertEqual(cfg.auto_move_look_yaw_max_deg_s, 30.0)
+            self.assertEqual(cfg.auto_move_look_pitch_min_deg_s, 6.0)
+            self.assertEqual(cfg.auto_move_look_pitch_max_deg_s, 15.0)
             self.assertEqual(cfg.auto_move_cover_move_beta, 1.5)
-            self.assertEqual(cfg.auto_move_cover_look_gamma, 1.5)
+            self.assertEqual(cfg.auto_move_cover_look_gamma, 8.0)
             self.assertEqual(cfg.idle_timeout_s, 0.0)
             self.assertEqual(cfg.violent_duration_s, 0.0)
 

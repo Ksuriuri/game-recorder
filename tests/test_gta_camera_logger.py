@@ -6,6 +6,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 LOGGER_PATH = PROJECT_ROOT / "gta-camera" / "CameraPoseLogger" / "CameraPoseLogger.cs"
+ASI_LOGGER_PATH = PROJECT_ROOT / "gta-camera" / "AsiCameraPoseLogger" / "main.cpp"
 
 
 class GtaCameraLoggerTests(unittest.TestCase):
@@ -22,6 +23,14 @@ class GtaCameraLoggerTests(unittest.TestCase):
         self.assertNotIn('AppendVec3(', source)
         self.assertNotIn('"player_pos"', source)
         self.assertNotIn('"player_heading"', source)
+
+    def test_asi_applies_recording_movement_speed_override_each_tick(self) -> None:
+        source = ASI_LOGGER_PATH.read_text(encoding="utf-8")
+        self.assertIn("movement_speed_scale", source)
+        self.assertIn("0xD80958FC74E988A6ULL", source)
+        self.assertIn("0x085BF80FA50A39D1ULL", source)
+        self.assertIn("0x433083750C5E064AULL", source)
+        self.assertIn("ApplyMovementSpeedScale(movement_speed_scale_)", source)
 
 
 if __name__ == "__main__":

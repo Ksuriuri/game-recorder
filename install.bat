@@ -239,11 +239,11 @@ echo       [完成] GTA 相机插件已安装，进故事模式录制即可采�
 goto :gta_install_done
 
 :gta_install_skip
-echo       [跳过] 未安装 GTA 相机插件。需要相机时请再运行 gta-camera\install.bat 并输入 GTA 主目录。
+echo       [跳过] 未安装 GTA 相机插件。需要相机时请再运行 gta-camera\install.bat（会分别询问经典版/增强版路径）。
 goto :gta_install_done
 
 :gta_install_fail
-echo       [失败] GTA 相机插件未装好。请再运行 gta-camera\install.bat 并输入 GTA 主目录。
+echo       [失败] GTA 相机插件未装好。请再运行 gta-camera\install.bat（会分别询问经典版/增强版路径）。
 goto :gta_install_done
 
 :gta_install_done

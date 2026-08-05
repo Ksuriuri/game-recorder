@@ -283,14 +283,32 @@ def main() -> None:
     parser.add_argument(
         "--auto-move-radius",
         type=float,
-        default=3.0,
-        help="自动移动活动半径（米，默认：3；以首次相机位姿为锚点）",
+        default=10.0,
+        help="自动移动活动半径（米，默认：10；以首次相机位姿为锚点）",
     )
     parser.add_argument(
         "--auto-move-policy",
         choices=("balanced", "wander"),
         default="balanced",
         help="自动移动策略：balanced=半径内低频 action 均衡（默认）；wander=旧版按住 W 游荡",
+    )
+    parser.add_argument(
+        "--auto-move-hold-min",
+        type=float,
+        default=2.5,
+        help="balanced 策略单个动作最短保持秒数（默认：2.5）",
+    )
+    parser.add_argument(
+        "--auto-move-hold-max",
+        type=float,
+        default=4.5,
+        help="balanced 策略单个动作最长保持秒数（默认：4.5）",
+    )
+    parser.add_argument(
+        "--auto-move-speed-scale",
+        type=float,
+        default=0.1,
+        help="GTA5/RDR2/赛博朋克 2077 自动移动速度倍率（默认：0.1）",
     )
     parser.add_argument(
         "--list-audio-devices",
@@ -389,6 +407,9 @@ def main() -> None:
         auto_move_tick_hz=max(1.0, float(args.auto_move_hz)),
         auto_move_radius_m=max(0.1, float(args.auto_move_radius)),
         auto_move_policy=str(args.auto_move_policy),
+        auto_move_action_hold_min_s=max(0.05, float(args.auto_move_hold_min)),
+        auto_move_action_hold_max_s=max(0.05, float(args.auto_move_hold_max)),
+        auto_move_speed_scale=max(0.05, min(1.0, float(args.auto_move_speed_scale))),
     )
 
     session: Session | None = None
@@ -663,6 +684,7 @@ def main() -> None:
         print(
             f"  自动移动: 已启用（{config.auto_move_tick_hz:g} Hz，"
             f"policy={config.auto_move_policy}，半径 {config.auto_move_radius_m:g} m，"
+            f"GTA5/RDR2/2077 速度 ×{config.auto_move_speed_scale:g}，"
             f"WASD + 鼠标视角；{when}；空闲/僵滞/剧烈检测已关闭）"
         )
     else:

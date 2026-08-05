@@ -16,17 +16,21 @@
 #include <string>
 #include <utility>
 
-#include <main.h>
-#include <nativeCaller.h>
-#include <types.h>
+#include "scripthookv.h"
 
 namespace
 {
 namespace fs = std::filesystem;
 
-constexpr wchar_t kConfigName[] = L"rdr2_camera.config.json";
+constexpr wchar_t kConfigName[] = L"camera_pose_logger.config.json";
 constexpr std::uint64_t kFileTimeUnixEpoch = 116444736000000000ULL;
-constexpr std::uint64_t HASH_PLAYER_PED_ID = 0x096275889B8E0EE0ULL;
+
+// Stable original hashes from GTA V Native DB (ScriptHookV crossmap keys).
+// Prefer final-rendered cam (what is actually drawn) over gameplay director.
+constexpr std::uint64_t HASH_GET_FINAL_RENDERED_CAM_COORD = 0xA200EB1EE790F448ULL;
+constexpr std::uint64_t HASH_GET_FINAL_RENDERED_CAM_ROT = 0x5B4E4C817FCC2DFBULL;
+constexpr std::uint64_t HASH_GET_FINAL_RENDERED_CAM_FOV = 0x80EC114669DAEFF4ULL;
+constexpr std::uint64_t HASH_PLAYER_PED_ID = 0xD80958FC74E988A6ULL;
 constexpr std::uint64_t HASH_SET_PED_MOVE_RATE_OVERRIDE = 0x085BF80FA50A39D1ULL;
 constexpr std::uint64_t HASH_SET_PED_MAX_MOVE_BLEND_RATIO = 0x433083750C5E064AULL;
 
@@ -44,7 +48,7 @@ struct ControlState
     std::string status;
     std::string session_id;
     std::string session_dir;
-    std::string raw_file = "camera_raw_rdr2.jsonl";
+    std::string raw_file = "camera_raw_gta.jsonl";
     std::int64_t start_epoch_ms = 0;
     double sample_hz = 30.0;
     double movement_speed_scale = 1.0;
@@ -608,7 +612,7 @@ PluginConfig LoadConfig()
     PluginConfig config;
     wchar_t environment_path[32768]{};
     const DWORD environment_length = GetEnvironmentVariableW(
-        L"GAME_RECORDER_RDR2_CONTROL", environment_path,
+        L"GAME_RECORDER_GTA_CONTROL", environment_path,
         static_cast<DWORD>(std::size(environment_path)));
     if (environment_length > 0 && environment_length < std::size(environment_path))
     {
@@ -742,26 +746,14 @@ HWND FindGameWindow()
     return search.best;
 }
 
-Vector3 GetFinalRenderedCamCoord()
-{
-    return invoke<Vector3>(0x5352E025EC2B416FULL);
-}
-
-Vector3 GetFinalRenderedCamRot()
-{
-    return invoke<Vector3>(0x602685BD85DD26CAULL, 2);
-}
-
-float GetFinalRenderedCamFov()
-{
-    return invoke<float>(0x04AF77971E508F6AULL);
-}
-
 bool ReadCameraSample(HWND& game_window, CameraSample& sample)
 {
-    sample.position = GetFinalRenderedCamCoord();
-    sample.rotation = GetFinalRenderedCamRot();
-    sample.fov = GetFinalRenderedCamFov();
+    // Avoid IS_GAMEPLAY_CAM_RENDERING: a wrong hash hard-crashes ScriptHookV, and
+    // Enhanced may not map every gameplay-cam native. Final-rendered cam matches
+    // the pixels actually shown (same approach as the RDR2 logger).
+    sample.position = invoke<Vector3>(HASH_GET_FINAL_RENDERED_CAM_COORD);
+    sample.rotation = invoke<Vector3>(HASH_GET_FINAL_RENDERED_CAM_ROT, 2);
+    sample.fov = invoke<float>(HASH_GET_FINAL_RENDERED_CAM_FOV);
 
     if (game_window == nullptr || !IsWindow(game_window))
     {
@@ -791,8 +783,12 @@ void ApplyMovementSpeedScale(double scale)
     const int ped = invoke<int>(HASH_PLAYER_PED_ID);
     if (ped != 0)
     {
-        // Frame-scoped override: it naturally expires when the recorder stops.
+        // This GTA native is frame-scoped, so applying it here does not leave
+        // a persistent player-stat change after recording stops.
         (void)invoke<std::uint64_t>(HASH_SET_PED_MOVE_RATE_OVERRIDE, ped, clamped);
+        // Keyboard movement requests the run blend at full strength. Clamp it
+        // to the walking blend while slowed; otherwise MOVE_RATE_OVERRIDE can
+        // leave observed keyboard speed effectively unchanged.
         const float max_blend = clamped < 0.999F
             ? std::clamp(clamped * 2.0F, 0.1F, 1.0F)
             : 3.0F;
@@ -1024,7 +1020,7 @@ private:
 
         writer_
             << "{\"type\":\"header\""
-            << ",\"schema\":\"rdr2_camera_v1\""
+            << ",\"schema\":\"gta_camera_v2\""
             << ",\"start_unix_ms\":" << start_epoch_ms
             << ",\"sample_hz\":" << FormatFloat(sample_hz_)
             << ",\"session_id\":\"" << EscapeJson(active_session_id_) << '"'
@@ -1127,10 +1123,16 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
     case DLL_PROCESS_ATTACH:
         g_module = module;
         DisableThreadLibraryCalls(module);
+        if (!LoadScriptHookV())
+        {
+            OutputDebugStringA("CameraPoseLogger: ScriptHookV.dll not available\n");
+            return FALSE;
+        }
         scriptRegister(module, ScriptMain);
         break;
     case DLL_PROCESS_DETACH:
         scriptUnregister(module);
+        UnloadScriptHookVBindings();
         break;
     default:
         break;

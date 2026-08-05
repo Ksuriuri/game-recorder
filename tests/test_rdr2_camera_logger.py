@@ -43,6 +43,13 @@ class Rdr2CameraLoggerStaticTests(unittest.TestCase):
             ),
         )
 
+    def test_applies_recording_movement_speed_override_each_tick(self) -> None:
+        self.assertIn("movement_speed_scale", self.cpp)
+        self.assertIn("0x096275889B8E0EE0ULL", self.cpp)
+        self.assertIn("0x085BF80FA50A39D1ULL", self.cpp)
+        self.assertIn("0x433083750C5E064AULL", self.cpp)
+        self.assertIn("ApplyMovementSpeedScale(movement_speed_scale_)", self.cpp)
+
     def test_disables_windows_min_max_macros(self) -> None:
         win32_define = self.cpp.index("#define WIN32_LEAN_AND_MEAN")
         nominmax_define = self.cpp.index("#define NOMINMAX")

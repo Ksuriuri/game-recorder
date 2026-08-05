@@ -524,6 +524,12 @@ class Session:
                     session_dir=self._session_dir,
                     start_epoch_ms=self._t0_epoch_ms,
                     fps=self.config.fps,
+                    movement_speed_scale=(
+                        float(self.config.auto_move_speed_scale)
+                        if self.config.auto_move
+                        and camera_source.key in ("gta", "rdr2", "cp2077")
+                        else 1.0
+                    ),
                 )
             except Exception as exc:
                 logger.warning("发布 %s 相机同步信号失败：%s", camera_source.key, exc)
@@ -578,8 +584,11 @@ class Session:
                 freq_alpha=float(self.config.auto_move_freq_alpha),
                 hold_min_s=float(self.config.auto_move_action_hold_min_s),
                 hold_max_s=float(self.config.auto_move_action_hold_max_s),
-                look_yaw_deg_s=float(self.config.auto_move_look_yaw_deg_s),
-                look_pitch_deg_s=float(self.config.auto_move_look_pitch_deg_s),
+                movement_speed_scale=float(self.config.auto_move_speed_scale),
+                look_yaw_min_deg_s=float(self.config.auto_move_look_yaw_min_deg_s),
+                look_yaw_max_deg_s=float(self.config.auto_move_look_yaw_max_deg_s),
+                look_pitch_min_deg_s=float(self.config.auto_move_look_pitch_min_deg_s),
+                look_pitch_max_deg_s=float(self.config.auto_move_look_pitch_max_deg_s),
                 stuck_speed_mps=float(self.config.auto_move_stuck_speed_mps),
                 stuck_s=float(self.config.auto_move_stuck_s),
                 return_yaw_deg_s=float(self.config.auto_move_turn_deg_s),

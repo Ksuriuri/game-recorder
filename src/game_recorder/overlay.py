@@ -69,7 +69,7 @@ class RecordingStatusOverlay:
         on_quit: Callable[[], None] | None = None,
         ui_settled: threading.Event | None = None,
         expect_auto_stop_notice: bool = False,
-        radius_m: float = 3.0,
+        radius_m: float = 10.0,
         radius_hint: str = "",
     ) -> None:
         self._idle_hint = idle_hint

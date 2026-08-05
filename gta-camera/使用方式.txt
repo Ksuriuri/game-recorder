@@ -1,14 +1,31 @@
 GTA 相机插件（维护说明）
 ========================
 
-录制员只需在 install.bat / gta-camera\install.bat 里按提示输入 GTA 主目录。
+录制员运行 install.bat / gta-camera\install.bat 后，脚本会分别询问：
+
+  经典版（GTA5.exe）目录
+  增强版（GTA5_Enhanced.exe）目录
+
+每项可输入编号、完整路径，或直接回车跳过；两个都可以装。
+不要依赖命令行传路径参数。
+
 脚本会自动拷贝：
 
-  gta-camera\vendor\ScriptHookV\     →  GTA 根目录（ScriptHookV.dll + dinput8.dll）
-  gta-camera\vendor\ScriptHookVDotNet\ → GTA 根目录
-  gta-camera\dist\CameraPoseLogger.dll → GTA\scripts\
+  gta-camera\vendor\ScriptHookV\     →  GTA 根目录（ScriptHookV.dll；Legacy 另拷 dinput8.dll）
+  gta-camera\dist\CameraPoseLogger.asi → GTA 根目录（原生 ASI，Legacy/Enhanced 通用）
+  camera_pose_logger.config.json     → GTA 根目录
+
+Legacy（GTA5.exe）用 dinput8.dll 作 ASI 加载器。
+Enhanced（GTA5_Enhanced.exe）必须用已有的 xinput1_4.dll / dsound.dll，
+禁止再放经典版 dinput8.dll（多加载器叠在一起会导致打不开游戏）。
+
+不再安装 ScriptHookVDotNet：.NET 插件在 Enhanced 上会卡死启动。
+相机采集改为原生 CameraPoseLogger.asi（ScriptHookV C++）。
+
+编译原生插件（开发机需要 VS Build Tools / MSVC）：
+  gta-camera\build_asi.bat
 
 游戏大更新后若进故事模式报 Unknown game version：
   1. 从官网下最新 ScriptHookV
-  2. 用新的 ScriptHookV.dll、dinput8.dll 覆盖 gta-camera\vendor\ScriptHookV\
+  2. 用新的 ScriptHookV.dll（Legacy 再加 dinput8.dll）覆盖 gta-camera\vendor\ScriptHookV\
   3. 再跑一次 gta-camera\install.bat
