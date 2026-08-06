@@ -55,6 +55,10 @@ class Config:
     # Stop when no WASD activity, or WASD state unchanged with no mouse move, for this many seconds. 0 = off.
     idle_timeout_s: float = 10.0
 
+    # Hard cap on a single session length (seconds). 0 = off.
+    # Keeps auto-move from lingering too long in one area (default 30 minutes).
+    max_recording_duration_s: float = 1800.0
+
     # Stop when high-frequency WASD or mouse shaking lasts this many seconds. 0 = off.
     violent_duration_s: float = 1.0
 
@@ -86,7 +90,7 @@ class Config:
     auto_move_turn_deg_s: float = 55.0
     # ``balanced`` = inverse-freq 81-bin actions inside a radius; ``wander`` = legacy W-hold.
     auto_move_policy: str = "balanced"
-    auto_move_radius_m: float = 10.0
+    auto_move_radius_m: float = 20.0
     auto_move_freq_alpha: float = 1.0
     auto_move_action_hold_min_s: float = 2.5
     auto_move_action_hold_max_s: float = 4.5
@@ -95,7 +99,7 @@ class Config:
     # used when a per-game value is unset (and for older callers/tests).
     auto_move_speed_scale: float = 0.1
     auto_move_speed_scale_gta: float = 0.1
-    auto_move_speed_scale_rdr2: float = 0.35
+    auto_move_speed_scale_rdr2: float = 0.6
     auto_move_speed_scale_cp2077: float = 0.15
     auto_move_look_yaw_min_deg_s: float = 15.0
     auto_move_look_yaw_max_deg_s: float = 30.0

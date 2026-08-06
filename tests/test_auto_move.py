@@ -726,7 +726,7 @@ class ConfigAutoMoveTests(unittest.TestCase):
             )
             self.assertTrue(cfg.auto_move)
             self.assertEqual(cfg.auto_move_policy, "balanced")
-            self.assertEqual(cfg.auto_move_radius_m, 10.0)
+            self.assertEqual(cfg.auto_move_radius_m, 20.0)
             self.assertEqual(cfg.auto_move_action_hold_min_s, 2.5)
             self.assertEqual(cfg.auto_move_action_hold_max_s, 4.5)
             self.assertEqual(cfg.auto_move_speed_scale, 0.1)
@@ -745,6 +745,7 @@ class ConfigAutoMoveTests(unittest.TestCase):
             self.assertEqual(cfg.auto_move_cover_look_gamma, 8.0)
             self.assertEqual(cfg.idle_timeout_s, 0.0)
             self.assertEqual(cfg.violent_duration_s, 0.0)
+            self.assertEqual(cfg.max_recording_duration_s, 1800.0)
 
     def test_begin_auto_move_is_noop_when_disabled(self) -> None:
         from game_recorder.session import Session

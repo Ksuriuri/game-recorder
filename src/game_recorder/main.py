@@ -234,6 +234,12 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--max-recording-duration",
+        type=float,
+        default=1800.0,
+        help="单次录制最长时长（秒），超时自动停止（默认：1800 = 30 分钟，0 = 关闭）",
+    )
+    parser.add_argument(
         "--frame-drop-stop-after",
         type=float,
         default=10.0,
@@ -283,8 +289,8 @@ def main() -> None:
     parser.add_argument(
         "--auto-move-radius",
         type=float,
-        default=10.0,
-        help="自动移动活动半径（米，默认：10；以首次相机位姿为锚点）",
+        default=20.0,
+        help="自动移动活动半径（米，默认：20；热键调节范围 5–50，步进 5；以首次相机位姿为锚点）",
     )
     parser.add_argument(
         "--auto-move-policy",
@@ -438,6 +444,7 @@ def main() -> None:
         segment_seconds=segment_seconds,
         capture_mode=args.capture_mode,
         idle_timeout_s=max(0.0, float(args.idle_timeout)),
+        max_recording_duration_s=max(0.0, float(args.max_recording_duration)),
         frame_drop_stop_after_s=max(0.0, float(args.frame_drop_stop_after)),
         frame_drop_max_tolerated=max(0, int(args.frame_drop_max_tolerated)),
         gta_camera_sync=not bool(args.no_gta_camera),
@@ -446,7 +453,9 @@ def main() -> None:
         cp2077_camera_sync=not bool(args.no_cp2077_camera),
         auto_move=not bool(args.no_auto_move),
         auto_move_tick_hz=max(1.0, float(args.auto_move_hz)),
-        auto_move_radius_m=max(0.1, float(args.auto_move_radius)),
+        auto_move_radius_m=min(
+            RADIUS_MAX_M, max(RADIUS_MIN_M, float(args.auto_move_radius))
+        ),
         auto_move_policy=str(args.auto_move_policy),
         auto_move_action_hold_min_s=max(0.05, float(args.auto_move_hold_min)),
         auto_move_action_hold_max_s=max(0.05, float(args.auto_move_hold_max)),
@@ -475,6 +484,7 @@ def main() -> None:
         "focus_lost": "由于切换到了其他窗口，本次录制已自动结束。",
         "frame_drop": "由于检测到视频丢帧（编码跟不上），本次录制已自动结束。",
         "encoder_failed": "由于视频编码异常中断，本次录制已自动结束。",
+        "max_duration": "由于单次录制已达最长时间，本次录制已自动结束。",
     }
 
     def _restart_line() -> str:
@@ -561,6 +571,7 @@ def main() -> None:
         "focus_lost": "游戏窗口失焦（切换至其他窗口），自动停止录制 …",
         "frame_drop": "检测到视频丢帧（编码跟不上），自动停止录制 …",
         "encoder_failed": "视频编码进程异常退出，自动停止录制 …",
+        "max_duration": "单次录制已达最长时间，自动停止录制 …",
     }
 
     def _stop_session(
@@ -720,6 +731,12 @@ def main() -> None:
         print(f"  空闲自动停止: {config.idle_timeout_s:g} 秒未按 WASD")
         print(
             f"  僵滞自动停止: {config.idle_timeout_s:g} 秒 WASD 状态不变且无鼠标移动"
+        )
+    if config.max_recording_duration_s > 0:
+        minutes = config.max_recording_duration_s / 60.0
+        print(
+            f"  最长录制时长: {config.max_recording_duration_s:g} 秒"
+            f"（约 {minutes:g} 分钟，超时自动停止）"
         )
     if config.auto_move:
         when = (

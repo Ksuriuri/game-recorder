@@ -77,7 +77,14 @@ logger = logging.getLogger(__name__)
 # Virtual keys for movement keys (character walk).
 _WASD_VKS: frozenset[int] = frozenset((0x57, 0x41, 0x53, 0x44))  # W A S D
 AutoStopReason = Literal[
-    "idle", "stuck", "forbidden_key", "violent", "focus_lost", "frame_drop", "encoder_failed"
+    "idle",
+    "stuck",
+    "forbidden_key",
+    "violent",
+    "focus_lost",
+    "frame_drop",
+    "encoder_failed",
+    "max_duration",
 ]
 AutoStopCallback = Callable[[AutoStopReason], None]
 
@@ -475,12 +482,14 @@ class Session:
         self._input_thread.start()
 
         idle_s = float(self.config.idle_timeout_s)
+        max_s = float(self.config.max_recording_duration_s)
         watch_idle = idle_s > 0 and self._on_auto_stop is not None
         watch_violent = self._violence is not None
-        if watch_idle or watch_violent:
+        watch_max_duration = max_s > 0 and self._on_auto_stop is not None
+        if watch_idle or watch_violent or watch_max_duration:
             self._idle_thread = threading.Thread(
                 target=self._auto_stop_watch_loop,
-                args=(idle_s,),
+                args=(idle_s, max_s),
                 name="auto-stop-watch",
                 daemon=True,
             )
@@ -490,6 +499,11 @@ class Session:
                 logger.info(
                     "僵滞检测已启用：%g 秒 WASD 按键状态未变化且无鼠标移动将自动停止",
                     idle_s,
+                )
+            if watch_max_duration:
+                logger.info(
+                    "最长录制时长已启用：单次录制达到 %g 秒将自动停止",
+                    max_s,
                 )
         if self._on_auto_stop is not None:
             logger.info("非 WASD 按键检测已启用：按下其他键将自动停止")
@@ -1183,9 +1197,14 @@ class Session:
                 self._trigger_auto_stop("focus_lost")
                 return
 
-    def _auto_stop_watch_loop(self, idle_s: float) -> None:
+    def _auto_stop_watch_loop(self, idle_s: float, max_s: float = 0.0) -> None:
         while not self._stop_event.wait(0.5):
             now = time.monotonic()
+            if max_s > 0 and self._t0_ns > 0:
+                elapsed_s = (time.perf_counter_ns() - self._t0_ns) / 1e9
+                if elapsed_s >= max_s:
+                    self._trigger_auto_stop("max_duration")
+                    return
             if self._violence is not None and self._violence.tick(now):
                 self._trigger_auto_stop("violent")
                 return
@@ -1236,6 +1255,11 @@ class Session:
             )
         elif reason == "forbidden_key":
             logger.info("检测到非人物移动操作（按键或鼠标点击/滚轮），触发自动停止")
+        elif reason == "max_duration":
+            logger.info(
+                "检测到录制已达最长时长 %g 秒，触发自动停止",
+                self.config.max_recording_duration_s,
+            )
         else:
             logger.info("触发自动停止（reason=%s）", reason)
         self._on_auto_stop(reason)

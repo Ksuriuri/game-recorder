@@ -24,7 +24,14 @@ Command = (
     | tuple[
         Literal["auto_stop_notice"],
         Literal[
-            "idle", "stuck", "forbidden_key", "violent", "focus_lost", "frame_drop", "encoder_failed"
+            "idle",
+            "stuck",
+            "forbidden_key",
+            "violent",
+            "focus_lost",
+            "frame_drop",
+            "encoder_failed",
+            "max_duration",
         ],
         str,
         str | None,
@@ -45,6 +52,7 @@ _AUTO_STOP_HEADLINES: dict[str, tuple[str, str]] = {
         "由于视频编码异常中断",
         "本次录制已自动结束",
     ),
+    "max_duration": ("由于单次录制已达最长时间", "本次录制已自动结束"),
 }
 
 GWL_EXSTYLE = -20
@@ -69,7 +77,7 @@ class RecordingStatusOverlay:
         on_quit: Callable[[], None] | None = None,
         ui_settled: threading.Event | None = None,
         expect_auto_stop_notice: bool = False,
-        radius_m: float = 10.0,
+        radius_m: float = 20.0,
         radius_hint: str = "",
     ) -> None:
         self._idle_hint = idle_hint
@@ -103,7 +111,14 @@ class RecordingStatusOverlay:
     def show_auto_stop_notice(
         self,
         reason: Literal[
-            "idle", "stuck", "forbidden_key", "violent", "focus_lost", "frame_drop"
+            "idle",
+            "stuck",
+            "forbidden_key",
+            "violent",
+            "focus_lost",
+            "frame_drop",
+            "encoder_failed",
+            "max_duration",
         ],
         restart_line: str,
         extra_line: str | None = None,
@@ -203,6 +218,7 @@ class RecordingStatusOverlay:
                 "focus_lost",
                 "frame_drop",
                 "encoder_failed",
+                "max_duration",
             ],
             restart_line: str,
             extra_line: str | None = None,

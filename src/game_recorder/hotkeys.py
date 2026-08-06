@@ -13,9 +13,9 @@ HOTKEY_DEBOUNCE_SECONDS = 0.5
 HOTKEY_SEQUENCE_TIMEOUT_SECONDS = 1.0
 
 # Radius adjust (only while not recording).
-RADIUS_STEP_M = 1.0
-RADIUS_MIN_M = 1.0
-RADIUS_MAX_M = 20.0
+RADIUS_STEP_M = 5.0
+RADIUS_MIN_M = 5.0
+RADIUS_MAX_M = 50.0
 RADIUS_HOTKEY_HINT = "[ ] 调半径  \\ 重置"
 
 # Excluded from forbidden-key auto-stop while recording.

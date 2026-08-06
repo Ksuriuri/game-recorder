@@ -47,7 +47,7 @@ class SessionMeta:
     total_input_events: int = 0
     segment_seconds: int = 0
     segments: list[SegmentMeta] = field(default_factory=list)
-    # Set when recording ends via auto-stop (``"idle"`` | ``"stuck"`` | … | ``"frame_drop"``).
+    # Set when recording ends via auto-stop (``"idle"`` | ``"stuck"`` | … | ``"max_duration"``).
     auto_stop_reason: str | None = None
     # Snapshot of ``Config.idle_timeout_s`` for library effective-duration math.
     idle_timeout_s: float = 0.0

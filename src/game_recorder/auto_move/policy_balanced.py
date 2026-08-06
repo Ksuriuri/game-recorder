@@ -27,7 +27,7 @@ from game_recorder.auto_move.pose_live import UnifiedPose
 class BalancedRadiusPolicy:
     """Sample rare human actions inside a fixed horizontal radius around an anchor."""
 
-    radius_m: float = 10.0
+    radius_m: float = 20.0
     # Start cutting outward walks earlier so small radii do not feel oversized.
     soft_radius_frac: float = 0.55
     freq_alpha: float = 1.0
