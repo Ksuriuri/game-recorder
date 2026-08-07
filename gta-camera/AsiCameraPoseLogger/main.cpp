@@ -1108,6 +1108,14 @@ private:
 
 void ScriptMain()
 {
+    // Enhanced can start ScriptHook scripts before its renderer/window is ready.
+    // Keep yielding without touching config/files until the launch path finishes.
+    const std::uint64_t startup_deadline = GetTickCount64() + 30000;
+    while (FindGameWindow() == nullptr && GetTickCount64() < startup_deadline)
+    {
+        WAIT(100);
+    }
+    WAIT(1000);
     Recorder recorder(LoadConfig());
     while (true)
     {

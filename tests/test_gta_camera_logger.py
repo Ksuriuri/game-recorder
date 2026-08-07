@@ -32,6 +32,13 @@ class GtaCameraLoggerTests(unittest.TestCase):
         self.assertIn("0x433083750C5E064AULL", source)
         self.assertIn("ApplyMovementSpeedScale(movement_speed_scale_)", source)
 
+    def test_asi_yields_until_enhanced_game_window_exists(self) -> None:
+        source = ASI_LOGGER_PATH.read_text(encoding="utf-8")
+        script_main = source[source.index("void ScriptMain()") :]
+        self.assertLess(script_main.index("FindGameWindow()"), script_main.index("LoadConfig()"))
+        self.assertLess(script_main.index("WAIT(100)"), script_main.index("LoadConfig()"))
+        self.assertIn("GetTickCount64() + 30000", script_main)
+
 
 if __name__ == "__main__":
     unittest.main()
