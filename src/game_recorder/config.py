@@ -74,6 +74,11 @@ class Config:
     # Discard the whole session on stop when shorter than this (seconds). 0 = off.
     min_recording_duration_s: float = 10.0
 
+    # After a kept session, upload to OSS when duration exceeds this and camera.jsonl exists.
+    # Runs detached via s3-upload/ so cold relaunch is not blocked. Disable with --no-auto-upload.
+    auto_upload: bool = True
+    auto_upload_min_duration_s: float = 60.0
+
     # In-game camera plugins: publish source-specific active_session.json files,
     # then select and align the one source that produced samples.
     gta_camera_sync: bool = True

@@ -1,5 +1,3 @@
 .venv/
 *.zip
-keys.txt
-token.json
 oss_credentials.json

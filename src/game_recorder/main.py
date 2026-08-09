@@ -60,6 +60,7 @@ from game_recorder.storage.audio_fallback import (
     mark_audio_source_failed,
     mark_audio_source_ok,
 )
+from game_recorder.storage.auto_upload import trigger_auto_upload
 from game_recorder.storage.pending_notice import PendingAutoStopNotice, consume_pending_notice, write_pending_notice
 
 logger = logging.getLogger(__name__)
@@ -281,6 +282,11 @@ def main() -> None:
         help="禁用自动移动（默认开启：热键开始录制后注入 WASD + 鼠标视角）",
     )
     parser.add_argument(
+        "--no-auto-upload",
+        action="store_true",
+        help="禁用录制结束后自动上传到 OSS（默认：时长>60秒且含 camera.jsonl 时触发）",
+    )
+    parser.add_argument(
         "--auto-move-hz",
         type=float,
         default=250.0,
@@ -452,6 +458,7 @@ def main() -> None:
         wukong_camera_sync=not bool(args.no_wukong_camera),
         cp2077_camera_sync=not bool(args.no_cp2077_camera),
         auto_move=not bool(args.no_auto_move),
+        auto_upload=not bool(args.no_auto_upload),
         auto_move_tick_hz=max(1.0, float(args.auto_move_hz)),
         auto_move_radius_m=min(
             RADIUS_MAX_M, max(RADIUS_MIN_M, float(args.auto_move_radius))
@@ -589,8 +596,15 @@ def main() -> None:
         if overlay is not None:
             overlay.set_recording(False)
         saved = session.stop()
+        session_dir = session.session_dir
         if saved:
-            print(f">>> 录制已保存  [{session.session_dir}]\n")
+            print(f">>> 录制已保存  [{session_dir}]\n")
+            trigger_auto_upload(
+                session_dir,
+                output_dir=config.output_dir,
+                enabled=config.auto_upload,
+                min_duration_s=config.auto_upload_min_duration_s,
+            )
         else:
             print(
                 f">>> 录制时长不足 {config.min_recording_duration_s:g} 秒，"
@@ -754,6 +768,13 @@ def main() -> None:
         )
     else:
         print("  自动移动: 已禁用（--no-auto-move）")
+    if config.auto_upload:
+        print(
+            f"  自动上传 OSS: 已启用（视频 > {config.auto_upload_min_duration_s:g} 秒"
+            " 且含 camera.jsonl；结果写入 recordings/auto_uploaded.jsonl）"
+        )
+    else:
+        print("  自动上传 OSS: 已禁用（--no-auto-upload）")
     if config.min_recording_duration_s > 0:
         print(
             f"  最短有效录制: {config.min_recording_duration_s:g} 秒"
@@ -849,10 +870,17 @@ def main() -> None:
             if session is not None and not relaunch_after_session:
                 print(">>> 正在停止当前会话 …")
                 saved = session.stop()
+                session_dir = session.session_dir
                 if overlay is not None:
                     overlay.set_recording(False)
                 if saved:
-                    print(f">>> 已保存至 {session.session_dir}")
+                    print(f">>> 已保存至 {session_dir}")
+                    trigger_auto_upload(
+                        session_dir,
+                        output_dir=config.output_dir,
+                        enabled=config.auto_upload,
+                        min_duration_s=config.auto_upload_min_duration_s,
+                    )
                 else:
                     print(
                         f">>> 录制时长不足 {config.min_recording_duration_s:g} 秒，"
