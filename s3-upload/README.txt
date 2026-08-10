@@ -11,6 +11,7 @@ S3 录制数据上传包
   - 读取同目录 oss_credentials.json（OSS 密钥，本地放置，勿提交 git）
   - 首次会自动安装 boto3（离线包用 wheels\，否则联网安装）
   - 上传到阿里云 OSS 桶 aws-kelei 的 game-raw-data/
+  - 手动批量上传跳过无 camera.jsonl 的 session（与自动上传一致）
   - OSS 同名 session 对比清单和大小，完整才跳过
   - 完整性检查只读取远程元数据，不下载远程视频
   - 网络波动时自动重试；失败重开后也会补传不完整的 session

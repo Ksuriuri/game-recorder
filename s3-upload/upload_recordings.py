@@ -29,6 +29,7 @@ DEFAULT_SKIP_DIRS = frozenset({"overlay"})
 DEFAULT_MIN_VIDEO_MB = 10
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_RETRY_DELAY_SECONDS = 5.0
+CAMERA_FILENAME = "camera.jsonl"
 UPLOAD_INTERNAL_FILES = frozenset({".ms_upload_cache", ".ms_upload_progress", ".s3_upload_cache"})
 UPLOAD_IGNORED_DIRS = frozenset({".git", ".cache"})
 # Baidu Netdisk client temp files (e.g. foo.mp4.baiduyun.uploading.cfg).
@@ -652,9 +653,13 @@ def main() -> None:
             fail(f"错误：找不到 session 目录：{session_dir}")
         if not (session_dir / "meta.json").is_file():
             fail(f"错误：session 缺少 meta.json：{session_dir}")
+        if not (session_dir / CAMERA_FILENAME).is_file():
+            fail(f"错误：session 缺少 {CAMERA_FILENAME}：{session_dir}")
         local_dirs = [session_dir]
-        # Single-session mode is driven by the recorder eligibility checks.
+        # Single-session mode skips the mp4 size floor; duration/camera
+        # eligibility is enforced by the recorder (and camera above).
         min_video_bytes = 0
+        require_camera = False  # already validated above
     else:
         recordings = args.recordings.resolve()
         if not recordings.is_dir():
@@ -665,6 +670,7 @@ def main() -> None:
             print("没有可上传的 session 文件夹。")
             return
         min_video_bytes = max(0, int(args.min_video_mb * 1024 * 1024))
+        require_camera = True
 
     try:
         import boto3  # noqa: F401
@@ -698,11 +704,14 @@ def main() -> None:
         fail(f"错误：{exc}")
 
     too_small: list[tuple[Path, int]] = []
+    missing_camera: list[Path] = []
     eligible_dirs: list[Path] = []
     for folder in local_dirs:
         mp4_bytes = session_mp4_total_bytes(folder)
         if min_video_bytes > 0 and mp4_bytes < min_video_bytes:
             too_small.append((folder, mp4_bytes))
+        elif require_camera and not (folder / CAMERA_FILENAME).is_file():
+            missing_camera.append(folder)
         else:
             eligible_dirs.append(folder)
 
@@ -770,7 +779,8 @@ def main() -> None:
         f"{dest}  "
         f"上传 {len(to_upload)}  "
         f"跳过 OSS 完整 {len(skipped_remote)}  "
-        f"跳过过小 {len(too_small)}"
+        f"跳过过小 {len(too_small)}  "
+        f"跳过无 {CAMERA_FILENAME} {len(missing_camera)}"
     )
     if skipped_remote:
         print("跳过(OSS 已完整):", ", ".join(d.name for d in skipped_remote))
@@ -786,6 +796,9 @@ def main() -> None:
                 print(
                     f"跳过(视频过小 {format_mib(mp4_bytes)} < {threshold}): {folder.name}"
                 )
+    if missing_camera:
+        for folder in missing_camera:
+            print(f"跳过(缺少 {CAMERA_FILENAME}): {folder.name}")
 
     if not to_upload:
         return
