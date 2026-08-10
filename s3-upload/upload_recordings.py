@@ -37,10 +37,6 @@ UPLOAD_IGNORED_NAME_SUFFIXES = (
     ".baiduyun.uploading.cfg",
     ".baiduyun.downloading.cfg",
 )
-BAIDU_GAME_DATA_DIR = "/game-data"
-MODELSCOPE_REPO_ID = "kusriri/world-game-data"
-MODELSCOPE_DATASET_DIR = "recordings"
-MODELSCOPE_TOKEN = "ms-54fac99a-5958-42d4-879d-b9445227cb51"
 
 T = TypeVar("T")
 
@@ -402,219 +398,6 @@ class TransferProgress:
         print(f"\r{line:<140}", end=end, flush=True)
 
 
-def try_load_baidu_access_token(
-    *,
-    pack_root: Path,
-    game_root: Path,
-    cred_dir: Path | None,
-) -> tuple[str, Path]:
-    """Return (access_token, cred_dir). Uses bundled Baidu credentials by default."""
-    from baidu_remote import get_access_token
-
-    return get_access_token(pack_root=pack_root, game_root=game_root, cred_dir=cred_dir)
-
-
-def filter_complete_on_baidu(
-    folders: list[Path],
-    *,
-    access_token: str,
-    game_data_dir: str,
-    verify_size: bool,
-    max_attempts: int,
-    retry_delay: float,
-) -> tuple[list[Path], list[Path], list[tuple[Path, str]]]:
-    """Split folders into (remaining, skipped_complete, incomplete_on_baidu)."""
-    from baidu_remote import list_session_files, list_session_folders
-
-    baidu_folders = call_with_retries(
-        lambda: list_session_folders(access_token, game_data_dir=game_data_dir),
-        description="读取百度 /game-data session 列表",
-        max_attempts=max_attempts,
-        retry_delay=retry_delay,
-    )
-
-    remaining: list[Path] = []
-    skipped: list[Path] = []
-    incomplete: list[tuple[Path, str]] = []
-    existing = [folder for folder in folders if folder.name in baidu_folders]
-    if existing:
-        checks = "文件名和大小" if verify_size else "文件名"
-        print(
-            f"正在校验 {len(existing)} 个百度同名 session 的{checks}"
-            f"（目录 {game_data_dir}，只读取元数据）...",
-            flush=True,
-        )
-
-    existing_index = 0
-    for folder in folders:
-        if folder.name not in baidu_folders:
-            remaining.append(folder)
-            continue
-
-        existing_index += 1
-        print(f"  [百度 {existing_index}/{len(existing)}] {folder.name}", flush=True)
-        try:
-            remote_sizes = call_with_retries(
-                lambda folder=folder: list_session_files(
-                    access_token,
-                    folder.name,
-                    game_data_dir=game_data_dir,
-                ),
-                description=f"读取百度清单 {folder.name}",
-                max_attempts=max_attempts,
-                retry_delay=retry_delay,
-            )
-            remote_files = {
-                relative: RemoteFile(size=size) for relative, size in remote_sizes.items()
-            }
-            check = check_remote_manifest(
-                local_session_manifest(folder),
-                remote_files,
-                verify_size=verify_size,
-            )
-        except Exception as exc:
-            check = ManifestCheck(False, f"无法校验百度清单: {exc}")
-
-        if check.complete:
-            print(f"    百度已完整，跳过上传 OSS：{check.detail}", flush=True)
-            skipped.append(folder)
-        else:
-            print(f"    百度不完整，继续走 OSS：{check.detail}", flush=True)
-            incomplete.append((folder, check.detail))
-            remaining.append(folder)
-
-    return remaining, skipped, incomplete
-
-
-def check_modelscope_manifest(
-    local: dict[str, LocalFile],
-    remote: dict[str, object],
-    *,
-    verify_size: bool,
-) -> ManifestCheck:
-    """Compare local session files to ModelScope metadata (names/sizes + CRLF)."""
-    from modelscope_remote import RemoteFile, matches_after_crlf_normalize
-
-    if not local:
-        return ManifestCheck(False, "本地文件夹为空")
-
-    missing = sorted(set(local) - set(remote))
-    pending: list[str] = []
-    size_mismatches: list[str] = []
-
-    for relative_path, local_file in local.items():
-        remote_file = remote.get(relative_path)
-        if remote_file is None:
-            continue
-        assert isinstance(remote_file, RemoteFile)
-        if remote_file.in_check:
-            pending.append(relative_path)
-            continue
-        if not verify_size:
-            continue
-        if local_file.size == remote_file.size:
-            continue
-        if matches_after_crlf_normalize(
-            local_file.path, local_file.size, remote_file.size
-        ):
-            continue
-        size_mismatches.append(
-            f"{relative_path} (本地 {local_file.size} / 远程 {remote_file.size})"
-        )
-
-    problems: list[str] = []
-    if missing:
-        problems.append(f"缺少文件: {_short_path_list(missing)}")
-    if pending:
-        problems.append(f"服务器仍在校验: {_short_path_list(sorted(pending))}")
-    if size_mismatches:
-        problems.append(f"大小不一致: {_short_path_list(sorted(size_mismatches))}")
-    if problems:
-        return ManifestCheck(False, "；".join(problems))
-
-    size_note = "、大小" if verify_size else ""
-    return ManifestCheck(True, f"{len(local)} 个文件的名称{size_note}一致")
-
-
-def filter_complete_on_modelscope(
-    folders: list[Path],
-    *,
-    api,
-    repo_id: str,
-    token: str,
-    dataset_dir: str,
-    verify_size: bool,
-    max_attempts: int,
-    retry_delay: float,
-) -> tuple[list[Path], list[Path], list[tuple[Path, str]]]:
-    """Split folders into (remaining, skipped_complete, incomplete_on_modelscope)."""
-    from modelscope_remote import list_session_files, list_session_folders
-
-    ms_folders = call_with_retries(
-        lambda: list_session_folders(
-            api, repo_id, token, dataset_dir=dataset_dir
-        ),
-        description="读取 ModelScope session 列表",
-        max_attempts=max_attempts,
-        retry_delay=retry_delay,
-    )
-
-    remaining: list[Path] = []
-    skipped: list[Path] = []
-    incomplete: list[tuple[Path, str]] = []
-    existing = [folder for folder in folders if folder.name in ms_folders]
-
-    if existing:
-        checks = "文件名和大小" if verify_size else "文件名"
-        print(
-            f"正在校验 {len(existing)} 个 ModelScope 同名 session 的{checks}"
-            "（只读取元数据，不下载远程视频）...",
-            flush=True,
-        )
-
-    existing_index = 0
-    for folder in folders:
-        if folder.name not in ms_folders:
-            remaining.append(folder)
-            continue
-
-        existing_index += 1
-        print(
-            f"  [ModelScope {existing_index}/{len(existing)}] {folder.name}",
-            flush=True,
-        )
-        try:
-            remote_files = call_with_retries(
-                lambda folder=folder: list_session_files(
-                    api,
-                    repo_id,
-                    token,
-                    folder.name,
-                    dataset_dir=dataset_dir,
-                ),
-                description=f"读取 ModelScope 清单 {folder.name}",
-                max_attempts=max_attempts,
-                retry_delay=retry_delay,
-            )
-            check = check_modelscope_manifest(
-                local_session_manifest(folder),
-                remote_files,
-                verify_size=verify_size,
-            )
-        except Exception as exc:
-            check = ManifestCheck(False, f"无法校验 ModelScope 清单: {exc}")
-
-        if check.complete:
-            print(f"    ModelScope 已完整，跳过上传 OSS：{check.detail}", flush=True)
-            skipped.append(folder)
-        else:
-            print(f"    ModelScope 不完整，继续走 OSS：{check.detail}", flush=True)
-            incomplete.append((folder, check.detail))
-            remaining.append(folder)
-
-    return remaining, skipped, incomplete
-
-
 def upload_session_files(
     client,
     *,
@@ -646,6 +429,63 @@ def upload_session_files(
         finally:
             tracker.finish_file()
     return tracker
+
+
+def append_upload_log(
+    log_path: Path,
+    *,
+    folder: Path | None,
+    status: str,
+    detail: str,
+    session_name: str | None = None,
+) -> None:
+    """Append one JSON line for an upload result (success or error)."""
+    from datetime import datetime, timezone
+
+    name = session_name or (folder.name if folder is not None else "")
+    path_text = str(folder.resolve()) if folder is not None else ""
+    payload = {
+        "session": name,
+        "path": path_text,
+        "status": status,
+        "detail": detail,
+        "uploaded_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+    }
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(log_path, "a", encoding="utf-8", newline="\n") as f:
+        f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+
+def append_success_log(
+    log_path: Path,
+    *,
+    folder: Path,
+    status: str,
+    detail: str,
+) -> None:
+    """Compatibility wrapper around ``append_upload_log``."""
+    append_upload_log(log_path, folder=folder, status=status, detail=detail)
+
+
+def _safe_log_error(
+    log_path: Path | None,
+    *,
+    folder: Path | None,
+    detail: str,
+    session_name: str | None = None,
+) -> None:
+    if log_path is None:
+        return
+    try:
+        append_upload_log(
+            log_path,
+            folder=folder,
+            status="error",
+            detail=detail,
+            session_name=session_name,
+        )
+    except OSError as exc:
+        print(f"警告：写入错误日志失败：{exc}", file=sys.stderr)
 
 
 def upload_session_with_retries(
@@ -766,78 +606,76 @@ def main() -> None:
         help="only compare remote file names; do not compare sizes",
     )
     ap.add_argument(
-        "--skip-baidu-check",
-        action="store_true",
-        help="do not skip sessions that are already complete on Baidu /game-data",
-    )
-    ap.add_argument(
-        "--baidu-dir",
-        default=BAIDU_GAME_DATA_DIR,
-        help=f"Baidu Netdisk game-data directory (default: {BAIDU_GAME_DATA_DIR})",
-    )
-    ap.add_argument(
-        "--baidu-cred-dir",
+        "--session",
         type=Path,
         default=None,
-        help="optional override dir for Baidu keys.txt + token.json "
-        "(default: bundled credentials in the script; refreshed token "
-        "is written to s3-upload/)",
+        help="upload only this session folder (skips scanning recordings/)",
     )
     ap.add_argument(
-        "--skip-modelscope-check",
-        action="store_true",
-        help="do not skip sessions that are already complete on ModelScope",
-    )
-    ap.add_argument(
-        "--modelscope-repo-id",
-        default=MODELSCOPE_REPO_ID,
-        help=f"ModelScope dataset repo (default: {MODELSCOPE_REPO_ID})",
-    )
-    ap.add_argument(
-        "--modelscope-dataset-dir",
-        default=MODELSCOPE_DATASET_DIR,
-        help=f"remote subdirectory in the ModelScope dataset (default: {MODELSCOPE_DATASET_DIR})",
-    )
-    ap.add_argument(
-        "--modelscope-token",
-        default=MODELSCOPE_TOKEN,
-        help="ModelScope access token (default: bundled token)",
+        "--success-log",
+        type=Path,
+        default=None,
+        help="append one JSON line per session result (uploaded / already_complete / error)",
     )
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
+    success_log = args.success_log.resolve() if args.success_log is not None else None
+    session_dir: Path | None = (
+        args.session.resolve() if args.session is not None else None
+    )
+
+    def fail(message: str, *, code: int = 1) -> None:
+        print(message, file=sys.stderr)
+        _safe_log_error(
+            success_log,
+            folder=session_dir if session_dir is not None and session_dir.is_dir() else None,
+            detail=message.strip(),
+            session_name=session_dir.name if session_dir is not None else None,
+        )
+        sys.exit(code)
+
     if not args.access_key or not args.secret_key:
         cred_file = _pack_root() / OSS_CREDENTIALS_FILE
-        print(
+        fail(
             "错误：缺少 OSS AccessKey。\n"
             f"请将 {cred_file.name} 放进本目录后重新运行 upload.bat\n"
-            f"（可参考 oss_credentials.example.json）。",
-            file=sys.stderr,
+            f"（可参考 oss_credentials.example.json）。"
         )
-        sys.exit(1)
 
-    recordings = args.recordings.resolve()
-    if not recordings.is_dir():
-        print(f"错误：找不到 recordings 目录：{recordings}", file=sys.stderr)
-        sys.exit(1)
     if args.max_attempts < 1:
-        print("错误：--max-attempts 必须至少为 1。", file=sys.stderr)
-        sys.exit(1)
+        fail("错误：--max-attempts 必须至少为 1。")
     if args.retry_delay < 0:
-        print("错误：--retry-delay 不能小于 0。", file=sys.stderr)
-        sys.exit(1)
+        fail("错误：--retry-delay 不能小于 0。")
 
-    skip_dirs = set(DEFAULT_SKIP_DIRS) | set(args.skip_dir)
-    local_dirs = iter_session_dirs(recordings, skip_dirs=skip_dirs)
-    if not local_dirs:
-        print("没有可上传的 session 文件夹。")
-        return
+    if session_dir is not None:
+        if not session_dir.is_dir():
+            fail(f"错误：找不到 session 目录：{session_dir}")
+        if not (session_dir / "meta.json").is_file():
+            fail(f"错误：session 缺少 meta.json：{session_dir}")
+        if not (session_dir / CAMERA_FILENAME).is_file():
+            fail(f"错误：session 缺少 {CAMERA_FILENAME}：{session_dir}")
+        local_dirs = [session_dir]
+        # Single-session mode skips the mp4 size floor; duration/camera
+        # eligibility is enforced by the recorder (and camera above).
+        min_video_bytes = 0
+        require_camera = False  # already validated above
+    else:
+        recordings = args.recordings.resolve()
+        if not recordings.is_dir():
+            fail(f"错误：找不到 recordings 目录：{recordings}")
+        skip_dirs = set(DEFAULT_SKIP_DIRS) | set(args.skip_dir)
+        local_dirs = iter_session_dirs(recordings, skip_dirs=skip_dirs)
+        if not local_dirs:
+            print("没有可上传的 session 文件夹。")
+            return
+        min_video_bytes = max(0, int(args.min_video_mb * 1024 * 1024))
+        require_camera = True
 
     try:
         import boto3  # noqa: F401
     except ImportError:
-        print("错误：未安装 boto3，请先运行 install.bat。", file=sys.stderr)
-        sys.exit(1)
+        fail("错误：未安装 boto3，请先运行 install.bat。")
 
     client = make_s3_client(
         endpoint=args.endpoint,
@@ -861,104 +699,27 @@ def main() -> None:
             retry_delay=args.retry_delay,
         )
     except PermissionError as exc:
-        print(f"错误：{exc}", file=sys.stderr)
-        sys.exit(1)
+        fail(f"错误：{exc}")
     except Exception as exc:
-        print(f"错误：{exc}", file=sys.stderr)
-        sys.exit(1)
+        fail(f"错误：{exc}")
 
-    min_video_bytes = max(0, int(args.min_video_mb * 1024 * 1024))
     too_small: list[tuple[Path, int]] = []
     missing_camera: list[Path] = []
     eligible_dirs: list[Path] = []
     for folder in local_dirs:
         mp4_bytes = session_mp4_total_bytes(folder)
-        if mp4_bytes < min_video_bytes:
+        if min_video_bytes > 0 and mp4_bytes < min_video_bytes:
             too_small.append((folder, mp4_bytes))
-        elif not (folder / CAMERA_FILENAME).is_file():
+        elif require_camera and not (folder / CAMERA_FILENAME).is_file():
             missing_camera.append(folder)
         else:
             eligible_dirs.append(folder)
 
     verify_size = not args.no_verify_size
-    skipped_baidu: list[Path] = []
-    incomplete_baidu: list[tuple[Path, str]] = []
-    skipped_modelscope: list[Path] = []
-    incomplete_modelscope: list[tuple[Path, str]] = []
-    candidates = eligible_dirs
-
-    if args.skip_baidu_check:
-        print("已跳过百度完整性检查（--skip-baidu-check）。", flush=True)
-    else:
-        try:
-            access_token, cred_dir = try_load_baidu_access_token(
-                pack_root=_pack_root(),
-                game_root=_game_recorder_root(),
-                cred_dir=args.baidu_cred_dir,
-            )
-        except Exception as exc:
-            print(f"错误：加载百度凭证失败：{exc}", file=sys.stderr)
-            sys.exit(1)
-
-        print(f"已启用百度完整性检查（凭证：内置或 {cred_dir}）", flush=True)
-        baidu_dir = args.baidu_dir if args.baidu_dir.startswith("/") else f"/{args.baidu_dir}"
-        try:
-            candidates, skipped_baidu, incomplete_baidu = filter_complete_on_baidu(
-                candidates,
-                access_token=access_token,
-                game_data_dir=baidu_dir,
-                verify_size=verify_size,
-                max_attempts=args.max_attempts,
-                retry_delay=args.retry_delay,
-            )
-        except Exception as exc:
-            print(f"错误：百度完整性检查失败：{exc}", file=sys.stderr)
-            sys.exit(1)
-
-    if args.skip_modelscope_check:
-        print("已跳过 ModelScope 完整性检查（--skip-modelscope-check）。", flush=True)
-    else:
-        try:
-            from modelscope.hub.api import HubApi  # noqa: F401
-            from modelscope_remote import make_api
-        except ImportError:
-            print(
-                "错误：未安装 modelscope，请重新运行 s3-upload\\install.bat。",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        try:
-            ms_api = make_api(args.modelscope_token)
-        except Exception as exc:
-            print(f"错误：登录 ModelScope 失败：{exc}", file=sys.stderr)
-            sys.exit(1)
-
-        print(
-            f"已启用 ModelScope 完整性检查（{args.modelscope_repo_id}/"
-            f"{args.modelscope_dataset_dir.strip('/')}）",
-            flush=True,
-        )
-        try:
-            candidates, skipped_modelscope, incomplete_modelscope = (
-                filter_complete_on_modelscope(
-                    candidates,
-                    api=ms_api,
-                    repo_id=args.modelscope_repo_id,
-                    token=args.modelscope_token,
-                    dataset_dir=args.modelscope_dataset_dir,
-                    verify_size=verify_size,
-                    max_attempts=args.max_attempts,
-                    retry_delay=args.retry_delay,
-                )
-            )
-        except Exception as exc:
-            print(f"错误：ModelScope 完整性检查失败：{exc}", file=sys.stderr)
-            sys.exit(1)
-
     skipped_remote: list[Path] = []
     to_upload: list[Path] = []
     incomplete_remote: list[tuple[Path, str]] = []
-    existing_dirs = [folder for folder in candidates if folder.name in remote_folders]
+    existing_dirs = [folder for folder in eligible_dirs if folder.name in remote_folders]
 
     if existing_dirs:
         checks = "文件名和大小" if verify_size else "文件名"
@@ -969,7 +730,7 @@ def main() -> None:
         )
 
     existing_index = 0
-    for folder in candidates:
+    for folder in eligible_dirs:
         if folder.name not in remote_folders:
             to_upload.append(folder)
             continue
@@ -991,14 +752,23 @@ def main() -> None:
                 verify_size=verify_size,
             )
         except PermissionError as exc:
-            print(f"错误：{exc}", file=sys.stderr)
-            sys.exit(1)
+            fail(f"错误：{exc}")
         except Exception as exc:
             check = ManifestCheck(False, f"无法校验远程清单: {exc}")
 
         if check.complete:
             print(f"    OSS 已完整，跳过：{check.detail}", flush=True)
             skipped_remote.append(folder)
+            if success_log is not None:
+                try:
+                    append_upload_log(
+                        success_log,
+                        folder=folder,
+                        status="already_complete",
+                        detail=check.detail,
+                    )
+                except OSError as exc:
+                    print(f"警告：写入成功日志失败：{exc}", file=sys.stderr)
         else:
             print(f"    OSS 不完整，将重新上传：{check.detail}", flush=True)
             incomplete_remote.append((folder, check.detail))
@@ -1008,25 +778,10 @@ def main() -> None:
     print(
         f"{dest}  "
         f"上传 {len(to_upload)}  "
-        f"跳过百度完整 {len(skipped_baidu)}  "
-        f"跳过 ModelScope 完整 {len(skipped_modelscope)}  "
         f"跳过 OSS 完整 {len(skipped_remote)}  "
         f"跳过过小 {len(too_small)}  "
         f"跳过无 {CAMERA_FILENAME} {len(missing_camera)}"
     )
-    if skipped_baidu:
-        print("跳过(百度已完整):", ", ".join(d.name for d in skipped_baidu))
-    if incomplete_baidu:
-        for folder, detail in incomplete_baidu:
-            print(f"百度不完整(继续 OSS): {folder.name} - {detail}")
-    if skipped_modelscope:
-        print(
-            "跳过(ModelScope 已完整):",
-            ", ".join(d.name for d in skipped_modelscope),
-        )
-    if incomplete_modelscope:
-        for folder, detail in incomplete_modelscope:
-            print(f"ModelScope 不完整(继续 OSS): {folder.name} - {detail}")
     if skipped_remote:
         print("跳过(OSS 已完整):", ", ".join(d.name for d in skipped_remote))
     if incomplete_remote:
@@ -1060,7 +815,7 @@ def main() -> None:
         flush=True,
     )
 
-    failed: list[str] = []
+    failed: list[tuple[str, str]] = []
     batch_uploaded = 0
     batch_started = time.perf_counter()
     for i, folder in enumerate(to_upload, start=1):
@@ -1090,19 +845,33 @@ def main() -> None:
             )
             if not success:
                 print(f"  最终失败: {detail}", file=sys.stderr)
-                failed.append(name)
+                failed.append((name, detail))
+                _safe_log_error(success_log, folder=folder, detail=detail)
             else:
                 batch_uploaded += session_bytes
+                if success_log is not None:
+                    try:
+                        append_upload_log(
+                            success_log,
+                            folder=folder,
+                            status="uploaded",
+                            detail=detail,
+                        )
+                    except OSError as exc:
+                        print(f"警告：写入成功日志失败：{exc}", file=sys.stderr)
         except PermissionError as exc:
             print(f"  失败: {exc}", file=sys.stderr)
-            failed.append(name)
+            failed.append((name, str(exc)))
+            _safe_log_error(success_log, folder=folder, detail=str(exc))
         except Exception as exc:
             print(f"  失败: {exc}", file=sys.stderr)
-            failed.append(name)
+            failed.append((name, str(exc)))
+            _safe_log_error(success_log, folder=folder, detail=str(exc))
 
     batch_elapsed = max(time.perf_counter() - batch_started, 1e-6)
     if failed:
-        print(f"完成，{len(failed)} 个失败: {', '.join(failed)}", file=sys.stderr)
+        summary = ", ".join(f"{name} ({detail})" for name, detail in failed)
+        print(f"完成，{len(failed)} 个失败: {summary}", file=sys.stderr)
         sys.exit(1)
     print(
         f"完成，已上传 {len(to_upload)} 个文件夹，"

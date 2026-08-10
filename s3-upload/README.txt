@@ -9,14 +9,20 @@ S3 录制数据上传包
 
   双击 upload.bat
   - 读取同目录 oss_credentials.json（OSS 密钥，本地放置，勿提交 git）
-  - 首次会自动安装 boto3 / modelscope（离线包用 wheels\，否则联网安装）
-  - 自动检查百度 /game-data/（凭证已内置），完整则跳过
-  - 自动检查 ModelScope 数据集 recordings/（凭证已内置），完整则跳过
-  - 其余上传到阿里云 OSS 桶 aws-kelei 的 game-raw-data/
-  - 跳过无 camera.jsonl 的 session
-  - OSS 同名 session 再对比清单和大小，完整才跳过
+  - 首次会自动安装 boto3（离线包用 wheels\，否则联网安装）
+  - 上传到阿里云 OSS 桶 aws-kelei 的 game-raw-data/
+  - 跳过无 camera.jsonl 的 session；mp4 合计默认 ≥ 10MB
+  - OSS 同名 session 对比清单和大小，完整才跳过
   - 完整性检查只读取远程元数据，不下载远程视频
   - 网络波动时自动重试；失败重开后也会补传不完整的 session
+
+单 session / 成功日志（可选）
+----------------------------
+  python upload_recordings.py --session ..\recordings\session_xxx ^
+    --success-log ..\recordings\auto_uploaded.jsonl
+
+  --session       只上传指定 session 文件夹
+  --success-log   上传结果追加一行 JSON（uploaded / already_complete / error）
 
 目录结构
 --------
@@ -30,14 +36,8 @@ S3 录制数据上传包
       oss_credentials.example.json  <- 密钥模板
       install.bat            <- 仅安装上传环境
       upload_recordings.py
-      baidu_remote.py
-      modelscope_remote.py
       wheels/                <- 离线 wheel（可选）
 
 配置
 ----
   OSS 密钥：复制 oss_credentials.example.json 为 oss_credentials.json 并填入密钥
-  百度：修改 baidu_remote.py 顶部 DEFAULT_BAIDU_* 常量
-  ModelScope：修改 upload_recordings.py / modelscope_remote.py 顶部常量
-  关闭百度检查：python upload_recordings.py --skip-baidu-check
-  关闭 ModelScope 检查：python upload_recordings.py --skip-modelscope-check
