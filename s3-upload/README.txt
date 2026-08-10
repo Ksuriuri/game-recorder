@@ -13,6 +13,7 @@ S3 录制数据上传包
   - 自动检查百度 /game-data/（凭证已内置），完整则跳过
   - 自动检查 ModelScope 数据集 recordings/（凭证已内置），完整则跳过
   - 其余上传到阿里云 OSS 桶 aws-kelei 的 game-raw-data/
+  - 跳过无 camera.jsonl 的 session
   - OSS 同名 session 再对比清单和大小，完整才跳过
   - 完整性检查只读取远程元数据，不下载远程视频
   - 网络波动时自动重试；失败重开后也会补传不完整的 session

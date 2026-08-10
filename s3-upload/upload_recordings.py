@@ -29,6 +29,7 @@ DEFAULT_SKIP_DIRS = frozenset({"overlay"})
 DEFAULT_MIN_VIDEO_MB = 10
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_RETRY_DELAY_SECONDS = 5.0
+CAMERA_FILENAME = "camera.jsonl"
 UPLOAD_INTERNAL_FILES = frozenset({".ms_upload_cache", ".ms_upload_progress", ".s3_upload_cache"})
 UPLOAD_IGNORED_DIRS = frozenset({".git", ".cache"})
 # Baidu Netdisk client temp files (e.g. foo.mp4.baiduyun.uploading.cfg).
@@ -868,11 +869,14 @@ def main() -> None:
 
     min_video_bytes = max(0, int(args.min_video_mb * 1024 * 1024))
     too_small: list[tuple[Path, int]] = []
+    missing_camera: list[Path] = []
     eligible_dirs: list[Path] = []
     for folder in local_dirs:
         mp4_bytes = session_mp4_total_bytes(folder)
         if mp4_bytes < min_video_bytes:
             too_small.append((folder, mp4_bytes))
+        elif not (folder / CAMERA_FILENAME).is_file():
+            missing_camera.append(folder)
         else:
             eligible_dirs.append(folder)
 
@@ -1007,7 +1011,8 @@ def main() -> None:
         f"跳过百度完整 {len(skipped_baidu)}  "
         f"跳过 ModelScope 完整 {len(skipped_modelscope)}  "
         f"跳过 OSS 完整 {len(skipped_remote)}  "
-        f"跳过过小 {len(too_small)}"
+        f"跳过过小 {len(too_small)}  "
+        f"跳过无 {CAMERA_FILENAME} {len(missing_camera)}"
     )
     if skipped_baidu:
         print("跳过(百度已完整):", ", ".join(d.name for d in skipped_baidu))
@@ -1036,6 +1041,9 @@ def main() -> None:
                 print(
                     f"跳过(视频过小 {format_mib(mp4_bytes)} < {threshold}): {folder.name}"
                 )
+    if missing_camera:
+        for folder in missing_camera:
+            print(f"跳过(缺少 {CAMERA_FILENAME}): {folder.name}")
 
     if not to_upload:
         return

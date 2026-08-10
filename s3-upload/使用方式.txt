@@ -29,6 +29,7 @@ S3 录制数据上传包 - 使用说明
     1. 读取同目录 oss_credentials.json 中的 OSS 密钥
     2. 首次运行会自动安装上传所需环境（有 wheels\ 则离线，否则联网）
     3. 读取上一级目录的 recordings\ 里各 session 文件夹
+       （需有 meta.json、camera.jsonl；mp4 合计默认 ≥ 10MB）
     4. 自动检查百度网盘 /game-data/：本地同名 session 若已完整则跳过
     5. 自动检查 ModelScope 数据集 recordings/：同名 session 完整则跳过
     6. 其余 session 上传到阿里云 OSS 存储桶 aws-kelei 的 game-raw-data/ 目录
