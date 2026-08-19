@@ -24,7 +24,8 @@ REM     ffmpeg\          BtbN gpl FFmpeg (NVENC/AMF/QSV + libx264 + dshow)
 REM     wheels\          pre-downloaded dependency wheels (numpy, opencv-headless,
 REM                      dxcam, soundcard, cffi, pycparser …)
 REM     src\, scripts\, gta-camera\, rdr2-camera\, wukong-camera\, cp2077-camera\,
-REM     s3-upload\（不含 .venv / oss_credentials.json）, pyproject.toml
+REM     s3-upload\（含 oss_credentials.json，供目标机自动上传；不含 .venv）
+REM     pyproject.toml
 REM     根目录全部 *.bat / *.vbs / *.md / *.txt（install.bat、run.bat、录制操作手册.txt 等）
 REM
 REM   What is NOT shipped:
@@ -199,6 +200,11 @@ if errorlevel 1 (
 
 echo.
 echo [4/4] 正在压缩打包 ...
+if exist "%PROJECT_DIR%\s3-upload\oss_credentials.json" (
+    echo       将把 s3-upload\oss_credentials.json 打进便携包（供目标机自动上传）。
+) else (
+    echo [警告] 未找到 s3-upload\oss_credentials.json，离线包将无法自动上传。
+)
 
 for /f %%D in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd_HHmmss"') do set "DATESTAMP=%%D"
 set "BUNDLE=%PROJECT_DIR%\game-recorder-portable-%DATESTAMP%.zip"
@@ -208,7 +214,8 @@ if exist "%BUNDLE_TMP%" del /q "%BUNDLE_TMP%" 2>nul
 REM Write to .tools\ first, then move — avoids zip failing when an older portable
 REM zip in the project root is open in Explorer or the IDE.
 REM Pack selectively: only runtime .tools subdirs (skip local ASI compile toolchains).
-REM s3-upload is included with .venv / __pycache__ / oss_credentials.json skipped.
+REM s3-upload is included with .venv / __pycache__ skipped.  oss_credentials.json
+REM is packed when present so cafe machines can auto-upload without a second copy.
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
     "$ErrorActionPreference='Stop';" ^
     "Add-Type -AssemblyName System.IO.Compression;" ^
@@ -245,7 +252,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
     "  Get-ChildItem -LiteralPath '.' -File | Where-Object { $_.Extension -in @('.bat','.vbs','.md','.txt') } | ForEach-Object {" ^
     "    [void][System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $_.FullName, $_.Name, [System.IO.Compression.CompressionLevel]::Optimal);" ^
     "  };" ^
-    "  Add-Tree $zip 's3-upload' 's3-upload/' @('.venv','__pycache__') @('oss_credentials.json');" ^
+    "  Add-Tree $zip 's3-upload' 's3-upload/' @('.venv','__pycache__');" ^
     "} finally { $zip.Dispose() }"
 if errorlevel 1 (
     echo [错误] 压缩打包失败。
@@ -258,6 +265,15 @@ if errorlevel 1 (
     exit /b 1
 )
 if exist "%BUNDLE_TMP%" del /q "%BUNDLE_TMP%" 2>nul
+
+powershell -NoProfile -Command ^
+    "Add-Type -AssemblyName System.IO.Compression.FileSystem;" ^
+    "$z = [System.IO.Compression.ZipFile]::OpenRead('%BUNDLE%');" ^
+    "try { $found = [bool]($z.Entries | Where-Object { $_.FullName -eq 's3-upload/oss_credentials.json' }) } finally { $z.Dispose() };" ^
+    "if (-not $found) { Write-Host '[警告] 压缩包内没有 s3-upload/oss_credentials.json'; exit 2 }"
+if errorlevel 2 (
+    echo [警告] 压缩包内没有 s3-upload\oss_credentials.json，目标机将无法自动上传。
+)
 
 for %%S in ("%BUNDLE%") do set "BUNDLE_SIZE=%%~zS"
 set /a BUNDLE_MB=%BUNDLE_SIZE% / 1048576

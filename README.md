@@ -120,6 +120,7 @@ game-recorder/
 ├── gta-camera/                 # GTA ScriptHook 相机插件与安装入口
 ├── rdr2-camera/                # RDR2 ScriptHook 原生插件与独立安装入口
 ├── wukong-camera/              # 黑神话 UE4SS payload、安全安装/卸载入口
+├── s3-upload/                  # 会话结束后自动上传；便携包会带上本地 oss_credentials.json
 ├── ffmpeg/bin/ffmpeg.exe       # ~140 MB，BtbN gpl 构建
 ├── wheels/                     # ~55 MB，所有 runtime 依赖 + 项目本体的 wheel
 │   ├── game_recorder-*.whl     # 离线 install 安装此项（勿仅用 editable）
