@@ -352,7 +352,7 @@ game-recorder -v
 - **GTA 等使用 shared-mode 音频的游戏可直接录**。极少数**强制独占模式**的应用会让 WASAPI loopback 拿到静音；本工具自动降级到 DirectShow，再不行就静音录制（`meta.json` 的 `audio_source` 会是 `null`，便于事后过滤）。
 - **硬件编码跨机泛化**：网吧 GPU 五花八门。启动时按 **NVENC → AMF → QSV → libx264** 做编译列表 + 运行时探测：有对应 GPU/驱动则走硬件编码，否则落到 `libx264 ultrafast`（默认 `--x264-threads 2`）。若仍卡，优先用 `run.bat --fps 20 --quality 28 --x264-threads 1`。
 - **切屏 / 全屏切换**：DXGI 在 Alt+Tab 或游戏切全屏时可能短暂报告不同分辨率。录制器会把临时尺寸缩放回本次 session 的初始尺寸，避免视频花屏或被切成多段；真正 0 帧的启动空段会自动清理。
-- **重启即清空的机器**：网吧还原盘会把 RTSS 之类的系统级安装一起抹掉。`install.bat` 每次都会重新装好并重新注册限帧配置，所以开机后照常跑一遍 `install.bat` 即可，不需要额外记步骤。用离线便携包部署时安装包已在 `.tools\rtss\` 内，重装不需要联网。
+- **重启即清空的机器**：网吧还原盘会把 RTSS 之类的系统级安装一起抹掉。`install.bat` 每次都会重新装好并重新注册限帧配置，所以开机后照常跑一遍 `install.bat` 即可，不需要额外记步骤。用离线便携包部署时安装包已在 `.tools\rtss\` 内，重装不需要联网。没装游戏的机器会自动跳过这一步。
 
 ## 游戏帧率上限（RTSS）
 
@@ -367,11 +367,16 @@ REM 默认：RDR2.exe 限 60 FPS
 REM 换游戏 / 换帧率；--game-exe 可重复
 .venv\Scripts\python.exe scripts\install_rtss.py --fps 30 --game-exe GTA5.exe
 
+REM 游戏装在自动检测不到的地方时直接指定
+.venv\Scripts\python.exe scripts\install_rtss.py --fps 60 --game-dir "Z:\RDR2"
+
 REM 取消限帧
 .venv\Scripts\python.exe scripts\install_rtss.py --fps 0
 ```
 
-或者在跑 `install.bat` 前用环境变量改默认值：`set RTSS_FPS=30`、`set RTSS_GAME_EXE=GTA5.exe`；`set RTSS_SKIP=1` 则整步跳过。
+或者在跑 `install.bat` 前用环境变量改默认值：`set RTSS_FPS=30`、`set RTSS_GAME_EXE=GTA5.exe`、`set RTSS_GAME_DIR=Z:\RDR2`；`set RTSS_SKIP=1` 则整步跳过。
+
+**只在机器上真有这个游戏时才装。** 脚本先找游戏，找不到就直接跳过（退出码 3），不会下载也不会安装 RTSS。RDR2 的查找复用相机插件那一套：`RDR2_DIR` 环境变量 → 注册表（Steam / R\* 启动器 / 卸载项）→ Steam 库 → `Program Files`，再加上各固定盘根目录下一层的扫描，所以 `Z:\RDR2` 这类免安装版本也能认出来。`install.bat` 里如果已经为相机插件设了 `RDR2_DIR`，限帧这步会直接沿用同一个路径。都没找到时会问一次目录，直接回车即视为本机没这个游戏；带 `--no-prompt`（无人值守 / 离线部署）时不问，直接跳过。确实想在没检测到游戏的机器上预装，加 `--skip-game-check`。
 
 脚本做的事：从 Guru3D 官方镜像下载 RTSS 7.3.7（内置 SHA-256 与 Authenticode 签名双重校验，安装包缓存在 `.tools\rtss\`），静默安装，然后在 `Profiles\<游戏主程序名>.cfg` 里写入帧率上限并启动 RTSS。RTSS 按可执行文件名匹配配置，所以"注册游戏"就是写这个文件，全程不需要开 GUI。
 

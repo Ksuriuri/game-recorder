@@ -358,13 +358,18 @@ REM  duplicated / unevenly spaced frames.  RTSS_FPS overrides the default cap;
 REM  RTSS_GAME_EXE targets a game other than RDR2.  The on-screen display stays
 REM  off because RTSS draws it into the game's back buffer, which would bake it
 REM  into every recording.
+REM
+REM  The installer only runs if the game is actually on this machine, so a PC
+REM  without RDR2 never gets a frame limiter it has no use for.
 REM ============================================================
 echo.
-if defined RTSS_SKIP goto :rtss_install_skip
+if defined RTSS_SKIP goto :rtss_install_bypass
 echo [可选] 正在配置 RTSS 限帧 …
 if not defined RTSS_FPS set "RTSS_FPS=60"
 if not defined RTSS_GAME_EXE set "RTSS_GAME_EXE=RDR2.exe"
 set "RTSS_ARGS=--fps %RTSS_FPS% --game-exe "%RTSS_GAME_EXE%""
+REM Reuse the path the camera plugin was pointed at instead of re-detecting.
+if /I "%RTSS_GAME_EXE%"=="RDR2.exe" if defined RDR2_DIR set "RTSS_ARGS=%RTSS_ARGS% --game-dir "%RDR2_DIR%""
 if "%OFFLINE_MODE%"=="1" set "RTSS_ARGS=%RTSS_ARGS% --offline"
 if defined GAME_RECORDER_SKIP_PAUSE set "RTSS_ARGS=%RTSS_ARGS% --no-prompt"
 "%VERIFY_PY%" "%PROJECT_DIR%\scripts\install_rtss.py" %RTSS_ARGS%
@@ -375,12 +380,16 @@ echo       [完成] RTSS 已装好并常驻后台，游戏帧率将被限制在 
 goto :rtss_install_done
 
 :rtss_install_skip
-echo       [跳过] 未配置 RTSS 限帧。需要时请再运行 scripts\install_rtss.py。
+echo       [跳过] 本机未检测到目标游戏，未配置 RTSS 限帧。
+echo              装了游戏后可再运行：scripts\install_rtss.py --fps %RTSS_FPS%
 goto :rtss_install_done
 
 :rtss_install_fail
 echo       [失败] RTSS 限帧未配置成功，但不影响录制器主程序；可稍后重试 scripts\install_rtss.py。
 goto :rtss_install_done
+
+:rtss_install_bypass
+echo [跳过] 已按 RTSS_SKIP 要求跳过 RTSS 限帧。
 
 :rtss_install_done
 

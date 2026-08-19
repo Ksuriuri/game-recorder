@@ -86,6 +86,85 @@ class ProfileMergeTests(unittest.TestCase):
             installer.profile_overrides(installer.MAX_FPS + 1, osd=False)
 
 
+class GameDiscoveryTests(unittest.TestCase):
+    def _isolate(self, scanned: list[Path] | None = None) -> list[mock._patch]:
+        """Silence the real registry / Steam / drive lookups."""
+        return [
+            mock.patch.object(installer, "_rdr2_camera_installer", return_value=None),
+            mock.patch.object(installer, "_registry_install_locations", return_value=[]),
+            mock.patch.object(
+                installer, "_shallow_scan_dirs", return_value=scanned or []
+            ),
+        ]
+
+    def test_env_override_is_honoured(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            game = Path(temp_dir)
+            (game / "RDR2.exe").write_bytes(b"MZ")
+            with mock.patch.dict(installer.os.environ, {"RTSS_GAME_DIR": str(game)}):
+                for patcher in self._isolate():
+                    patcher.start()
+                    self.addCleanup(patcher.stop)
+                self.assertEqual(installer.find_game_dirs("RDR2.exe"), [game.resolve()])
+
+    def test_repack_install_found_by_shallow_scan(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            game = Path(temp_dir) / "RDR2"
+            game.mkdir()
+            (game / "RDR2.exe").write_bytes(b"MZ")
+            with mock.patch.dict(installer.os.environ, {"RTSS_GAME_DIR": ""}):
+                for patcher in self._isolate(scanned=[game]):
+                    patcher.start()
+                    self.addCleanup(patcher.stop)
+                self.assertEqual(installer.find_game_dirs("RDR2.exe"), [game.resolve()])
+
+    def test_missing_game_resolves_to_none_without_prompting(self) -> None:
+        with mock.patch.dict(installer.os.environ, {"RTSS_GAME_DIR": ""}):
+            for patcher in self._isolate():
+                patcher.start()
+                self.addCleanup(patcher.stop)
+            self.assertIsNone(
+                installer.resolve_game_dir("RDR2.exe", None, prompt=False)
+            )
+
+    def test_explicit_dir_without_the_exe_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaises(installer.InstallerError):
+                installer.resolve_game_dir(
+                    "RDR2.exe", Path(temp_dir), prompt=False
+                )
+
+    def test_explicit_dir_wins_without_any_lookup(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            game = Path(temp_dir)
+            (game / "RDR2.exe").write_bytes(b"MZ")
+            with mock.patch.object(installer, "find_game_dirs") as lookup:
+                resolved = installer.resolve_game_dir("RDR2.exe", game, prompt=False)
+            self.assertEqual(resolved, game.resolve())
+            lookup.assert_not_called()
+
+
+class ChildArgvTests(unittest.TestCase):
+    def test_elevated_child_never_prompts_or_redetects(self) -> None:
+        args = installer.build_parser().parse_args(["--osd", "--offline"])
+        argv = installer.child_argv(
+            args, fps=45, games=["RDR2.exe"], game_dirs=[Path(r"Z:\RDR2")]
+        )
+        self.assertIn("--no-prompt", argv)
+        self.assertIn("--skip-game-check", argv)
+        self.assertEqual(argv[argv.index("--fps") + 1], "45")
+        self.assertEqual(argv[argv.index("--game-exe") + 1], "RDR2.exe")
+        self.assertEqual(argv[argv.index("--game-dir") + 1], r"Z:\RDR2")
+        self.assertIn("--osd", argv)
+        self.assertIn("--offline", argv)
+
+    def test_flags_left_off_are_not_forwarded(self) -> None:
+        args = installer.build_parser().parse_args([])
+        argv = installer.child_argv(args, fps=60, games=["RDR2.exe"], game_dirs=[])
+        for flag in ("--osd", "--no-start", "--offline", "--allow-unsigned"):
+            self.assertNotIn(flag, argv)
+
+
 class ResolveArchiveTests(unittest.TestCase):
     def test_offline_without_cache_points_at_the_bundle_builder(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

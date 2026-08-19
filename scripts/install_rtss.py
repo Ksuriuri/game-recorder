@@ -11,6 +11,10 @@ GUI is never needed.  The on-screen display is disabled by default because RTSS
 draws it into the game's back buffer *before* Present, which means it would be
 baked into every recording.
 
+Installation is conditional: a machine without the target game gets nothing.
+The game lookup reuses the RDR2 camera plugin's discovery so both optional
+install steps agree on where the game lives.
+
 The module imports on non-Windows systems so its pure helpers can be unit
 tested there.  Only ``main`` enforces the Windows-only restriction.
 """
@@ -20,6 +24,7 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import importlib.util
 import io
 import os
 import re
@@ -33,7 +38,7 @@ import urllib.request
 import uuid
 import zipfile
 from pathlib import Path, PurePosixPath
-from typing import Iterable
+from typing import Any, Iterable
 
 try:
     import winreg  # type: ignore[import-not-found]
@@ -80,6 +85,7 @@ MAX_ARCHIVE_BYTES = 128 * 1024 * 1024
 MAX_ZIP_ENTRIES = 64
 MAX_ZIP_MEMBER_BYTES = 96 * 1024 * 1024
 INSTALL_POLL_SECONDS = 60
+MAX_ROOT_SCAN_ENTRIES = 4096
 
 
 class InstallerError(RuntimeError):
@@ -221,7 +227,8 @@ def write_profile(
 # --------------------------------------------------------------------------
 
 
-def _registry_install_locations() -> list[Path]:
+def _registry_install_locations(name_fragment: str | None = None) -> list[Path]:
+    """Install locations from the uninstall registry, optionally filtered."""
     if winreg is None:
         return []
     base = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
@@ -244,9 +251,15 @@ def _registry_install_locations() -> list[Path]:
                     with winreg.OpenKey(
                         hive, f"{base}\\{name}", 0, winreg.KEY_READ | view
                     ) as entry:
-                        display = str(winreg.QueryValueEx(entry, "DisplayName")[0])
-                        if INSTALL_DIR_NAME.casefold() not in display.casefold():
-                            continue
+                        if name_fragment is not None:
+                            try:
+                                display = str(
+                                    winreg.QueryValueEx(entry, "DisplayName")[0]
+                                )
+                            except OSError:
+                                continue
+                            if name_fragment.casefold() not in display.casefold():
+                                continue
                         for value_name in ("InstallLocation", "InstallPath"):
                             try:
                                 value = winreg.QueryValueEx(entry, value_name)[0]
@@ -270,7 +283,7 @@ def find_rtss_install() -> Path | None:
     value = os.environ.get("RTSS_DIR", "").strip().strip('"')
     if value:
         candidates.append(Path(value))
-    candidates.extend(_registry_install_locations())
+    candidates.extend(_registry_install_locations(INSTALL_DIR_NAME))
     for env_name in ("ProgramFiles(x86)", "ProgramFiles"):
         root = os.environ.get(env_name, "").strip()
         if root:
@@ -285,6 +298,170 @@ def find_rtss_install() -> Path | None:
         if is_rtss_dir(candidate):
             return candidate.resolve()
     return None
+
+
+# --------------------------------------------------------------------------
+# Game discovery
+#
+# RTSS only needs the executable *name* to match a profile, so locating the
+# game is purely a gate: on a machine without the game there is no reason to
+# install a frame limiter at all.
+# --------------------------------------------------------------------------
+
+
+def _rdr2_camera_installer() -> Any | None:
+    """Load the RDR2 camera installer to reuse its game-directory discovery."""
+    module_name = "_game_recorder_rtss_install_rdr2_camera"
+    cached = sys.modules.get(module_name)
+    if cached is not None:
+        return cached
+    module_path = Path(__file__).resolve().with_name("install_rdr2_camera.py")
+    if not module_path.is_file():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location(module_name, module_path)
+        if spec is None or spec.loader is None:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        # Dataclass field resolution looks the module up by name, so it has to
+        # be registered before the module body runs.
+        sys.modules[module_name] = module
+        spec.loader.exec_module(module)
+    except Exception:  # noqa: BLE001 - discovery must never break the install
+        sys.modules.pop(module_name, None)
+        return None
+    return module
+
+
+def _dedup_paths(paths: Iterable[Path]) -> list[Path]:
+    result: list[Path] = []
+    seen: set[str] = set()
+    for path in paths:
+        key = os.path.normcase(str(path))
+        if key not in seen:
+            seen.add(key)
+            result.append(path)
+    return result
+
+
+def _steam_game_dirs(exe_name: str, camera: Any) -> list[Path]:
+    found: list[Path] = []
+    try:
+        for root in camera._steam_roots():
+            for library in camera._steam_libraries(root):
+                common = library / "steamapps" / "common"
+                if not common.is_dir():
+                    continue
+                for child in common.iterdir():
+                    if (child / exe_name).is_file():
+                        found.append(child)
+    except (OSError, AttributeError):
+        return found
+    return found
+
+
+def _fixed_drive_roots() -> list[Path]:
+    if os.name != "nt":
+        return []
+    import ctypes
+
+    try:
+        mask = ctypes.WinDLL("kernel32").GetLogicalDrives()
+    except (OSError, AttributeError):
+        return []
+    roots = []
+    for index in range(26):
+        if not mask & (1 << index):
+            continue
+        root = Path(f"{chr(ord('A') + index)}:\\")
+        try:
+            # 3 == DRIVE_FIXED; skip optical/network/removable to stay fast.
+            if ctypes.WinDLL("kernel32").GetDriveTypeW(str(root)) == 3:
+                roots.append(root)
+        except (OSError, AttributeError):
+            continue
+    return roots
+
+
+def _shallow_scan_dirs(exe_name: str) -> list[Path]:
+    """Find repack-style installs that no registry or Steam library knows about.
+
+    Cafe machines keep games in folders like ``Z:\\RDR2`` with no installer
+    metadata at all, so one level down each fixed drive is the only way to see
+    them.  The entry cap keeps a data drive with thousands of folders cheap.
+    """
+    found: list[Path] = []
+    for root in _fixed_drive_roots():
+        try:
+            with os.scandir(root) as entries:
+                for count, entry in enumerate(entries):
+                    if count >= MAX_ROOT_SCAN_ENTRIES:
+                        break
+                    if not entry.is_dir():
+                        continue
+                    if (Path(entry.path) / exe_name).is_file():
+                        found.append(Path(entry.path))
+        except OSError:
+            continue
+    return found
+
+
+def find_game_dirs(exe_name: str) -> list[Path]:
+    """Directories on this machine that contain ``exe_name``."""
+    candidates: list[Path] = []
+    value = os.environ.get("RTSS_GAME_DIR", "").strip().strip('"')
+    if value:
+        candidates.append(Path(value))
+
+    camera = _rdr2_camera_installer()
+    if camera is not None:
+        if exe_name.casefold() == DEFAULT_GAME_EXE.casefold():
+            # Exactly the same detection the RDR2 camera plugin uses, so both
+            # optional steps agree on where the game is (and honour RDR2_DIR).
+            try:
+                candidates.extend(camera.find_rdr2_candidates())
+            except Exception:  # noqa: BLE001 - fall through to generic lookup
+                pass
+        candidates.extend(_steam_game_dirs(exe_name, camera))
+    candidates.extend(_registry_install_locations())
+    candidates.extend(_shallow_scan_dirs(exe_name))
+
+    return [
+        path.resolve()
+        for path in _dedup_paths(candidates)
+        if (path / exe_name).is_file()
+    ]
+
+
+def resolve_game_dir(
+    exe_name: str, explicit: Path | None, *, prompt: bool
+) -> Path | None:
+    """Locate ``exe_name``; ``None`` means the game is not on this machine."""
+    if explicit is not None:
+        if (explicit / exe_name).is_file():
+            _print(f"使用指定的 {exe_name} 目录：{explicit}")
+            return explicit.resolve()
+        if not prompt:
+            raise InstallerError(f"目录中没有 {exe_name}：{explicit}")
+        _print(f"[错误] 目录中没有 {exe_name}：{explicit}")
+
+    found = find_game_dirs(exe_name)
+    if found:
+        _print(f"检测到 {exe_name}：{found[0]}")
+        return found[0]
+
+    _print(f"未检测到 {exe_name}。")
+    if not prompt:
+        return None
+    answer = input(
+        f"请输入 {exe_name} 所在目录（直接回车表示本机没有此游戏，跳过限帧）："
+    ).strip().strip('"')
+    if not answer:
+        return None
+    chosen = Path(answer)
+    if not (chosen / exe_name).is_file():
+        raise InstallerError(f"目录中没有 {exe_name}：{chosen}")
+    return chosen.resolve()
 
 
 # --------------------------------------------------------------------------
@@ -723,6 +900,16 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"要限帧的游戏主程序名，可重复（默认 {DEFAULT_GAME_EXE}）",
     )
     parser.add_argument(
+        "--game-dir",
+        type=Path,
+        help="游戏根目录；不指定时自动检测（与相机插件使用同一套发现逻辑）",
+    )
+    parser.add_argument(
+        "--skip-game-check",
+        action="store_true",
+        help="不检测游戏是否存在，直接安装并写入配置",
+    )
+    parser.add_argument(
         "--osd",
         action="store_true",
         help="保留 RTSS 屏幕显示；注意它会被一并录进视频，仅用于验证限帧是否生效",
@@ -756,8 +943,35 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def child_argv(
+    args: argparse.Namespace,
+    *,
+    fps: int,
+    games: list[str],
+    game_dirs: list[Path],
+) -> list[str]:
+    """Argv for the elevated re-run, with every interactive answer baked in."""
+    argv = ["--fps", str(fps), "--no-prompt", "--skip-game-check"]
+    for exe in games:
+        argv += ["--game-exe", exe]
+    if game_dirs:
+        argv += ["--game-dir", str(game_dirs[0])]
+    if args.osd:
+        argv.append("--osd")
+    if args.no_start:
+        argv.append("--no-start")
+    if args.offline:
+        argv.append("--offline")
+    if args.allow_unknown_zip:
+        argv.append("--allow-unknown-zip")
+    if args.allow_unsigned:
+        argv.append("--allow-unsigned")
+    if args.installer_zip is not None:
+        argv += ["--installer-zip", str(args.installer_zip)]
+    return argv
+
+
 def main(argv: list[str] | None = None) -> int:
-    original_argv = list(sys.argv[1:] if argv is None else argv)
     args = build_parser().parse_args(argv)
     _print("============================================================")
     _print("  RTSS 限帧工具自动安装")
@@ -781,10 +995,28 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     try:
-        games = [
+        requested = [
             normalize_exe_name(name)
             for name in (args.game_exe or [DEFAULT_GAME_EXE])
         ]
+        # Gate before anything expensive: no game, no reason to install RTSS.
+        games: list[str] = []
+        game_dirs: list[Path] = []
+        for exe in requested:
+            if args.skip_game_check:
+                games.append(exe)
+                continue
+            game_dir = resolve_game_dir(
+                exe, args.game_dir, prompt=not args.no_prompt
+            )
+            if game_dir is None:
+                _print(f"[跳过] 本机没有 {exe}，不为它配置限帧。")
+                continue
+            games.append(exe)
+            game_dirs.append(game_dir)
+        if not games:
+            raise InstallerSkipped("本机未检测到目标游戏，已跳过 RTSS 限帧")
+
         fps = args.fps if args.no_prompt else prompt_fps(args.fps)
         if fps < 0 or fps > MAX_FPS:
             raise InstallerError(f"限帧值超出范围（0-{MAX_FPS}）：{fps}")
@@ -795,7 +1027,11 @@ def main(argv: list[str] | None = None) -> int:
 
         if not args.skip_elevation and needs_elevation(install_dir):
             _print("安装 RTSS / 写入配置需要管理员权限，正在请求 UAC …")
-            return elevate_and_wait(original_argv)
+            # Hand the resolved answers to the child: it runs without a console
+            # of its own, so it must never reach a prompt.
+            return elevate_and_wait(
+                child_argv(args, fps=fps, games=games, game_dirs=game_dirs)
+            )
 
         if install_dir is None:
             archive, pinned = resolve_archive(
