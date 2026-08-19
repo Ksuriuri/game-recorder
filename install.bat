@@ -365,7 +365,7 @@ REM ============================================================
 echo.
 if defined RTSS_SKIP goto :rtss_install_bypass
 echo [可选] 正在配置 RTSS 限帧 …
-if not defined RTSS_FPS set "RTSS_FPS=60"
+if not defined RTSS_FPS set "RTSS_FPS=50"
 if not defined RTSS_GAME_EXE set "RTSS_GAME_EXE=RDR2.exe"
 set "RTSS_ARGS=--fps %RTSS_FPS% --game-exe "%RTSS_GAME_EXE%""
 REM Reuse the path the camera plugin was pointed at instead of re-detecting.
@@ -405,7 +405,7 @@ echo   GTA 相机插件  :  gta-camera\install.bat
 echo   RDR2 相机插件 :  rdr2-camera\install.bat
 echo   黑神话相机插件:  wukong-camera\install.bat
 echo   赛博朋克相机  :  cp2077-camera\install.bat
-echo   RTSS 限帧     :  scripts\install_rtss.py --fps 60
+echo   RTSS 限帧     :  scripts\install_rtss.py --fps 50
 echo ============================================================
 echo.
 call :wait_key

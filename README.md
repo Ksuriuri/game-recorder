@@ -358,17 +358,17 @@ game-recorder -v
 
 采集走的是 DXGI 桌面复制，它按固定间隔去取显示器当前画面。游戏帧率如果剧烈波动，取到的就是一堆重复帧和间隔不均的帧，对世界模型训练是噪声。把游戏帧率钉死在一个值上，画面节奏才均匀。
 
-`install.bat` 的最后一步会自动完成这件事，默认把 RDR2 限制在 60 FPS。也可以单独运行：
+`install.bat` 的最后一步会自动完成这件事，默认把 RDR2 限制在 50 FPS。也可以单独运行：
 
 ```bat
-REM 默认：RDR2.exe 限 60 FPS
-.venv\Scripts\python.exe scripts\install_rtss.py --fps 60
+REM 默认：RDR2.exe 限 50 FPS
+.venv\Scripts\python.exe scripts\install_rtss.py --fps 50
 
 REM 换游戏 / 换帧率；--game-exe 可重复
 .venv\Scripts\python.exe scripts\install_rtss.py --fps 30 --game-exe GTA5.exe
 
 REM 游戏装在自动检测不到的地方时直接指定
-.venv\Scripts\python.exe scripts\install_rtss.py --fps 60 --game-dir "Z:\RDR2"
+.venv\Scripts\python.exe scripts\install_rtss.py --fps 50 --game-dir "Z:\RDR2"
 
 REM 取消限帧
 .venv\Scripts\python.exe scripts\install_rtss.py --fps 0
@@ -387,7 +387,7 @@ REM 取消限帧
 - **OSD 默认关闭**。RTSS 的屏幕显示是在游戏 Present 之前画进后台缓冲区的，等于已经是游戏画面的一部分，桌面复制一定会把它录进 mp4。想确认限帧是否生效，临时加 `--osd` 跑一次，看完再去掉重跑。
 - **游戏内关掉垂直同步和三重缓冲**，否则会和 RTSS 的限帧互相打架。
 - **RTSS 必须先于游戏启动**。脚本结束时会把它拉起来常驻；如果中途关过 RTSS，重开游戏前记得再跑一次脚本。
-- **限帧值建议取录制帧率的整数倍**（录 30fps 就限 60），抽帧间隔更均匀。
+- **限帧值取录制帧率的整数倍时抽帧间隔最均匀**（录 30fps 配 60）。默认值 50 是在 5070 上跑 RDR2 能长时间稳住不掉的档位，稳定压过整除关系：一个稳定的 50 比一个在 60 上下抖的帧率更有用。GPU 余量足的话可以 `--fps 60`。
 
 ## 输出格式
 

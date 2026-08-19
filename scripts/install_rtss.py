@@ -78,7 +78,7 @@ PROFILES_DIRNAME = "Profiles"
 PROFILE_ENCODING = "mbcs" if os.name == "nt" else "utf-8"
 
 DEFAULT_GAME_EXE = "RDR2.exe"
-DEFAULT_FPS = 60
+DEFAULT_FPS = 50
 MAX_FPS = 1000
 
 MAX_ARCHIVE_BYTES = 128 * 1024 * 1024
