@@ -350,6 +350,40 @@ goto :cp2077_install_done
 
 :cp2077_install_done
 
+REM ============================================================
+REM  Optional: RTSS frame limiter (does not fail main install)
+REM
+REM  A steady game framerate keeps DXGI desktop duplication from sampling
+REM  duplicated / unevenly spaced frames.  RTSS_FPS overrides the default cap;
+REM  RTSS_GAME_EXE targets a game other than RDR2.  The on-screen display stays
+REM  off because RTSS draws it into the game's back buffer, which would bake it
+REM  into every recording.
+REM ============================================================
+echo.
+echo [可选] 正在配置 RTSS 限帧 …
+if not defined RTSS_FPS set "RTSS_FPS=60"
+if not defined RTSS_GAME_EXE set "RTSS_GAME_EXE=RDR2.exe"
+if defined GAME_RECORDER_SKIP_PAUSE (
+    "%VERIFY_PY%" "%PROJECT_DIR%\scripts\install_rtss.py" --fps %RTSS_FPS% --game-exe "%RTSS_GAME_EXE%" --no-prompt
+) else (
+    "%VERIFY_PY%" "%PROJECT_DIR%\scripts\install_rtss.py" --fps %RTSS_FPS% --game-exe "%RTSS_GAME_EXE%"
+)
+if errorlevel 4 goto :rtss_install_fail
+if errorlevel 3 goto :rtss_install_skip
+if errorlevel 1 goto :rtss_install_fail
+echo       [完成] RTSS 已装好并常驻后台，游戏帧率将被限制在 %RTSS_FPS%。
+goto :rtss_install_done
+
+:rtss_install_skip
+echo       [跳过] 未配置 RTSS 限帧。需要时请再运行 scripts\install_rtss.py。
+goto :rtss_install_done
+
+:rtss_install_fail
+echo       [失败] RTSS 限帧未配置成功，但不影响录制器主程序；可稍后重试 scripts\install_rtss.py。
+goto :rtss_install_done
+
+:rtss_install_done
+
 echo.
 echo ============================================================
 echo   安装完成！
@@ -362,6 +396,7 @@ echo   GTA 相机插件  :  gta-camera\install.bat
 echo   RDR2 相机插件 :  rdr2-camera\install.bat
 echo   黑神话相机插件:  wukong-camera\install.bat
 echo   赛博朋克相机  :  cp2077-camera\install.bat
+echo   RTSS 限帧     :  scripts\install_rtss.py --fps 60
 echo ============================================================
 echo.
 call :wait_key

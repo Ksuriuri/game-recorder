@@ -350,6 +350,35 @@ game-recorder -v
 - **GTA 等使用 shared-mode 音频的游戏可直接录**。极少数**强制独占模式**的应用会让 WASAPI loopback 拿到静音；本工具自动降级到 DirectShow，再不行就静音录制（`meta.json` 的 `audio_source` 会是 `null`，便于事后过滤）。
 - **硬件编码跨机泛化**：网吧 GPU 五花八门。启动时按 **NVENC → AMF → QSV → libx264** 做编译列表 + 运行时探测：有对应 GPU/驱动则走硬件编码，否则落到 `libx264 ultrafast`（默认 `--x264-threads 2`）。若仍卡，优先用 `run.bat --fps 20 --quality 28 --x264-threads 1`。
 - **切屏 / 全屏切换**：DXGI 在 Alt+Tab 或游戏切全屏时可能短暂报告不同分辨率。录制器会把临时尺寸缩放回本次 session 的初始尺寸，避免视频花屏或被切成多段；真正 0 帧的启动空段会自动清理。
+- **重启即清空的机器**：网吧还原盘会把 RTSS 之类的系统级安装一起抹掉。`install.bat` 每次都会重新装好并重新注册限帧配置，所以开机后照常跑一遍 `install.bat` 即可，不需要额外记步骤。
+
+## 游戏帧率上限（RTSS）
+
+采集走的是 DXGI 桌面复制，它按固定间隔去取显示器当前画面。游戏帧率如果剧烈波动，取到的就是一堆重复帧和间隔不均的帧，对世界模型训练是噪声。把游戏帧率钉死在一个值上，画面节奏才均匀。
+
+`install.bat` 的最后一步会自动完成这件事，默认把 RDR2 限制在 60 FPS。也可以单独运行：
+
+```bat
+REM 默认：RDR2.exe 限 60 FPS
+.venv\Scripts\python.exe scripts\install_rtss.py --fps 60
+
+REM 换游戏 / 换帧率；--game-exe 可重复
+.venv\Scripts\python.exe scripts\install_rtss.py --fps 30 --game-exe GTA5.exe
+
+REM 取消限帧
+.venv\Scripts\python.exe scripts\install_rtss.py --fps 0
+```
+
+或者在跑 `install.bat` 前用环境变量改默认值：`set RTSS_FPS=30`、`set RTSS_GAME_EXE=GTA5.exe`。
+
+脚本做的事：从 Guru3D 官方镜像下载 RTSS 7.3.7（内置 SHA-256 与 Authenticode 签名双重校验，安装包缓存在 `.tools\rtss\`），静默安装，然后在 `Profiles\<游戏主程序名>.cfg` 里写入帧率上限并启动 RTSS。RTSS 按可执行文件名匹配配置，所以"注册游戏"就是写这个文件，全程不需要开 GUI。
+
+几个要点：
+
+- **OSD 默认关闭**。RTSS 的屏幕显示是在游戏 Present 之前画进后台缓冲区的，等于已经是游戏画面的一部分，桌面复制一定会把它录进 mp4。想确认限帧是否生效，临时加 `--osd` 跑一次，看完再去掉重跑。
+- **游戏内关掉垂直同步和三重缓冲**，否则会和 RTSS 的限帧互相打架。
+- **RTSS 必须先于游戏启动**。脚本结束时会把它拉起来常驻；如果中途关过 RTSS，重开游戏前记得再跑一次脚本。
+- **限帧值建议取录制帧率的整数倍**（录 30fps 就限 60），抽帧间隔更均匀。
 
 ## 输出格式
 
