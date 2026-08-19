@@ -1,5 +1,8 @@
 screenpipe/
 
+# Reference checkouts of external projects (WBench, etc.)
+.external/
+
 # Python cache
 __pycache__/
 *.py[cod]

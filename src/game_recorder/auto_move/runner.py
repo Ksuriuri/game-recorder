@@ -14,6 +14,7 @@ from game_recorder.auto_move.policy_wander import WanderAction, apply_action
 from game_recorder.auto_move.pose_live import LivePoseReader, UnifiedPose, default_auto_move_sources
 from game_recorder.camera_sync import CameraSource
 from game_recorder.capture.window_region import restore_window_focus
+from game_recorder.storage.auto_move_writer import AutoMoveWriter
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,7 @@ logger = logging.getLogger(__name__)
 _POLICY_HZ = 30.0
 _DEFAULT_INJECT_HZ = 250.0
 _PIXELS_PER_DEG = 6.0
+_FOCUS_REFRESH_S = 1.0
 
 
 class AutoMovePolicy(Protocol):
@@ -50,6 +52,7 @@ class AutoMoveRunner:
         hwnd: int | None = None,
         title: str = "",
         pixels_per_deg: float = _PIXELS_PER_DEG,
+        label_writer: AutoMoveWriter | None = None,
     ) -> None:
         self._output_dir = Path(output_dir)
         self._session_dir = Path(session_dir)
@@ -60,6 +63,7 @@ class AutoMoveRunner:
         self._pixels_per_deg = max(1.0, float(pixels_per_deg))
         self._hwnd = hwnd
         self._title = title or ""
+        self._label_writer = label_writer
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._injector = InputInjector()
@@ -103,6 +107,24 @@ class AutoMoveRunner:
             logger.warning("释放自动移动按键失败：%s", exc)
         logger.info("自动移动已停止")
 
+    def _log_action(self, action: WanderAction) -> None:
+        """Record the action label; the writer drops repeats of the same turn."""
+        writer = self._label_writer
+        if writer is None:
+            return
+        try:
+            writer.write(
+                action_id=action.action_id,
+                translation=action.translation,
+                rotation=action.rotation,
+                paradigm=action.paradigm,
+                turn_index=action.turn_index,
+            )
+        except (OSError, ValueError) as exc:
+            # Never let the label sidecar take down the injection loop.
+            logger.warning("写入自动移动标签失败，已停止记录：%s", exc)
+            self._label_writer = None
+
     def _run(self) -> None:
         inject_interval = 1.0 / self._tick_hz
         policy_interval = 1.0 / _POLICY_HZ
@@ -129,12 +151,15 @@ class AutoMoveRunner:
                 if mono >= focus_refresh_at:
                     if self._hwnd or self._title:
                         restore_window_focus(hwnd=self._hwnd, title=self._title)
-                    focus_refresh_at = mono + 5.0
+                    # Must stay well under ``focus_lost_stop_after_s`` so a transient
+                    # focus steal is reclaimed before the session watchdog stops.
+                    focus_refresh_at = mono + _FOCUS_REFRESH_S
 
                 if now >= next_policy_at:
                     pose = self._pose.poll()
                     action = self._policy.step(pose, dt=policy_interval)
                     next_policy_at = now + policy_interval
+                    self._log_action(action)
 
                 try:
                     apply_action(

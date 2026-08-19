@@ -45,6 +45,12 @@ class SessionMeta:
     captured_frames: int = 0
     duplicate_frames: int = 0
     total_input_events: int = 0
+    # Session-global sidecar: one record per auto-move policy action change.
+    # Empty/0 when auto-move did not run. Frame indices are absolute, so records
+    # at or past ``total_frames`` were tail-trimmed out of the video.
+    auto_move_file: str = ""
+    auto_move_schema: str = ""
+    auto_move_actions: int = 0
     segment_seconds: int = 0
     segments: list[SegmentMeta] = field(default_factory=list)
     # Set when recording ends via auto-stop (``"idle"`` | ``"stuck"`` | … | ``"max_duration"``).

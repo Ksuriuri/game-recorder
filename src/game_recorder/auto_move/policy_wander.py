@@ -33,6 +33,10 @@ class WanderAction:
     action_id: int | None = None
     translation: str | None = None
     rotation: str | None = None
+    # Set while a planned trajectory paradigm is driving this action; ``None``
+    # means the action came from free weighted sampling (or a guard override).
+    paradigm: str | None = None
+    turn_index: int | None = None
 
 
 @dataclass
@@ -154,6 +158,8 @@ class WanderPolicy:
             action_id=action.action_id,
             translation=action.translation,
             rotation=action.rotation,
+            paradigm=action.paradigm,
+            turn_index=action.turn_index,
         )
 
     def _update_look_rates(self, dt: float, clock: float) -> tuple[float, float]:

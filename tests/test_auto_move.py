@@ -34,8 +34,25 @@ from game_recorder.auto_move.pose_live import (
     candidate_raw_paths,
     extract_unified_pose,
 )
+from game_recorder.auto_move.trajectory_patterns import (
+    INVERSE_ROTATION,
+    INVERSE_TRANSLATION,
+    PARADIGMS,
+    PAUSE_PARADIGM,
+    Episode,
+    PlannedTurn,
+    paradigm_sequence,
+    peak_outbound_units,
+    plan_episode,
+    plan_pause,
+)
 from game_recorder.camera_sync import GTA_CAMERA_SOURCE, WUKONG_CAMERA_SOURCE
 from game_recorder.config import Config
+from game_recorder.storage.auto_move_writer import (
+    AUTO_MOVE_FILENAME,
+    AUTO_MOVE_SCHEMA,
+    AutoMoveWriter,
+)
 
 
 class PoseNormalizeTests(unittest.TestCase):
@@ -356,6 +373,523 @@ class CoverageMapsTests(unittest.TestCase):
             gamma=1.5,
         )
         self.assertGreater(w_rare, w_common)
+
+
+class TrajectoryPatternTests(unittest.TestCase):
+    def test_inverse_maps_are_involutions_over_the_wbench_vocabulary(self) -> None:
+        for name, table in (("translation", INVERSE_TRANSLATION), ("rotation", INVERSE_ROTATION)):
+            for token, opposite in table.items():
+                self.assertEqual(table[opposite], token, f"{name}:{token}")
+
+    def test_roundtrip_second_half_reverses_the_first(self) -> None:
+        rng = random.Random(0)
+        for _ in range(20):
+            seq = paradigm_sequence("roundtrip", rng=rng, turn_count=4)
+            self.assertEqual(seq[0], seq[1])
+            self.assertEqual(seq[2], seq[3])
+            self.assertEqual(seq[2], INVERSE_TRANSLATION[seq[0]])
+
+    def test_loop_is_a_closing_four_cycle(self) -> None:
+        rng = random.Random(1)
+        for _ in range(20):
+            a, b, c, d = paradigm_sequence("loop", rng=rng, turn_count=4)
+            self.assertEqual(c, INVERSE_TRANSLATION[a])
+            self.assertEqual(d, INVERSE_TRANSLATION[b])
+            # A perpendicular pair, otherwise the "loop" is just a roundtrip.
+            self.assertNotIn(b, (a, INVERSE_TRANSLATION[a]))
+
+    def test_l_shape_turns_perpendicular_without_returning(self) -> None:
+        rng = random.Random(2)
+        for _ in range(20):
+            seq = paradigm_sequence("l_shape", rng=rng, turn_count=4)
+            first, second = seq[0], seq[2]
+            self.assertEqual(seq[:2], (first, first))
+            self.assertEqual(seq[2:], (second, second))
+            self.assertNotIn(second, (first, INVERSE_TRANSLATION[first]))
+
+    def test_zigzag_alternates_with_period_one(self) -> None:
+        rng = random.Random(3)
+        for _ in range(20):
+            seq = paradigm_sequence("zigzag", rng=rng, turn_count=4)
+            self.assertEqual(seq[0], seq[2])
+            self.assertEqual(seq[1], seq[3])
+            self.assertNotEqual(seq[0], seq[1])
+
+    def test_repeat_holds_one_token_and_progressive_never_repeats(self) -> None:
+        rng = random.Random(4)
+        self.assertEqual(len(set(paradigm_sequence("repeat", rng=rng, turn_count=4))), 1)
+        for _ in range(20):
+            seq = paradigm_sequence("progressive", rng=rng, turn_count=4)
+            for previous, current in zip(seq, seq[1:]):
+                self.assertNotEqual(previous, current)
+
+    def test_peak_outbound_reflects_path_geometry(self) -> None:
+        rng = random.Random(5)
+        repeat = plan_episode(
+            rng=rng, hold_s=4.0, paradigm="repeat",
+            channel="translation", turn_count=4,
+        )
+        roundtrip = plan_episode(
+            rng=rng, hold_s=4.0, paradigm="roundtrip",
+            channel="translation", turn_count=4,
+        )
+        loop = plan_episode(
+            rng=rng, hold_s=4.0, paradigm="loop",
+            channel="translation", turn_count=4,
+        )
+        look = plan_episode(
+            rng=rng, hold_s=4.0, paradigm="roundtrip",
+            channel="rotation", carrier="none", turn_count=4,
+        )
+        self.assertAlmostEqual(peak_outbound_units(repeat.turns), 4.0)
+        self.assertAlmostEqual(peak_outbound_units(roundtrip.turns), 2.0)
+        self.assertAlmostEqual(peak_outbound_units(loop.turns), math.sqrt(2.0), places=5)
+        self.assertEqual(peak_outbound_units(look.turns), 0.0)
+
+    def test_rotation_channel_carrier_walks_while_looking(self) -> None:
+        episode = plan_episode(
+            rng=random.Random(6),
+            hold_s=4.0,
+            paradigm="roundtrip",
+            channel="rotation",
+            carrier="forward",
+            turn_count=4,
+        )
+        # This is WBench's ``W+up W+up W+down W+down``: pitch reverses, walk holds.
+        self.assertEqual({t.translation for t in episode.turns}, {"forward"})
+        self.assertEqual(episode.turns[2].rotation, INVERSE_ROTATION[episode.turns[0].rotation])
+
+    def test_every_planned_pair_exists_in_the_catalog(self) -> None:
+        catalog = load_action_catalog(alpha=1.0)
+        rng = random.Random(7)
+        for paradigm in PARADIGMS:
+            for channel in ("translation", "rotation"):
+                for carrier in ("none", "forward"):
+                    episode = plan_episode(
+                        rng=rng,
+                        hold_s=4.0,
+                        paradigm=paradigm,
+                        channel=channel,
+                        carrier=carrier,
+                    )
+                    for turn in episode.turns:
+                        self.assertIn(
+                            (turn.translation, turn.rotation),
+                            catalog.by_pair,
+                            f"{paradigm}/{channel}/{carrier}",
+                        )
+
+    def test_yaw_only_alphabet_falls_back_for_perpendicular_paradigms(self) -> None:
+        # Without pitch the rotation alphabet has a single axis, so loop/l_shape
+        # cannot close or turn — they must be planned on translations instead.
+        for paradigm in ("loop", "l_shape"):
+            episode = plan_episode(
+                rng=random.Random(8),
+                hold_s=4.0,
+                paradigm=paradigm,
+                channel="rotation",
+                allow_pitch=False,
+            )
+            self.assertEqual(episode.channel, "translation")
+
+
+class ParadigmPolicyTests(unittest.TestCase):
+    @staticmethod
+    def _pose(x: float, y: float, source: str = "gta") -> UnifiedPose:
+        return UnifiedPose(
+            0, x, y, 0.0, source, forward_x=0.0, forward_y=1.0, forward_z=0.0
+        )
+
+    @staticmethod
+    def _start(policy: BalancedRadiusPolicy) -> None:
+        """Clean slate under a caller-supplied clock.
+
+        ``reset()`` seeds the first action off the real monotonic clock, so tests
+        that pass their own ``now`` must clear that hold and its episode first.
+        Stand-still pauses are suppressed so the assertions below see a paradigm
+        episode at the first boundary regardless of the seed.
+        """
+        policy.pause_chance = 0.0
+        policy.reset()
+        policy._abort_episode()
+        policy._hold_until = 0.0
+        policy._paradigm_hold_off_until = 0.0
+
+    def test_planned_turns_are_labeled_and_held_for_the_turn_duration(self) -> None:
+        policy = BalancedRadiusPolicy(
+            radius_m=50.0,
+            paradigm_turn_hold_s=4.0,
+            paradigm_episode_chance=1.0,
+            rate_track_hz=100.0,
+            rng=random.Random(0),
+        )
+        self._start(policy)
+        action = policy.step(self._pose(0.0, 0.0), dt=1.0 / 30.0, now=100.0)
+        self.assertIn(action.paradigm, PARADIGMS)
+        self.assertEqual(action.turn_index, 0)
+        self.assertAlmostEqual(policy._hold_until, 104.0)
+
+    def test_turn_index_advances_across_the_episode(self) -> None:
+        policy = BalancedRadiusPolicy(
+            radius_m=50.0,
+            paradigm_turn_hold_s=1.0,
+            paradigm_episode_chance=1.0,
+            rate_track_hz=100.0,
+            rng=random.Random(1),
+        )
+        self._start(policy)
+        # Keep drifting: a perfectly still pose trips the stuck detector, which
+        # preempts the plan for its own reasons.
+        first = policy.step(self._pose(0.0, 0.0), dt=1.0 / 30.0, now=100.0)
+        second = policy.step(self._pose(0.0, 1.0), dt=1.0 / 30.0, now=101.5)
+        self.assertEqual(first.turn_index, 0)
+        self.assertEqual(second.turn_index, 1)
+        self.assertEqual(first.paradigm, second.paradigm)
+
+    def test_look_rates_stay_locked_for_the_whole_episode(self) -> None:
+        """A roundtrip only closes in yaw if both legs turn at the same rate."""
+        policy = BalancedRadiusPolicy(
+            radius_m=50.0,
+            paradigm_turn_hold_s=1.0,
+            rate_track_hz=100.0,
+            rng=random.Random(2),
+        )
+        self._start(policy)
+        # Pin a 4-turn look-only roundtrip so the episode cannot end early and
+        # replan (which legitimately draws fresh rates).
+        policy._episode = plan_episode(
+            rng=random.Random(0),
+            hold_s=1.0,
+            paradigm="roundtrip",
+            channel="rotation",
+            carrier="none",
+            turn_count=4,
+        )
+        policy._episode_turn = 0
+
+        policy.step(self._pose(0.0, 0.0), dt=1.0 / 30.0, now=100.0)
+        locked = (policy._action_yaw_deg_s, policy._action_pitch_deg_s)
+        self.assertGreater(locked[0], 0.0)
+        for index in range(1, 4):
+            policy.step(
+                self._pose(0.0, float(index)), dt=1.0 / 30.0, now=100.0 + 1.5 * index
+            )
+            self.assertEqual(policy._current_turn_index, index)
+            self.assertEqual(
+                (policy._action_yaw_deg_s, policy._action_pitch_deg_s), locked
+            )
+
+    def test_translation_episode_hold_is_capped_by_the_radius_budget(self) -> None:
+        policy = BalancedRadiusPolicy(
+            radius_m=20.0,
+            soft_radius_frac=0.55,
+            paradigm_turn_hold_s=4.0,
+            paradigm_margin_m=1.0,
+            movement_speed_scales={"rdr2": 0.6},
+            rng=random.Random(3),
+        )
+        policy._anchor_x = 0.0
+        policy._anchor_y = 0.0
+        rdr2 = self._pose(0.0, 0.0, source="rdr2")
+        # soft = 11m, margin 1m, RDR2 plans at 5.0 * 0.6 = 3.0 m/s. A roundtrip
+        # walks out 2 turns, so 4.0s/turn (24m) cannot fit and must be cut down.
+        roundtrip = plan_episode(
+            rng=random.Random(0), hold_s=4.0, paradigm="roundtrip",
+            channel="translation", turn_count=4,
+        )
+        budget = policy._paradigm_hold_budget(roundtrip, pose=rdr2)
+        self.assertLess(budget, 4.0)
+        self.assertAlmostEqual(budget, 10.0 / (2.0 * 3.0))
+
+        # Look-only plans do not move, so they keep the full WBench duration.
+        look = plan_episode(
+            rng=random.Random(0), hold_s=4.0, paradigm="roundtrip",
+            channel="rotation", carrier="none", turn_count=4,
+        )
+        self.assertAlmostEqual(policy._paradigm_hold_budget(look, pose=rdr2), 4.0)
+
+    def test_safety_margin_does_not_veto_plans_that_head_inward(self) -> None:
+        """Regression: inside the margin band every plan used to be rejected."""
+        policy = BalancedRadiusPolicy(
+            radius_m=20.0,
+            soft_radius_frac=0.55,
+            paradigm_turn_hold_s=4.0,
+            paradigm_margin_m=1.0,
+            movement_speed_scales={"rdr2": 0.6},
+            rng=random.Random(9),
+        )
+        policy._anchor_x = 0.0
+        policy._anchor_y = 0.0
+        # soft = 11m, margin 1m. Sitting at 10.5m is past soft-margin but still
+        # inside soft, which is where the policy spends much of its time.
+        inward = Episode(
+            paradigm="roundtrip",
+            channel="translation",
+            carrier="none",
+            turns=tuple(
+                PlannedTurn(
+                    translation=name, rotation="none", hold_s=4.0, turn_index=index
+                )
+                for index, name in enumerate(
+                    ("forward", "forward", "backward", "backward")
+                )
+            ),
+        )
+        # Facing -Y at +Y 10.5 means "forward" walks back toward the anchor.
+        toward = UnifiedPose(
+            0, 0.0, 10.5, 0.0, "rdr2", forward_x=0.0, forward_y=-1.0, forward_z=0.0
+        )
+        away = UnifiedPose(
+            0, 0.0, 10.5, 0.0, "rdr2", forward_x=0.0, forward_y=1.0, forward_z=0.0
+        )
+        self.assertGreater(policy._paradigm_hold_budget(inward, pose=toward), 1.2)
+        self.assertEqual(policy._paradigm_hold_budget(inward, pose=away), 0.0)
+
+    def test_tight_budget_replans_the_paradigm_as_look_only(self) -> None:
+        policy = BalancedRadiusPolicy(
+            radius_m=5.0,
+            soft_radius_frac=0.55,
+            paradigm_turn_hold_s=4.0,
+            paradigm_min_turn_hold_s=1.2,
+            paradigm_margin_m=1.0,
+            rng=random.Random(4),
+        )
+        policy._anchor_x = 0.0
+        policy._anchor_y = 0.0
+        # soft = 2.75m, minus 1m margin at 5 m/s leaves far less than 1.2s/turn
+        # for any translation plan, so the episode must degrade to pure look.
+        policy._start_episode(self._pose(0.0, 0.0, source="wukong"))
+        episode = policy._episode
+        assert episode is not None
+        self.assertEqual(peak_outbound_units(episode.turns), 0.0)
+        self.assertAlmostEqual(episode.turns[0].hold_s, 4.0)
+
+    def test_radius_interrupt_drops_the_episode_and_holds_off_replanning(self) -> None:
+        """A cut-short turn must not silently advance the plan every tick."""
+        catalog = load_action_catalog(alpha=1.0)
+        policy = BalancedRadiusPolicy(
+            radius_m=0.5,
+            soft_radius_frac=0.5,
+            paradigm_turn_hold_s=4.0,
+            paradigm_episode_chance=1.0,
+            paradigm_cooldown_s=3.0,
+            rate_track_hz=100.0,
+            look_yaw_deg_s=0.0,
+            look_pitch_deg_s=0.0,
+            return_yaw_deg_s=0.0,
+            catalog=catalog,
+            rng=random.Random(5),
+        )
+        policy.reset()
+        policy.step(self._pose(0.0, 0.0), dt=0.05, now=100.0)
+        policy._current = catalog.by_pair[("forward", "none")]
+        policy._hold_until = 1e9
+        action = policy.step(self._pose(0.0, 0.4), dt=0.05, now=101.0)
+        self.assertIsNone(policy._episode)
+        self.assertIsNone(action.paradigm)
+        self.assertAlmostEqual(policy._paradigm_hold_off_until, 104.0)
+
+    def test_stuck_escape_drops_the_episode_label(self) -> None:
+        policy = BalancedRadiusPolicy(
+            radius_m=50.0,
+            stuck_speed_mps=0.5,
+            stuck_s=0.2,
+            paradigm_turn_hold_s=4.0,
+            rate_track_hz=100.0,
+            catalog=load_action_catalog(alpha=1.0),
+            rng=random.Random(6),
+        )
+        self._start(policy)
+        # A walking plan that makes no progress: a wall, so the escape wins.
+        policy._episode = plan_episode(
+            rng=random.Random(0),
+            hold_s=4.0,
+            paradigm="repeat",
+            channel="translation",
+            carrier="none",
+            turn_count=4,
+        )
+        policy._episode_turn = 0
+        first = policy.step(self._pose(0.0, 0.0), dt=0.05, now=100.0)
+        self.assertEqual(first.paradigm, "repeat")
+        self.assertNotEqual(first.translation, "none")
+
+        policy.step(self._pose(0.0, 0.01), dt=0.05, now=100.1)
+        action = policy.step(self._pose(0.0, 0.02), dt=0.05, now=100.4)
+        self.assertIsNone(action.paradigm)
+        self.assertIsNone(policy._episode)
+
+    def test_look_only_turn_is_not_treated_as_stuck(self) -> None:
+        """A third of WBench turns stand still and only look — not a wall."""
+        policy = BalancedRadiusPolicy(
+            radius_m=50.0,
+            stuck_speed_mps=0.5,
+            stuck_s=0.2,
+            paradigm_turn_hold_s=4.0,
+            rate_track_hz=100.0,
+            catalog=load_action_catalog(alpha=1.0),
+            rng=random.Random(7),
+        )
+        self._start(policy)
+        policy._episode = plan_episode(
+            rng=random.Random(0),
+            hold_s=4.0,
+            paradigm="roundtrip",
+            channel="rotation",
+            carrier="none",
+            turn_count=4,
+        )
+        policy._episode_turn = 0
+        pose = self._pose(0.0, 0.0)
+        first = policy.step(pose, dt=0.05, now=100.0)
+        self.assertEqual(first.translation, "none")
+        for tick in range(1, 40):
+            policy.step(pose, dt=0.05, now=100.0 + 0.1 * tick)
+        self.assertIsNone(policy._stuck_since)
+        self.assertEqual(policy._current_paradigm, "roundtrip")
+
+    def test_gaps_between_episodes_keep_free_sampling_alive(self) -> None:
+        """Paradigms use ~15 of 81 bins; gaps keep the rest reachable."""
+        policy = BalancedRadiusPolicy(
+            radius_m=50.0,
+            paradigm_episode_chance=0.0,
+            paradigm_gap_min_actions=2,
+            paradigm_gap_max_actions=2,
+            paradigm_turn_hold_s=4.0,
+            hold_min_s=1.0,
+            hold_max_s=1.0,
+            rate_track_hz=100.0,
+            rng=random.Random(8),
+        )
+        self._start(policy)
+        for tick in range(4):
+            action = policy.step(
+                self._pose(0.0, float(tick)), dt=1.0 / 30.0, now=100.0 + 1.5 * tick
+            )
+            self.assertIsNone(action.paradigm)
+        self.assertIsNone(policy._episode)
+
+    def test_disabling_paradigms_restores_free_sampling(self) -> None:
+        policy = BalancedRadiusPolicy(
+            radius_m=50.0,
+            paradigms=False,
+            hold_min_s=2.5,
+            hold_max_s=4.5,
+            rate_track_hz=100.0,
+            rng=random.Random(7),
+        )
+        policy.reset()
+        action = policy.step(self._pose(0.0, 0.0), dt=1.0 / 30.0, now=100.0)
+        self.assertIsNone(action.paradigm)
+        self.assertIsNone(action.turn_index)
+        self.assertIsNone(policy._episode)
+
+
+class PausePolicyTests(unittest.TestCase):
+    """Stand-still stretches: real play is not in constant motion."""
+
+    _pose = staticmethod(ParadigmPolicyTests._pose)
+
+    @staticmethod
+    def _start(policy: BalancedRadiusPolicy, *, chance: float) -> None:
+        ParadigmPolicyTests._start(policy)
+        policy.pause_chance = chance
+
+    def test_plan_pause_is_one_motionless_turn(self) -> None:
+        episode = plan_pause(7.5)
+        self.assertEqual(episode.paradigm, PAUSE_PARADIGM)
+        self.assertNotIn(PAUSE_PARADIGM, PARADIGMS)
+        self.assertEqual(len(episode), 1)
+        self.assertEqual(episode.turns[0].translation, "none")
+        self.assertEqual(episode.turns[0].rotation, "none")
+        self.assertEqual(episode.turns[0].hold_s, 7.5)
+        self.assertEqual(episode.peak_outbound_units, 0.0)
+        self.assertTrue(episode.heading_frozen)
+
+    def test_pause_is_labeled_and_held_for_a_duration_in_range(self) -> None:
+        for seed in range(6):
+            policy = BalancedRadiusPolicy(
+                radius_m=50.0,
+                pause_min_s=5.0,
+                pause_max_s=15.0,
+                rate_track_hz=100.0,
+                rng=random.Random(seed),
+            )
+            self._start(policy, chance=1.0)
+            action = policy.step(self._pose(0.0, 0.0), dt=1.0 / 30.0, now=100.0)
+            self.assertEqual(action.paradigm, PAUSE_PARADIGM)
+            self.assertEqual(action.turn_index, 0)
+            self.assertEqual(action.translation, "none")
+            self.assertEqual(action.rotation, "none")
+            self.assertEqual(action.keys, frozenset())
+            self.assertGreaterEqual(policy._hold_until, 105.0)
+            self.assertLessEqual(policy._hold_until, 115.0)
+
+    def test_pause_commands_no_keys_and_settles_to_no_look(self) -> None:
+        policy = BalancedRadiusPolicy(
+            radius_m=50.0,
+            pause_min_s=8.0,
+            pause_max_s=8.0,
+            rate_track_hz=100.0,
+            rng=random.Random(3),
+        )
+        self._start(policy, chance=1.0)
+        pose = self._pose(0.0, 0.0)
+        for tick in range(30):
+            action = policy.step(pose, dt=1.0 / 30.0, now=100.0 + tick / 30.0)
+            self.assertEqual(action.keys, frozenset())
+        # The look rate is low-passed, so it glides to a stop rather than cutting.
+        self.assertAlmostEqual(action.yaw_deg_s, 0.0, places=3)
+        self.assertAlmostEqual(action.pitch_deg_s, 0.0, places=3)
+        self.assertEqual(action.paradigm, PAUSE_PARADIGM)
+
+    def test_long_pause_does_not_trip_the_stuck_detector(self) -> None:
+        policy = BalancedRadiusPolicy(
+            radius_m=50.0,
+            stuck_speed_mps=0.5,
+            stuck_s=0.2,
+            pause_min_s=15.0,
+            pause_max_s=15.0,
+            rate_track_hz=100.0,
+            rng=random.Random(4),
+        )
+        self._start(policy, chance=1.0)
+        pose = self._pose(0.0, 0.0)
+        for tick in range(150):
+            action = policy.step(pose, dt=0.1, now=100.0 + 0.1 * tick)
+        self.assertIsNone(policy._stuck_since)
+        self.assertEqual(action.paradigm, PAUSE_PARADIGM)
+
+    def test_no_pause_is_planned_while_the_radius_forces_a_return(self) -> None:
+        """Standing still outside the boundary would only prolong the excursion."""
+        policy = BalancedRadiusPolicy(
+            radius_m=10.0,
+            rate_track_hz=100.0,
+            catalog=load_action_catalog(alpha=1.0),
+            rng=random.Random(5),
+        )
+        self._start(policy, chance=1.0)
+        policy._anchor_x = 0.0
+        policy._anchor_y = 0.0
+        action = policy.step(self._pose(0.0, 30.0), dt=1.0 / 30.0, now=100.0)
+        self.assertIsNone(action.paradigm)
+        self.assertNotEqual(action.translation, "none")
+
+    def test_zero_chance_never_pauses(self) -> None:
+        policy = BalancedRadiusPolicy(
+            radius_m=50.0,
+            paradigm_episode_chance=1.0,
+            rate_track_hz=100.0,
+            rng=random.Random(6),
+        )
+        self._start(policy, chance=0.0)
+        seen = set()
+        for tick in range(60):
+            action = policy.step(
+                self._pose(0.0, float(tick)), dt=1.0 / 30.0, now=100.0 + 2.0 * tick
+            )
+            seen.add(action.paradigm)
+        self.assertNotIn(PAUSE_PARADIGM, seen)
 
 
 class BalancedRadiusPolicyTests(unittest.TestCase):
@@ -716,6 +1250,165 @@ class WanderPolicyTests(unittest.TestCase):
             move_mouse.assert_called_once_with(6.0, -3.0)
 
 
+class AutoMoveWriterTests(unittest.TestCase):
+    @staticmethod
+    def _read(path: Path) -> list[dict]:
+        return [
+            json.loads(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+
+    def _writer(self, path: Path, **kwargs) -> AutoMoveWriter:
+        return AutoMoveWriter(
+            path,
+            t0_perf_ns=1_000_000_000,
+            t0_epoch_ms=1_700_000_000_000,
+            fps=30,
+            **kwargs,
+        )
+
+    def test_repeated_labels_collapse_to_one_record(self) -> None:
+        """The policy re-decides at 30 Hz but holds each turn for seconds."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "auto_move.jsonl"
+            writer = self._writer(path)
+            label = {
+                "action_id": 4,
+                "translation": "forward",
+                "rotation": "none",
+                "paradigm": "roundtrip",
+                "turn_index": 0,
+            }
+            self.assertTrue(writer.write(**label, perf_ns=1_000_000_000))
+            for tick in range(1, 120):
+                self.assertFalse(
+                    writer.write(**label, perf_ns=1_000_000_000 + tick * 33_000_000)
+                )
+            self.assertTrue(
+                writer.write(
+                    action_id=4,
+                    translation="forward",
+                    rotation="none",
+                    paradigm="roundtrip",
+                    turn_index=1,
+                    perf_ns=5_000_000_000,
+                )
+            )
+            writer.close()
+
+            records = self._read(path)
+            self.assertEqual(writer.total_written, 2)
+            self.assertEqual([r["turn_index"] for r in records], [0, 1])
+
+    def test_frame_and_timestamp_track_the_session_clock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "auto_move.jsonl"
+            writer = self._writer(path)
+            # 2.0s after t0 at 30 fps → frame 60.
+            writer.write(
+                action_id=0,
+                translation="none",
+                rotation="yaw_right",
+                paradigm=None,
+                turn_index=None,
+                perf_ns=3_000_000_000,
+            )
+            writer.close()
+
+            record = self._read(path)[0]
+            self.assertEqual(record["frame"], 60)
+            self.assertEqual(record["t_unix_ms"], 1_700_000_002_000.0)
+            self.assertIsNone(record["paradigm"])
+            self.assertIsNone(record["turn_index"])
+
+    def test_buffered_records_survive_close(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "auto_move.jsonl"
+            writer = self._writer(path, buffer_records=64)
+            for index in range(10):
+                writer.write(
+                    action_id=index,
+                    translation="forward",
+                    rotation="none",
+                    paradigm="repeat",
+                    turn_index=index,
+                    perf_ns=1_000_000_000 + index * 1_000_000_000,
+                )
+            writer.close()
+            writer.close()  # idempotent
+            self.assertEqual(len(self._read(path)), 10)
+
+    def test_runner_forwards_policy_labels_to_the_writer(self) -> None:
+        """Plumbing check without starting the injection thread."""
+        from game_recorder.auto_move.policy_wander import WanderAction
+        from game_recorder.auto_move.runner import AutoMoveRunner
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            writer = self._writer(root / "auto_move.jsonl")
+            runner = AutoMoveRunner(
+                output_dir=root,
+                session_dir=root / "session_x",
+                sources=(),
+                label_writer=writer,
+            )
+            runner._log_action(
+                WanderAction(
+                    keys=frozenset({VK_W}),
+                    action_id=13,
+                    translation="forward",
+                    rotation="none",
+                    paradigm="l_shape",
+                    turn_index=2,
+                )
+            )
+            writer.close()
+
+            record = self._read(root / "auto_move.jsonl")[0]
+            self.assertEqual(record["action_id"], 13)
+            self.assertEqual(record["paradigm"], "l_shape")
+            self.assertEqual(record["turn_index"], 2)
+
+    def test_writer_failure_never_breaks_the_injection_loop(self) -> None:
+        from game_recorder.auto_move.policy_wander import WanderAction
+        from game_recorder.auto_move.runner import AutoMoveRunner
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            writer = self._writer(root / "auto_move.jsonl")
+            runner = AutoMoveRunner(
+                output_dir=root,
+                session_dir=root / "session_x",
+                sources=(),
+                label_writer=writer,
+            )
+            with mock.patch.object(writer, "write", side_effect=OSError("disk full")):
+                runner._log_action(WanderAction(keys=frozenset(), action_id=1))
+            self.assertIsNone(runner._label_writer)
+            writer.close()
+
+    def test_meta_carries_the_sidecar_reference(self) -> None:
+        from game_recorder.storage.session_writer import SessionMeta
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "meta.json"
+            SessionMeta(
+                auto_move_file=AUTO_MOVE_FILENAME,
+                auto_move_schema=AUTO_MOVE_SCHEMA,
+                auto_move_actions=7,
+            ).save(path)
+            meta = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(meta["auto_move_file"], "auto_move.jsonl")
+            self.assertEqual(meta["auto_move_schema"], "auto_move_actions_v1")
+            self.assertEqual(meta["auto_move_actions"], 7)
+            # Absent when auto-move did not run.
+            SessionMeta().save(path)
+            self.assertEqual(
+                json.loads(path.read_text(encoding="utf-8"))["auto_move_actions"], 0
+            )
+
+
 class ConfigAutoMoveTests(unittest.TestCase):
     def test_auto_move_defaults_on_and_disables_idle_and_violent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -731,10 +1424,10 @@ class ConfigAutoMoveTests(unittest.TestCase):
             self.assertEqual(cfg.auto_move_action_hold_max_s, 4.5)
             self.assertEqual(cfg.auto_move_speed_scale, 0.1)
             self.assertEqual(cfg.auto_move_speed_scale_gta, 0.1)
-            self.assertEqual(cfg.auto_move_speed_scale_rdr2, 0.35)
+            self.assertEqual(cfg.auto_move_speed_scale_rdr2, 0.6)
             self.assertEqual(cfg.auto_move_speed_scale_cp2077, 0.15)
             self.assertEqual(cfg.movement_speed_scale_for("gta"), 0.1)
-            self.assertEqual(cfg.movement_speed_scale_for("rdr2"), 0.35)
+            self.assertEqual(cfg.movement_speed_scale_for("rdr2"), 0.6)
             self.assertEqual(cfg.movement_speed_scale_for("cp2077"), 0.15)
             self.assertEqual(cfg.movement_speed_scale_for("wukong"), 1.0)
             self.assertEqual(cfg.auto_move_look_yaw_min_deg_s, 15.0)
@@ -743,9 +1436,27 @@ class ConfigAutoMoveTests(unittest.TestCase):
             self.assertEqual(cfg.auto_move_look_pitch_max_deg_s, 15.0)
             self.assertEqual(cfg.auto_move_cover_move_beta, 1.5)
             self.assertEqual(cfg.auto_move_cover_look_gamma, 8.0)
+            self.assertTrue(cfg.auto_move_paradigms)
+            self.assertEqual(cfg.auto_move_paradigm_episode_chance, 0.85)
+            self.assertEqual(cfg.auto_move_paradigm_turn_hold_s, 4.0)
+            self.assertEqual(cfg.auto_move_paradigm_min_turn_hold_s, 1.2)
+            self.assertEqual(cfg.auto_move_paradigm_cooldown_s, 3.0)
+            self.assertEqual(cfg.auto_move_paradigm_weights, {})
+            self.assertEqual(cfg.auto_move_pause_chance, 0.15)
+            self.assertEqual(cfg.auto_move_pause_min_s, 5.0)
+            self.assertEqual(cfg.auto_move_pause_max_s, 15.0)
             self.assertEqual(cfg.idle_timeout_s, 0.0)
             self.assertEqual(cfg.violent_duration_s, 0.0)
             self.assertEqual(cfg.max_recording_duration_s, 1800.0)
+
+    def test_focus_lost_stop_window_outlasts_the_auto_move_focus_restore(self) -> None:
+        from game_recorder.auto_move.runner import _FOCUS_REFRESH_S
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Config(output_dir=Path(tmp) / "out")
+            # The restorer must get at least two attempts before the watchdog fires,
+            # otherwise a transient focus steal always kills an unattended session.
+            self.assertGreaterEqual(cfg.focus_lost_stop_after_s, 2 * _FOCUS_REFRESH_S)
 
     def test_begin_auto_move_is_noop_when_disabled(self) -> None:
         from game_recorder.session import Session

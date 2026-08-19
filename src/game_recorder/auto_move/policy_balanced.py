@@ -21,6 +21,14 @@ from game_recorder.auto_move.action_space import (
 from game_recorder.auto_move.coverage_maps import CoverageMaps
 from game_recorder.auto_move.policy_wander import WanderAction, WanderPhase
 from game_recorder.auto_move.pose_live import UnifiedPose
+from game_recorder.auto_move.trajectory_patterns import (
+    Episode,
+    PlannedTurn,
+    max_step_scale,
+    plan_episode,
+    plan_pause,
+    prefix_displacements,
+)
 
 
 @dataclass
@@ -75,6 +83,36 @@ class BalancedRadiusPolicy:
     pitch_extreme_deg: float = 20.0
     pitch_return_boost_per_s: float = 0.35
     pitch_return_boost_max: float = 4.0
+    # Multi-turn trajectory paradigms (WBench nav_cate) planned ahead of the
+    # per-action sampler. Free sampling takes over whenever no plan is active.
+    paradigms: bool = True
+    # Chance of planning an episode at each decision point rather than leaving a
+    # gap of free sampling. 0.85 puts ~85% of turns inside a paradigm while the
+    # gaps still reach ~57 of the 81 action bins; pushing past ~0.9 collapses
+    # coverage to the ~15 bins the WBench vocabulary uses.
+    paradigm_episode_chance: float = 0.85
+    paradigm_gap_min_actions: int = 1
+    paradigm_gap_max_actions: int = 3
+    paradigm_turn_hold_s: float = 4.0
+    # Below this the plan is replanned look-only instead of being walked out.
+    paradigm_min_turn_hold_s: float = 1.2
+    paradigm_margin_m: float = 1.0
+    # Direction re-rolls when the first draw does not fit the radius. The
+    # paradigm, channel and turn count are held fixed, so only the heading
+    # changes — WBench constrains the turns relative to each other, not their
+    # absolute bearing. Without this the policy degrades to look-only whenever
+    # it sits near the boundary, which is most of the time.
+    paradigm_plan_attempts: int = 4
+    # After a guard aborts an episode, sample freely for this long so the
+    # inward bias can walk back in before the next episode is planned.
+    paradigm_cooldown_s: float = 3.0
+    paradigm_allow_pitch: bool = True
+    paradigm_weights: dict[str, float] = field(default_factory=dict)
+    # Standing completely still (no keys, no look) for a sampled stretch, rolled
+    # at every episode boundary. Labelled ``pause`` in the sidecar.
+    pause_chance: float = 0.15
+    pause_min_s: float = 5.0
+    pause_max_s: float = 15.0
     catalog: ActionCatalog | None = None
     coverage: CoverageMaps | None = None
     rng: random.Random = field(default_factory=random.Random)
@@ -99,6 +137,12 @@ class BalancedRadiusPolicy:
     _pitch_extreme_sign: int = field(default=0, init=False)
     _pitch_extreme_since: float = field(default=0.0, init=False)
     _escape_until: float = field(default=0.0, init=False)
+    _episode: Episode | None = field(default=None, init=False)
+    _episode_turn: int = field(default=0, init=False)
+    _current_paradigm: str | None = field(default=None, init=False)
+    _current_turn_index: int | None = field(default=None, init=False)
+    _paradigm_hold_off_until: float = field(default=0.0, init=False)
+    _free_actions_left: int = field(default=0, init=False)
 
     def __post_init__(self) -> None:
         if self.catalog is not None:
@@ -127,6 +171,7 @@ class BalancedRadiusPolicy:
         self._pitch_extreme_sign = 0
         self._pitch_extreme_since = 0.0
         self._escape_until = 0.0
+        self._abort_episode()
         self._coverage.reset()
         self._resample(now, pose=None, force_stuck=False)
 
@@ -155,17 +200,21 @@ class BalancedRadiusPolicy:
             self._escape_until = clock + self.rng.uniform(0.4, 0.9)
             self._stuck_since = None
             self._resample(clock, pose=pose, force_stuck=True)
-        elif self._should_interrupt_for_radius(pose) or (
-            clock >= self._hold_until or self._current is None
-        ):
-            # Radius is checked every policy tick (~30Hz), not only at hold
-            # boundaries — otherwise a long walk hold can overshoot small radii
-            # by 1–2m at run speed.
-            self._resample(
-                clock,
-                pose=pose,
-                force_stuck=clock < self._escape_until,
-            )
+        else:
+            radius_interrupt = self._should_interrupt_for_radius(pose)
+            if radius_interrupt or clock >= self._hold_until or self._current is None:
+                # Radius is checked every policy tick (~30Hz), not only at hold
+                # boundaries — otherwise a long walk hold can overshoot small
+                # radii by 1–2m at run speed. An interrupt cuts the current turn
+                # short, so drop the episode rather than advancing its plan once
+                # per tick while the boundary condition persists.
+                if radius_interrupt:
+                    self._abort_episode(cooldown_until=self._cooldown_from(clock))
+                self._resample(
+                    clock,
+                    pose=pose,
+                    force_stuck=clock < self._escape_until,
+                )
 
         assert self._current is not None
         action = self._to_wander_action(self._current, pose=pose)
@@ -239,6 +288,11 @@ class BalancedRadiusPolicy:
         self._last_pose = pose
         self._last_pose_mono = now
         if prev is None or prev_t <= 0:
+            self._stuck_since = None
+            return
+        if self._current is not None and self._current.translation == "none":
+            # Standing still on purpose (look-only action or planned turn) — the
+            # stuck sensor only means anything while a walk is commanded.
             self._stuck_since = None
             return
         elapsed = max(1e-3, now - prev_t)
@@ -428,6 +482,24 @@ class BalancedRadiusPolicy:
         force_stuck: bool,
     ) -> None:
         allowed_translations = self._allowed_translations(pose, force_stuck=force_stuck)
+
+        planned = self._next_planned_turn(
+            clock,
+            pose=pose,
+            allowed=allowed_translations,
+            force_stuck=force_stuck,
+        )
+        if planned is not None:
+            action = self._catalog.by_pair.get((planned.translation, planned.rotation))
+            if action is not None:
+                self._current = action
+                self._hold_until = clock + max(0.05, planned.hold_s)
+                return
+            # Trimmed/custom catalog without that pair — fall through to sampling.
+            self._abort_episode(cooldown_until=self._cooldown_from(clock))
+
+        self._current_paradigm = None
+        self._current_turn_index = None
         candidates = [
             a
             for a in self._catalog.actions
@@ -533,6 +605,198 @@ class BalancedRadiusPolicy:
                 # Clearly inward movement is safe to hold for the full sampled
                 # duration. Radius checks still run at 30 Hz if the camera turns.
         self._hold_until = clock + hold
+
+    def _abort_episode(self, *, cooldown_until: float | None = None) -> None:
+        had_episode = self._episode is not None
+        self._episode = None
+        self._episode_turn = 0
+        self._current_paradigm = None
+        self._current_turn_index = None
+        self._free_actions_left = 0
+        # Only start the hold-off when a plan was actually dropped. A guard that
+        # keeps firing while free sampling recovers must not extend suppression
+        # tick after tick, or paradigms never come back at small radii.
+        if cooldown_until is not None and had_episode:
+            self._paradigm_hold_off_until = cooldown_until
+
+    def _cooldown_from(self, clock: float) -> float:
+        return clock + max(0.0, float(self.paradigm_cooldown_s))
+
+    def _next_planned_turn(
+        self,
+        clock: float,
+        *,
+        pose: UnifiedPose | None,
+        allowed: set[str],
+        force_stuck: bool,
+    ) -> PlannedTurn | None:
+        """Next turn of the active paradigm episode, or ``None`` to sample freely."""
+        if not self.paradigms:
+            return None
+        # Stuck escape and the hard-radius override both need a specific
+        # translation, so the rest of the plan would no longer match its label.
+        if force_stuck or self._forced_translation is not None:
+            self._abort_episode(cooldown_until=self._cooldown_from(clock))
+            return None
+        if clock < self._paradigm_hold_off_until:
+            return None
+
+        if self._episode is None or self._episode_turn >= len(self._episode):
+            if self._free_actions_left <= 0 and self._roll_pause():
+                self._start_pause()
+            else:
+                if self._free_actions_left <= 0 and self.rng.random() >= max(
+                    0.0, min(1.0, float(self.paradigm_episode_chance))
+                ):
+                    low = max(1, int(self.paradigm_gap_min_actions))
+                    high = max(low, int(self.paradigm_gap_max_actions))
+                    self._free_actions_left = self.rng.randint(low, high)
+                if self._free_actions_left > 0:
+                    self._free_actions_left -= 1
+                    return None
+                self._start_episode(pose)
+
+        episode = self._episode
+        assert episode is not None
+        turn = episode.turns[self._episode_turn]
+        if turn.translation not in allowed:
+            # The radius gate rejects this step; distorting it would produce a
+            # trajectory that no longer matches the paradigm label.
+            self._abort_episode(cooldown_until=self._cooldown_from(clock))
+            return None
+
+        self._episode_turn += 1
+        if turn.turn_index == 0:
+            # Lock look rates for the whole episode: a roundtrip only closes in
+            # yaw if the return leg turns at the same rate as the outbound leg.
+            self._sample_look_rates()
+        self._current_paradigm = episode.paradigm
+        self._current_turn_index = turn.turn_index
+        return turn
+
+    def _roll_pause(self) -> bool:
+        chance = min(1.0, max(0.0, float(self.pause_chance)))
+        return chance > 0.0 and self.rng.random() < chance
+
+    def _start_pause(self) -> None:
+        """Queue a stand-still episode; no radius ladder, it never moves."""
+        lo = max(0.05, min(float(self.pause_min_s), float(self.pause_max_s)))
+        hi = max(lo, float(self.pause_max_s))
+        self._episode = plan_pause(self.rng.uniform(lo, hi))
+        self._episode_turn = 0
+
+    def _start_episode(self, pose: UnifiedPose | None) -> None:
+        hold = max(0.05, float(self.paradigm_turn_hold_s))
+        floor = max(0.05, min(hold, float(self.paradigm_min_turn_hold_s)))
+        weights = dict(self.paradigm_weights) if self.paradigm_weights else None
+        episode = plan_episode(
+            rng=self.rng,
+            hold_s=hold,
+            paradigm_weights=weights,
+            allow_pitch=bool(self.paradigm_allow_pitch),
+        )
+        budget = self._paradigm_hold_budget(episode, pose=pose)
+
+        for _ in range(max(1, int(self.paradigm_plan_attempts)) - 1):
+            if budget >= hold:
+                break
+            candidate = plan_episode(
+                rng=self.rng,
+                hold_s=hold,
+                paradigm=episode.paradigm,
+                channel=episode.channel,
+                carrier=episode.carrier,
+                turn_count=len(episode),
+                allow_pitch=bool(self.paradigm_allow_pitch),
+            )
+            candidate_budget = self._paradigm_hold_budget(candidate, pose=pose)
+            if candidate_budget > budget:
+                episode = candidate
+                budget = candidate_budget
+
+        # A four-turn walk at run speed does not fit a 20m radius. Shorten the
+        # plan before giving up on translation: a two-turn roundtrip, zigzag or
+        # L-shape is still that paradigm, while a two-turn loop is not a loop.
+        if budget < floor and len(episode) > 2 and episode.paradigm != "loop":
+            episode = plan_episode(
+                rng=self.rng,
+                hold_s=hold,
+                paradigm=episode.paradigm,
+                channel=episode.channel,
+                carrier=episode.carrier,
+                turn_count=2,
+                allow_pitch=bool(self.paradigm_allow_pitch),
+            )
+            budget = self._paradigm_hold_budget(episode, pose=pose)
+
+        if budget < floor:
+            # Still no room to walk it out. Replan look-only: standing still and
+            # turning keeps the paradigm intact and ignores the radius entirely.
+            episode = plan_episode(
+                rng=self.rng,
+                hold_s=hold,
+                paradigm=episode.paradigm,
+                channel="rotation",
+                carrier="none",
+                turn_count=len(episode),
+                allow_pitch=bool(self.paradigm_allow_pitch),
+            )
+            budget = self._paradigm_hold_budget(episode, pose=pose)
+
+        if budget < hold:
+            episode = episode.with_hold(max(floor, budget))
+        self._episode = episode
+        self._episode_turn = 0
+
+    def _paradigm_hold_budget(
+        self,
+        episode: Episode,
+        *,
+        pose: UnifiedPose | None,
+    ) -> float:
+        """Longest per-turn hold that keeps *episode* inside the soft radius."""
+        hold = max(0.05, float(self.paradigm_turn_hold_s))
+        peak = episode.peak_outbound_units
+        if peak <= 1e-9:
+            return hold
+        if pose is None or self._anchor_x is None or self._anchor_y is None:
+            return hold
+        radius = max(0.1, float(self.radius_m))
+        soft = radius * max(0.1, min(1.0, float(self.soft_radius_frac)))
+        # Cap the margin at a fraction of soft: a flat 1m would eat most of the
+        # usable room at a 5m radius.
+        margin = min(max(0.0, float(self.paradigm_margin_m)), soft * 0.2)
+        offset_x = pose.x - self._anchor_x
+        offset_y = pose.y - self._anchor_y
+        dist = math.hypot(offset_x, offset_y)
+        # The margin is a buffer, not a veto. Standing inside it (the policy
+        # spends much of its time hovering near soft) must still allow plans
+        # that hold or reduce the distance, or every episode degrades.
+        limit = max(soft - margin, dist)
+        speed = self._estimated_walk_speed(pose)
+
+        if episode.heading_frozen:
+            # The plan never turns the camera, so its waypoints are exact: walk
+            # each one against the limit instead of assuming the whole plan
+            # heads straight out. Near the boundary this is the difference
+            # between a real trajectory and being forced to stand still.
+            travel = max_step_scale(
+                prefix_displacements(
+                    episode.turns,
+                    forward_x=pose.forward_x,
+                    forward_y=pose.forward_y,
+                ),
+                offset_x=offset_x,
+                offset_y=offset_y,
+                limit=limit,
+            )
+            return min(hold, travel / speed)
+
+        # A rotating plan curves unpredictably — keep the radial worst case.
+        budget = limit - dist
+        if budget <= 0.0:
+            return 0.0
+        return min(hold, budget / (peak * speed))
 
     def _allowed_translations(
         self,
@@ -641,6 +905,8 @@ class BalancedRadiusPolicy:
             action_id=discrete.action_id,
             translation=discrete.translation,
             rotation=discrete.rotation,
+            paradigm=self._current_paradigm,
+            turn_index=self._current_turn_index,
         )
 
     def _return_yaw_assist(self, pose: UnifiedPose) -> float:
@@ -687,4 +953,6 @@ class BalancedRadiusPolicy:
             action_id=action.action_id,
             translation=action.translation,
             rotation=action.rotation,
+            paradigm=action.paradigm,
+            turn_index=action.turn_index,
         )

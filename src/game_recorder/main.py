@@ -317,12 +317,43 @@ def main() -> None:
         help="balanced 策略单个动作最长保持秒数（默认：4.5）",
     )
     parser.add_argument(
+        "--no-auto-move-paradigms",
+        action="store_true",
+        help=(
+            "禁用 WBench 轨迹范式（默认开启：往返/闭环/L 形/锯齿/持续/递进 多 turn 编排）；"
+            "禁用后退回逐动作独立随机采样"
+        ),
+    )
+    parser.add_argument(
+        "--auto-move-turn-hold",
+        type=float,
+        default=4.0,
+        help=(
+            "轨迹范式每个 turn 的保持秒数（默认：4.0，对齐 WBench）；"
+            "平移范式会按活动半径预算自动缩短"
+        ),
+    )
+    parser.add_argument(
+        "--auto-move-pause-chance",
+        type=float,
+        default=0.15,
+        help="每个 episode 边界插入一次原地静止的概率（默认：0.15，0 表示关闭）",
+    )
+    parser.add_argument(
+        "--auto-move-pause-range",
+        type=float,
+        nargs=2,
+        metavar=("MIN", "MAX"),
+        default=(5.0, 15.0),
+        help="原地静止时长的采样区间，单位秒（默认：5 15）",
+    )
+    parser.add_argument(
         "--auto-move-speed-scale",
         type=float,
         default=None,
         help=(
             "统一设置 GTA5/RDR2/赛博朋克 2077 速度倍率；"
-            "不指定则用各游戏独立默认（GTA 0.1 / RDR2 0.35 / 2077 0.15）"
+            "不指定则用各游戏独立默认（GTA 0.1 / RDR2 0.6 / 2077 0.15）"
         ),
     )
     parser.add_argument(
@@ -335,7 +366,7 @@ def main() -> None:
         "--auto-move-speed-scale-rdr2",
         type=float,
         default=None,
-        help="荒野大镖客 2 自动移动速度倍率（默认：0.35）",
+        help="荒野大镖客 2 自动移动速度倍率（默认：0.6）",
     )
     parser.add_argument(
         "--auto-move-speed-scale-cp2077",
@@ -429,7 +460,7 @@ def main() -> None:
     speed_rdr2 = (
         args.auto_move_speed_scale_rdr2
         if args.auto_move_speed_scale_rdr2 is not None
-        else (shared_speed if shared_speed is not None else 0.35)
+        else (shared_speed if shared_speed is not None else 0.6)
     )
     speed_cp2077 = (
         args.auto_move_speed_scale_cp2077
@@ -466,6 +497,11 @@ def main() -> None:
         auto_move_policy=str(args.auto_move_policy),
         auto_move_action_hold_min_s=max(0.05, float(args.auto_move_hold_min)),
         auto_move_action_hold_max_s=max(0.05, float(args.auto_move_hold_max)),
+        auto_move_paradigms=not bool(args.no_auto_move_paradigms),
+        auto_move_paradigm_turn_hold_s=max(0.05, float(args.auto_move_turn_hold)),
+        auto_move_pause_chance=min(1.0, max(0.0, float(args.auto_move_pause_chance))),
+        auto_move_pause_min_s=max(0.05, float(min(args.auto_move_pause_range))),
+        auto_move_pause_max_s=max(0.05, float(max(args.auto_move_pause_range))),
         auto_move_speed_scale=_clamp_speed_scale(
             shared_speed if shared_speed is not None else speed_gta
         ),
@@ -781,7 +817,13 @@ def main() -> None:
             "（不足则丢弃；空闲/僵滞/窗口切换停止时末尾裁剪后再计）"
         )
     print("  禁止操作: 非 WASD 按键或鼠标点击/滚轮将自动停止录制")
-    print("  窗口切换自动停止: 录制中切换至其他窗口将自动结束（末尾裁剪 1 秒）")
+    if config.focus_lost_stop_after_s > 0:
+        print(
+            f"  窗口切换自动停止: 持续 {config.focus_lost_stop_after_s:g} 秒未回到游戏窗口"
+            f"才结束（末尾裁剪 {config.focus_lost_trim_s:g} 秒）"
+        )
+    else:
+        print("  窗口切换自动停止: 已禁用")
     if config.violent_duration_s > 0:
         print(
             f"  剧烈操作自动停止: WASD 或鼠标高频晃动连续"

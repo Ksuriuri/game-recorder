@@ -67,6 +67,11 @@ from game_recorder.storage.frame_timestamp_writer import (
     FrameTimestampWriter,
     trim_frame_timestamps,
 )
+from game_recorder.storage.auto_move_writer import (
+    AUTO_MOVE_FILENAME,
+    AUTO_MOVE_SCHEMA,
+    AutoMoveWriter,
+)
 from game_recorder.storage.idle_trim import apply_idle_tail_trim, idle_tail_trim_frames
 from game_recorder.hotkeys import HOTKEY_VKS
 from game_recorder.storage.library_index import add_session, effective_duration_s
@@ -91,7 +96,7 @@ AutoStopCallback = Callable[[AutoStopReason], None]
 # Per-second thresholds for violent-input detection (sustained ``violent_duration_s``).
 _VIOLENT_WINDOW_S = 1.0
 _FOCUS_POLL_S = 0.1
-_FOCUS_LOST_STABLE_POLLS = 3
+_FOCUS_LOST_MIN_POLLS = 3
 _FOCUS_WATCH_GRACE_S = 2.0
 _WASD_DOWN_PER_S = 5  # new WASD presses per second (ignore hold / key-repeat)
 _MOUSE_REVERSAL_PER_S = 10  # dx/dy sign flips per second (shake); smooth look rarely hits this
@@ -291,6 +296,7 @@ class Session:
 
         self._meta_path = self._session_dir / "meta.json"
         self._frame_timestamps_path = self._session_dir / FRAME_TIMESTAMPS_FILENAME
+        self._auto_move_path = self._session_dir / AUTO_MOVE_FILENAME
 
         # Components (created on start)
         self._screen: ScreenCapture | None = None
@@ -358,6 +364,7 @@ class Session:
         self._stop_finalized = False
         self._stop_kept = False
         self._auto_move: AutoMoveRunner | None = None
+        self._auto_move_writer: AutoMoveWriter | None = None
 
     @property
     def session_id(self) -> str:
@@ -513,8 +520,10 @@ class Session:
                     violent_s,
                 )
             target = self._capture_target
+            focus_stop_s = float(self.config.focus_lost_stop_after_s)
             if (
                 target is not None
+                and focus_stop_s > 0
                 and (target.hwnd or target.title)
                 and target.source in ("foreground", "auto_foreground")
             ):
@@ -525,7 +534,10 @@ class Session:
                     daemon=True,
                 )
                 self._focus_thread.start()
-                logger.info("窗口失焦检测已启用：切换至其他窗口将自动停止")
+                logger.info(
+                    "窗口失焦检测已启用：持续 %g 秒未回到游戏窗口将自动停止",
+                    focus_stop_s,
+                )
 
         # Publish only after every capture and watcher thread has started. This
         # avoids leaving a stale signal when session startup raises earlier.
@@ -609,11 +621,46 @@ class Session:
                 return_yaw_deg_s=float(self.config.auto_move_turn_deg_s),
                 cover_move_beta=float(self.config.auto_move_cover_move_beta),
                 cover_look_gamma=float(self.config.auto_move_cover_look_gamma),
+                paradigms=bool(self.config.auto_move_paradigms),
+                paradigm_episode_chance=float(
+                    self.config.auto_move_paradigm_episode_chance
+                ),
+                paradigm_turn_hold_s=float(
+                    self.config.auto_move_paradigm_turn_hold_s
+                ),
+                paradigm_min_turn_hold_s=float(
+                    self.config.auto_move_paradigm_min_turn_hold_s
+                ),
+                paradigm_margin_m=float(self.config.auto_move_paradigm_margin_m),
+                paradigm_cooldown_s=float(
+                    self.config.auto_move_paradigm_cooldown_s
+                ),
+                paradigm_allow_pitch=bool(
+                    self.config.auto_move_paradigm_allow_pitch
+                ),
+                paradigm_weights=dict(self.config.auto_move_paradigm_weights),
+                pause_chance=float(self.config.auto_move_pause_chance),
+                pause_min_s=float(self.config.auto_move_pause_min_s),
+                pause_max_s=float(self.config.auto_move_pause_max_s),
             )
+        # Only the balanced policy produces discrete labels worth recording.
+        if policy_name != "wander":
+            try:
+                self._auto_move_writer = AutoMoveWriter(
+                    self._auto_move_path,
+                    t0_perf_ns=self._t0_ns,
+                    t0_epoch_ms=self._t0_epoch_ms,
+                    fps=self.config.fps,
+                )
+            except OSError as exc:
+                logger.warning("创建自动移动标签文件失败，本次不记录标签：%s", exc)
+                self._auto_move_writer = None
+
         self._auto_move = AutoMoveRunner(
             output_dir=self.config.output_dir,
             session_dir=self._session_dir,
             sources=_enabled_camera_sources(self.config),
+            label_writer=self._auto_move_writer,
             tick_hz=float(self.config.auto_move_tick_hz),
             policy=policy,
             hwnd=target.hwnd if target else None,
@@ -621,9 +668,14 @@ class Session:
         )
         self._auto_move.start()
         logger.info(
-            "自动移动已在录制开始后启动（policy=%s, radius=%.2fm）",
+            "自动移动已在录制开始后启动（policy=%s, radius=%.2fm%s）",
             policy_name if policy_name == "wander" else "balanced",
             float(self.config.auto_move_radius_m),
+            (
+                f"，轨迹范式=开启（每 turn {self.config.auto_move_paradigm_turn_hold_s:g}s）"
+                if policy_name != "wander" and self.config.auto_move_paradigms
+                else ""
+            ),
         )
 
     def stop(self) -> bool:
@@ -644,6 +696,15 @@ class Session:
             except Exception as exc:
                 logger.warning("停止自动移动失败：%s", exc)
             self._auto_move = None
+
+        auto_move_actions = 0
+        if self._auto_move_writer is not None:
+            auto_move_actions = self._auto_move_writer.total_written
+            try:
+                self._auto_move_writer.close()
+            except OSError as exc:
+                logger.warning("关闭自动移动标签文件失败：%s", exc)
+            self._auto_move_writer = None
 
         # Wait for capture threads to drain
         if self._screen_thread and self._screen_thread.is_alive():
@@ -795,6 +856,9 @@ class Session:
             captured_frames=self._frame_count - self._duplicate_frame_count,
             duplicate_frames=self._duplicate_frame_count,
             total_input_events=total_events,
+            auto_move_file=AUTO_MOVE_FILENAME if auto_move_actions else "",
+            auto_move_schema=AUTO_MOVE_SCHEMA if auto_move_actions else "",
+            auto_move_actions=auto_move_actions,
             segment_seconds=int(self.config.segment_seconds),
             segments=self._segments_meta,
             auto_stop_reason=self._auto_stop_reason,
@@ -1176,8 +1240,13 @@ class Session:
         """Stop when the captured game window loses foreground after it was focused once.
 
         Grace period + ``armed`` avoid false triggers from overlay UI or from starting
-        recording before the game window has taken focus.
+        recording before the game window has taken focus. ``focus_lost_stop_after_s``
+        leaves the auto-move focus restorer room to win the window back first.
         """
+        needed_polls = max(
+            _FOCUS_LOST_MIN_POLLS,
+            round(float(self.config.focus_lost_stop_after_s) / _FOCUS_POLL_S),
+        )
         lost_streak = 0
         armed = False
         grace_until = time.monotonic() + _FOCUS_WATCH_GRACE_S
@@ -1193,7 +1262,7 @@ class Session:
             if not armed:
                 continue
             lost_streak += 1
-            if lost_streak >= _FOCUS_LOST_STABLE_POLLS:
+            if lost_streak >= needed_polls:
                 self._trigger_auto_stop("focus_lost")
                 return
 

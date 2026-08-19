@@ -65,6 +65,12 @@ class Config:
     # Trim this many seconds from the tail when auto-stopping due to window focus loss.
     focus_lost_trim_s: float = 1.0
 
+    # Sustained foreground loss required before the focus auto-stop fires. Auto-move
+    # re-asserts focus once per second, so this has to stay above that cadence or a
+    # transient steal (toast, launcher, shader compile) kills an unattended run
+    # before the restorer ever gets a turn. 0 = off.
+    focus_lost_stop_after_s: float = 4.0
+
     # Sliding-window width (seconds) for frame-drop auto-stop and tail trim. 0 disables both
     # (drops are still logged and written to meta.json).
     frame_drop_stop_after_s: float = 10.0
@@ -113,13 +119,34 @@ class Config:
     # Coverage × inverse-freq fusion gains (see BalancedRadiusPolicy).
     auto_move_cover_move_beta: float = 1.5
     auto_move_cover_look_gamma: float = 8.0
+    # WBench-style multi-turn trajectory paradigms (roundtrip / loop / l_shape /
+    # zigzag / repeat / progressive) planned on top of the per-action sampler.
+    # See auto_move/trajectory_patterns.py; empty weights = module defaults.
+    auto_move_paradigms: bool = True
+    # Chance of planning an episode instead of a free-sampling gap (~85% of
+    # turns end up planned); the gaps keep the non-WBench action bins covered.
+    auto_move_paradigm_episode_chance: float = 0.85
+    auto_move_paradigm_turn_hold_s: float = 4.0
+    auto_move_paradigm_min_turn_hold_s: float = 1.2
+    auto_move_paradigm_margin_m: float = 1.0
+    auto_move_paradigm_cooldown_s: float = 3.0
+    auto_move_paradigm_allow_pitch: bool = True
+    auto_move_paradigm_weights: dict[str, float] = field(default_factory=dict)
+    # Stand completely still (no keys, no camera motion) for a sampled stretch.
+    # Rolled at every episode boundary; 0 disables. Logged as paradigm ``pause``.
+    # Runs through the same plan queue as the paradigms, so it is also off when
+    # ``auto_move_paradigms`` is disabled.
+    auto_move_pause_chance: float = 0.15
+    auto_move_pause_min_s: float = 5.0
+    auto_move_pause_max_s: float = 15.0
 
     def __post_init__(self) -> None:
         self.output_dir = Path(self.output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         if self.auto_move:
-            # Constant WASD hold would trip idle/stuck; smooth scripted look can
-            # still look "violent" to the shake detector — disable both in auto mode.
+            # A paradigm episode can hold one direction — or stand still and only
+            # pan — for up to ~24 s, which reads as idle/stuck; smooth scripted look
+            # can still look "violent" to the shake detector. Disable both here.
             self.idle_timeout_s = 0.0
             self.violent_duration_s = 0.0
 
