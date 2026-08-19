@@ -19,6 +19,7 @@ REM   What goes into the zip:
 REM     .tools\uv\       uv.exe
 REM     .tools\python\   managed Python 3.11
 REM     .tools\uv-cache\ uv resolution cache (offline fallback)
+REM     .tools\rtss\     RTSS installer archive (~18MB) for the frame limiter
 REM     ffmpeg\          BtbN gpl FFmpeg (NVENC/AMF/QSV + libx264 + dshow)
 REM     wheels\          pre-downloaded dependency wheels (numpy, opencv-headless,
 REM                      dxcam, soundcard, cffi, pycparser …)
@@ -29,8 +30,9 @@ REM
 REM   What is NOT shipped:
 REM     .venv\           path-bound; install.bat recreates it offline from wheels\
 REM     recordings\      user data
-REM     .tools\llvm-mingw\ / vs2022-buildtools\ / *.zip / installer exes
+REM     .tools\llvm-mingw\ / vs2022-buildtools\ / installer exes
 REM                     (local ASI compile toolchains — not needed on cafe PCs)
+REM     .tools\rtss\setup\ (re-extracted from the archive at install time)
 REM     this script and any portable *.zip
 REM ============================================================
 
@@ -73,9 +75,13 @@ if exist "%WHEELS_DIR%" (
     echo       正在删除旧的 wheels\ 以便重新下载。
     rmdir /s /q "%WHEELS_DIR%"
 )
+REM  RTSS_SKIP: the build machine only needs the installer archive (fetched in
+REM  step 1c), not RTSS itself running in its tray.
 set "GAME_RECORDER_SKIP_PAUSE=1"
+set "RTSS_SKIP=1"
 call "%PROJECT_DIR%\install.bat"
 set "GAME_RECORDER_SKIP_PAUSE="
+set "RTSS_SKIP="
 if errorlevel 1 (
     echo.
     echo [错误] install.bat 失败。中止打包。
@@ -105,6 +111,13 @@ if errorlevel 1 (
     ) else (
         echo [警告] 缺少 ReShade_Setup_6.7.3_Addon.exe；离线安装 CP2077 深度捕获会失败。
     )
+)
+
+echo.
+echo [1c/4] 正在预下载 RTSS 限帧安装包 ...
+"%VENV_DIR%\Scripts\python.exe" "%PROJECT_DIR%\scripts\install_rtss.py" --prefetch
+if errorlevel 1 (
+    echo [警告] RTSS 安装包预下载失败；离线包中将无法配置限帧。
 )
 
 REM ----------------------------------------------------------------
@@ -218,6 +231,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
     "  foreach ($name in @('uv','python','uv-cache')) {" ^
     "    Add-Tree $zip (Join-Path '.tools' $name) ('.tools/' + $name + '/') ;" ^
     "  };" ^
+    "  Add-Tree $zip (Join-Path '.tools' 'rtss') '.tools/rtss/' @('setup');" ^
     "  foreach ($name in @('ffmpeg','wheels','src','scripts')) {" ^
     "    Add-Tree $zip $name ($name + '/') @('__pycache__','.venv');" ^
     "  };" ^

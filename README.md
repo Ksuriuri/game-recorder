@@ -98,8 +98,9 @@ scripts\build_offline_bundle.bat
 2. `uv pip freeze` 锁定解析后的精确版本（含 numpy / opencv-python-headless / dxcam / soundcard / cffi / pycparser…）
 3. `uv pip download` 把这些 wheel 全量保存到 `wheels\`
 4. `uv build --wheel` 把 `game-recorder` 本体打成 `wheels\game_recorder-*.whl`（离线安装用 wheel，避免 editable 的 `.pth` 在**中文路径**下失效）
-5. 删掉 `.venv\`（venv 的 `pyvenv.cfg` 写死了绝对路径，搬到别的机器就崩，所以不进包；目标机器会从 `wheels\` 几秒内重建）
-6. `Compress-Archive` 打成 `game-recorder-portable-YYYYMMDD.zip`（约 400-450 MB，取决于托管 Python / FFmpeg / wheel 缓存版本）
+5. 预下载 RTSS 限帧安装包到 `.tools\rtss\`（约 18 MB，带 SHA-256 校验；构建机本身不会被装上 RTSS）
+6. 删掉 `.venv\`（venv 的 `pyvenv.cfg` 写死了绝对路径，搬到别的机器就崩，所以不进包；目标机器会从 `wheels\` 几秒内重建）
+7. `Compress-Archive` 打成 `game-recorder-portable-YYYYMMDD.zip`（约 400-450 MB，取决于托管 Python / FFmpeg / wheel 缓存版本）
 
 #### 离线包内容
 
@@ -130,6 +131,7 @@ game-recorder/
 └── .tools/
     ├── uv/uv.exe               # ~15 MB，独立 uv
     ├── python/                 # ~30 MB，托管的 cpython 3.11
+    ├── rtss/                   # ~18 MB，RTSS 限帧工具安装包（离线也能装）
     └── uv-cache/               # uv 解析缓存（双保险，--find-links 不命中时兜底）
 ```
 
@@ -350,7 +352,7 @@ game-recorder -v
 - **GTA 等使用 shared-mode 音频的游戏可直接录**。极少数**强制独占模式**的应用会让 WASAPI loopback 拿到静音；本工具自动降级到 DirectShow，再不行就静音录制（`meta.json` 的 `audio_source` 会是 `null`，便于事后过滤）。
 - **硬件编码跨机泛化**：网吧 GPU 五花八门。启动时按 **NVENC → AMF → QSV → libx264** 做编译列表 + 运行时探测：有对应 GPU/驱动则走硬件编码，否则落到 `libx264 ultrafast`（默认 `--x264-threads 2`）。若仍卡，优先用 `run.bat --fps 20 --quality 28 --x264-threads 1`。
 - **切屏 / 全屏切换**：DXGI 在 Alt+Tab 或游戏切全屏时可能短暂报告不同分辨率。录制器会把临时尺寸缩放回本次 session 的初始尺寸，避免视频花屏或被切成多段；真正 0 帧的启动空段会自动清理。
-- **重启即清空的机器**：网吧还原盘会把 RTSS 之类的系统级安装一起抹掉。`install.bat` 每次都会重新装好并重新注册限帧配置，所以开机后照常跑一遍 `install.bat` 即可，不需要额外记步骤。
+- **重启即清空的机器**：网吧还原盘会把 RTSS 之类的系统级安装一起抹掉。`install.bat` 每次都会重新装好并重新注册限帧配置，所以开机后照常跑一遍 `install.bat` 即可，不需要额外记步骤。用离线便携包部署时安装包已在 `.tools\rtss\` 内，重装不需要联网。
 
 ## 游戏帧率上限（RTSS）
 
@@ -369,9 +371,11 @@ REM 取消限帧
 .venv\Scripts\python.exe scripts\install_rtss.py --fps 0
 ```
 
-或者在跑 `install.bat` 前用环境变量改默认值：`set RTSS_FPS=30`、`set RTSS_GAME_EXE=GTA5.exe`。
+或者在跑 `install.bat` 前用环境变量改默认值：`set RTSS_FPS=30`、`set RTSS_GAME_EXE=GTA5.exe`；`set RTSS_SKIP=1` 则整步跳过。
 
 脚本做的事：从 Guru3D 官方镜像下载 RTSS 7.3.7（内置 SHA-256 与 Authenticode 签名双重校验，安装包缓存在 `.tools\rtss\`），静默安装，然后在 `Profiles\<游戏主程序名>.cfg` 里写入帧率上限并启动 RTSS。RTSS 按可执行文件名匹配配置，所以"注册游戏"就是写这个文件，全程不需要开 GUI。
+
+**离线包自带这个安装包**，目标机断网也能装。`install.bat` 检测到离线模式时会带上 `--offline`，只认 `.tools\rtss\` 里的缓存，不会尝试联网。
 
 几个要点：
 

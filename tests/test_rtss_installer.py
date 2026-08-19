@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -82,6 +84,54 @@ class ProfileMergeTests(unittest.TestCase):
             installer.profile_overrides(-1, osd=False)
         with self.assertRaises(installer.InstallerError):
             installer.profile_overrides(installer.MAX_FPS + 1, osd=False)
+
+
+class ResolveArchiveTests(unittest.TestCase):
+    def test_offline_without_cache_points_at_the_bundle_builder(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with mock.patch.object(installer, "DOWNLOAD_CACHE", Path(temp_dir)):
+                with self.assertRaises(installer.InstallerError) as caught:
+                    installer.resolve_archive(
+                        None, allow_unknown=False, offline=True
+                    )
+        self.assertIn("build_offline_bundle", str(caught.exception))
+
+    def test_cached_archive_is_used_offline_and_reported_as_pinned(self) -> None:
+        payload = b"pretend RTSS installer"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache = Path(temp_dir)
+            archive = cache / installer.RTSS_ARCHIVE_NAME
+            archive.write_bytes(payload)
+            with mock.patch.object(installer, "DOWNLOAD_CACHE", cache), mock.patch.object(
+                installer, "RTSS_ARCHIVE_SHA256", hashlib.sha256(payload).hexdigest()
+            ):
+                path, pinned = installer.resolve_archive(
+                    None, allow_unknown=False, offline=True
+                )
+            self.assertEqual(path, archive)
+            self.assertTrue(pinned)
+
+    def test_stale_cache_is_discarded_instead_of_installed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache = Path(temp_dir)
+            archive = cache / installer.RTSS_ARCHIVE_NAME
+            archive.write_bytes(b"truncated download")
+            with mock.patch.object(installer, "DOWNLOAD_CACHE", cache):
+                with self.assertRaises(installer.InstallerError):
+                    installer.resolve_archive(
+                        None, allow_unknown=False, offline=True
+                    )
+            self.assertFalse(archive.exists())
+
+    def test_explicit_archive_with_unknown_digest_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            archive = Path(temp_dir) / "somebody-elses-rtss.zip"
+            archive.write_bytes(b"not the official build")
+            with self.assertRaises(installer.InstallerError):
+                installer.resolve_archive(archive, allow_unknown=False)
+            path, pinned = installer.resolve_archive(archive, allow_unknown=True)
+            self.assertEqual(path, archive.resolve())
+            self.assertFalse(pinned)
 
 
 class WriteProfileTests(unittest.TestCase):

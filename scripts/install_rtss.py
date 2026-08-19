@@ -315,7 +315,10 @@ def _download(url: str, destination: Path) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def resolve_archive(explicit: Path | None, *, allow_unknown: bool) -> Path:
+def resolve_archive(
+    explicit: Path | None, *, allow_unknown: bool, offline: bool = False
+) -> tuple[Path, bool]:
+    """Return the installer archive and whether it matched the pinned digest."""
     if explicit is not None:
         if not explicit.is_file():
             raise InstallerError(f"RTSS 安装包不存在：{explicit}")
@@ -323,9 +326,15 @@ def resolve_archive(explicit: Path | None, *, allow_unknown: bool) -> Path:
     else:
         archive = DOWNLOAD_CACHE / RTSS_ARCHIVE_NAME
         if archive.is_file() and sha256_file(archive) != RTSS_ARCHIVE_SHA256:
-            _print("[警告] 缓存的安装包摘要不符，重新下载。")
+            _print("[警告] 缓存的安装包摘要不符，将丢弃。")
             archive.unlink()
         if not archive.is_file():
+            if offline:
+                raise InstallerError(
+                    f"离线模式下缺少 RTSS 安装包：{archive}\n"
+                    "  离线便携包应当自带它；请用带网络的机器重新运行 "
+                    "scripts\\build_offline_bundle.bat 打包"
+                )
             _print(f"正在下载 RTSS {RTSS_VERSION}（约 18MB）…")
             _print(f"  {RTSS_ARCHIVE_URL}")
             try:
@@ -341,10 +350,10 @@ def resolve_archive(explicit: Path | None, *, allow_unknown: bool) -> Path:
     digest = sha256_file(archive)
     if digest == RTSS_ARCHIVE_SHA256:
         _print(f"安装包 SHA-256 已匹配内置官方版本：{archive.name}")
-        return archive
+        return archive, True
     if allow_unknown:
         _print(f"[警告] 使用未收录的安装包：{archive.name}\n  SHA-256: {digest}")
-        return archive
+        return archive, False
     raise InstallerError(
         f"RTSS 安装包 SHA-256 与已知官方版本不符：{archive.name}\n"
         f"  expected: {RTSS_ARCHIVE_SHA256}\n  actual:   {digest}\n"
@@ -433,14 +442,26 @@ def _common_name(subject: str) -> str:
     return (match.group(1) or match.group(2) or subject).strip()
 
 
-def verify_setup_signature(setup: Path, *, allow_unsigned: bool) -> None:
+def verify_setup_signature(
+    setup: Path, *, pinned: bool, allow_unsigned: bool
+) -> None:
+    """Check the Authenticode signature of the extracted setup.
+
+    An archive that matched the pinned SHA-256 is already authenticated, so a
+    non-``Valid`` verdict there is downgraded to a warning: on an offline cafe
+    PC the revocation check has no way to reach a CRL and reports failure for
+    a perfectly good binary.  For an unpinned archive the signature is the only
+    trust anchor left, so it stays fatal.
+    """
     status, subject = authenticode_signer(setup)
     if status == "Valid" and SETUP_SIGNER_FRAGMENT in subject.casefold():
         _print(f"数字签名有效：{_common_name(subject)}")
         return
     message = f"RTSS 安装程序签名异常（状态 {status}）：{subject or '无签名'}"
-    if allow_unsigned:
+    if allow_unsigned or pinned:
         _print(f"[警告] {message}")
+        if pinned:
+            _print("        安装包 SHA-256 已匹配官方版本，继续安装。")
         return
     raise InstallerError(message + "；确认来源可信后可传入 --allow-unsigned")
 
@@ -710,6 +731,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--installer-zip", type=Path, help="本地 RTSS 官方 ZIP（跳过下载）"
     )
     parser.add_argument(
+        "--prefetch",
+        action="store_true",
+        help="只把安装包下载并校验到 .tools\\rtss\\ 后退出，供离线打包使用",
+    )
+    parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="禁止联网；安装包必须已在 .tools\\rtss\\ 中",
+    )
+    parser.add_argument(
         "--allow-unknown-zip",
         action="store_true",
         help="允许使用未收录 SHA-256 的新版官方 ZIP",
@@ -734,6 +765,21 @@ def main(argv: list[str] | None = None) -> int:
     if os.name != "nt":
         _print("[错误] 此安装器只能在 Windows 上运行。")
         return 1
+    if args.prefetch:
+        # Bundle builders only need the archive on disk; installing RTSS on the
+        # build machine is a side effect nobody asked for.
+        try:
+            archive, _ = resolve_archive(
+                args.installer_zip,
+                allow_unknown=args.allow_unknown_zip,
+                offline=args.offline,
+            )
+        except Exception as exc:  # noqa: BLE001 - surfaced as a user message
+            _print(f"[错误] {exc}")
+            return 1
+        _print(f"[成功] RTSS 安装包已就绪：{archive}")
+        return 0
+
     try:
         games = [
             normalize_exe_name(name)
@@ -752,12 +798,22 @@ def main(argv: list[str] | None = None) -> int:
             return elevate_and_wait(original_argv)
 
         if install_dir is None:
-            archive = resolve_archive(
-                args.installer_zip, allow_unknown=args.allow_unknown_zip
+            archive, pinned = resolve_archive(
+                args.installer_zip,
+                allow_unknown=args.allow_unknown_zip,
+                offline=args.offline,
             )
-            setup = extract_setup(archive, DOWNLOAD_CACHE / "setup")
-            verify_setup_signature(setup, allow_unsigned=args.allow_unsigned)
-            install_dir = run_setup(setup)
+            staging = DOWNLOAD_CACHE / "setup"
+            try:
+                setup = extract_setup(archive, staging)
+                verify_setup_signature(
+                    setup, pinned=pinned, allow_unsigned=args.allow_unsigned
+                )
+                install_dir = run_setup(setup)
+            finally:
+                # Keep the zip cached for the next reinstall, drop the 18MB
+                # copy we just unpacked from it.
+                shutil.rmtree(staging, ignore_errors=True)
             _print(f"RTSS 已安装到：{install_dir}")
 
         active = running_games(games)

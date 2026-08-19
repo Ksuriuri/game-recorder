@@ -360,14 +360,14 @@ REM  off because RTSS draws it into the game's back buffer, which would bake it
 REM  into every recording.
 REM ============================================================
 echo.
+if defined RTSS_SKIP goto :rtss_install_skip
 echo [可选] 正在配置 RTSS 限帧 …
 if not defined RTSS_FPS set "RTSS_FPS=60"
 if not defined RTSS_GAME_EXE set "RTSS_GAME_EXE=RDR2.exe"
-if defined GAME_RECORDER_SKIP_PAUSE (
-    "%VERIFY_PY%" "%PROJECT_DIR%\scripts\install_rtss.py" --fps %RTSS_FPS% --game-exe "%RTSS_GAME_EXE%" --no-prompt
-) else (
-    "%VERIFY_PY%" "%PROJECT_DIR%\scripts\install_rtss.py" --fps %RTSS_FPS% --game-exe "%RTSS_GAME_EXE%"
-)
+set "RTSS_ARGS=--fps %RTSS_FPS% --game-exe "%RTSS_GAME_EXE%""
+if "%OFFLINE_MODE%"=="1" set "RTSS_ARGS=%RTSS_ARGS% --offline"
+if defined GAME_RECORDER_SKIP_PAUSE set "RTSS_ARGS=%RTSS_ARGS% --no-prompt"
+"%VERIFY_PY%" "%PROJECT_DIR%\scripts\install_rtss.py" %RTSS_ARGS%
 if errorlevel 4 goto :rtss_install_fail
 if errorlevel 3 goto :rtss_install_skip
 if errorlevel 1 goto :rtss_install_fail
