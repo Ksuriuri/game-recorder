@@ -41,6 +41,7 @@ from game_recorder.auto_move.trajectory_patterns import (
     PAUSE_PARADIGM,
     Episode,
     PlannedTurn,
+    limit_pitch_runs,
     paradigm_sequence,
     peak_outbound_units,
     plan_episode,
@@ -337,6 +338,18 @@ class CoverageMapsTests(unittest.TestCase):
 
         self.assertGreater(nov["yaw_right"], nov["yaw_left"])
 
+    def test_sky_bins_are_not_attractive_look_targets(self) -> None:
+        maps = CoverageMaps()
+        maps.set_anchor(anchor_x=0.0, anchor_y=0.0, radius_m=3.0)
+        pitch = math.radians(45)
+        nov = maps.novelty_look(
+            forward_x=0.0,
+            forward_y=math.cos(pitch),
+            forward_z=math.sin(pitch),
+        )
+        self.assertGreater(nov["pitch_down"], nov["pitch_up"])
+        self.assertGreater(nov["yaw_right"], nov["pitch_up"])
+
     def test_fuse_keeps_rare_prior_advantage(self) -> None:
         maps = CoverageMaps()
         catalog = load_action_catalog(alpha=1.0)
@@ -491,6 +504,43 @@ class TrajectoryPatternTests(unittest.TestCase):
                 allow_pitch=False,
             )
             self.assertEqual(episode.channel, "translation")
+
+    def test_loop_keeps_rotation_channel_at_the_look_rate(self) -> None:
+        # Horizontal pans in loop / l_shape must not be rewritten as walks just
+        # to avoid pitch; pitch legs are shortened later instead.
+        rng = random.Random(0)
+        n = 400
+        rotation = 0
+        for _ in range(n):
+            episode = plan_episode(
+                rng=rng, hold_s=4.0, paradigm="loop", allow_pitch=True
+            )
+            if episode.channel == "rotation":
+                rotation += 1
+        self.assertGreater(rotation / n, 0.30)
+        self.assertLess(rotation / n, 0.50)
+
+    def test_rotation_channel_samples_pitch_less_than_yaw(self) -> None:
+        rng = random.Random(0)
+        n = 400
+        pitch = 0
+        for _ in range(n):
+            seq = paradigm_sequence(
+                "repeat", rng=rng, turn_count=1, channel="rotation"
+            )
+            if "pitch" in seq[0]:
+                pitch += 1
+        self.assertLess(pitch / n, 0.30)
+        self.assertGreater(pitch / n, 0.05)
+
+    def test_limit_pitch_runs_shortens_same_direction_holds(self) -> None:
+        turns = tuple(
+            PlannedTurn("none", "pitch_up", 4.0, i) for i in range(4)
+        )
+        limited = limit_pitch_runs(turns, max_same_dir_s=2.0)
+        self.assertAlmostEqual(sum(t.hold_s for t in limited), 2.0)
+        yaw = tuple(PlannedTurn("none", "yaw_right", 4.0, i) for i in range(4))
+        self.assertEqual(limit_pitch_runs(yaw, max_same_dir_s=2.0), yaw)
 
 
 class ParadigmPolicyTests(unittest.TestCase):
@@ -662,7 +712,11 @@ class ParadigmPolicyTests(unittest.TestCase):
         episode = policy._episode
         assert episode is not None
         self.assertEqual(peak_outbound_units(episode.turns), 0.0)
-        self.assertAlmostEqual(episode.turns[0].hold_s, 4.0)
+        for turn in episode.turns:
+            if "pitch" in turn.rotation:
+                self.assertLessEqual(turn.hold_s, 4.0)
+            else:
+                self.assertAlmostEqual(turn.hold_s, 4.0)
 
     def test_radius_interrupt_drops_the_episode_and_holds_off_replanning(self) -> None:
         """A cut-short turn must not silently advance the plan every tick."""
@@ -971,6 +1025,61 @@ class BalancedRadiusPolicyTests(unittest.TestCase):
         )
         self.assertGreater(keep_up, 0.0)
         self.assertGreater(return_down, keep_up)
+
+    def test_combined_yaw_pitch_is_not_suppressed_like_pure_pitch(self) -> None:
+        policy = BalancedRadiusPolicy()
+        level = UnifiedPose(
+            0, 0.0, 0.0, 0.0, "gta", forward_x=0.0, forward_y=1.0, forward_z=0.0
+        )
+        pure = policy._look_behavior_weight("pitch_up", clock=1.0, pose=level)
+        combo = policy._look_behavior_weight(
+            "yaw_right_pitch_up", clock=1.0, pose=level
+        )
+        yaw = policy._look_behavior_weight("yaw_right", clock=1.0, pose=level)
+        self.assertGreater(combo, pure)
+        self.assertGreater(yaw, combo)
+
+    def test_pitch_command_stops_at_the_limit(self) -> None:
+        policy = BalancedRadiusPolicy(pitch_limit_deg=25.0)
+        policy._action_yaw_deg_s = 0.0
+        policy._action_pitch_deg_s = 12.0
+        high = UnifiedPose(
+            0,
+            0.0,
+            0.0,
+            0.0,
+            "gta",
+            forward_x=0.0,
+            forward_y=math.cos(math.radians(30)),
+            forward_z=math.sin(math.radians(30)),
+        )
+        up = policy._to_wander_action(
+            policy._catalog.by_pair[("none", "pitch_up")], pose=high
+        )
+        self.assertEqual(up.pitch_deg_s, 0.0)
+        down = policy._to_wander_action(
+            policy._catalog.by_pair[("none", "pitch_down")], pose=high
+        )
+        self.assertGreater(down.pitch_deg_s, 0.0)
+
+    def test_free_pitch_holds_are_capped(self) -> None:
+        turn = DiscreteAction(0, "none", "pitch_up", 1.0, 1.0)
+        catalog = ActionCatalog(
+            actions=(turn,),
+            by_id={0: turn},
+            by_pair={("none", "pitch_up"): turn},
+            weights=(1.0,),
+        )
+        policy = BalancedRadiusPolicy(
+            catalog=catalog,
+            paradigms=False,
+            look_pitch_deg_s=15.0,
+            pitch_limit_deg=25.0,
+            rng=random.Random(0),
+        )
+        policy._resample(1.0, pose=None, force_stuck=False)
+        self.assertLessEqual(policy._hold_until - 1.0, 25.0 / 15.0 + 1e-6)
+        self.assertGreater(policy._hold_until, 1.0)
 
     def test_look_speed_is_sampled_once_per_action(self) -> None:
         turn = DiscreteAction(0, "none", "yaw_right_pitch_down", 1.0, 1.0)
@@ -1434,6 +1543,7 @@ class ConfigAutoMoveTests(unittest.TestCase):
             self.assertEqual(cfg.auto_move_look_yaw_max_deg_s, 30.0)
             self.assertEqual(cfg.auto_move_look_pitch_min_deg_s, 6.0)
             self.assertEqual(cfg.auto_move_look_pitch_max_deg_s, 15.0)
+            self.assertEqual(cfg.auto_move_pitch_limit_deg, 25.0)
             self.assertEqual(cfg.auto_move_cover_move_beta, 1.5)
             self.assertEqual(cfg.auto_move_cover_look_gamma, 8.0)
             self.assertTrue(cfg.auto_move_paradigms)

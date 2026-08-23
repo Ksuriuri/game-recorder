@@ -93,6 +93,16 @@ PARADIGM_ROTATIONS: tuple[str, ...] = (
 )
 YAW_ROTATIONS: tuple[str, ...] = ("yaw_right", "yaw_left")
 
+# Uniform over the 4 look tokens makes a vertical nod as common as a turn, so a
+# 4 s hold at 15 °/s already stares at the sky. Prefer yaw; keep a little pitch.
+# Horizontal pan probability is preserved because yaw tokens keep full weight.
+_ROTATION_TOKEN_WEIGHTS: dict[str, float] = {
+    "yaw_right": 1.0,
+    "yaw_left": 1.0,
+    "pitch_up": 0.22,
+    "pitch_down": 0.22,
+}
+
 # Exact opposites — roundtrip / loop closure depends on these being true
 # inverses (W↔S, A↔D, left↔right, up↔down).
 INVERSE_TRANSLATION: dict[str, str] = {
@@ -230,6 +240,7 @@ class _Alphabet:
     inverse: Mapping[str, str]
     axis: Mapping[str, str]
     family: Mapping[str, str]
+    weights: Mapping[str, float] | None = None
 
     def perpendicular(self, token: str) -> tuple[str, ...]:
         axis = self.axis[token]
@@ -242,6 +253,20 @@ class _Alphabet:
 
     def has_perpendicular(self) -> bool:
         return any(self.perpendicular(t) for t in self.tokens)
+
+    def sample(
+        self, rng: random.Random, pool: Sequence[str] | None = None
+    ) -> str:
+        tokens = tuple(pool) if pool is not None else self.tokens
+        if not tokens:
+            raise ValueError("empty token pool")
+        if len(tokens) == 1:
+            return tokens[0]
+        if self.weights:
+            weights = [max(0.0, float(self.weights.get(t, 1.0))) for t in tokens]
+            if sum(weights) > 0.0:
+                return rng.choices(list(tokens), weights=weights, k=1)[0]
+        return rng.choice(list(tokens))
 
 
 def _translation_alphabet() -> _Alphabet:
@@ -260,6 +285,7 @@ def _rotation_alphabet(*, allow_pitch: bool) -> _Alphabet:
         inverse=INVERSE_ROTATION,
         axis=_ROTATION_AXIS,
         family=_ROTATION_FAMILY,
+        weights=_ROTATION_TOKEN_WEIGHTS if allow_pitch else None,
     )
 
 
@@ -360,42 +386,45 @@ def _sample_turn_count(rng: random.Random, paradigm: str) -> int:
 
 
 def _seq_repeat(rng: random.Random, n: int, alpha: _Alphabet) -> tuple[str, ...]:
-    return (rng.choice(alpha.tokens),) * n
+    return (alpha.sample(rng),) * n
 
 
 def _seq_roundtrip(rng: random.Random, n: int, alpha: _Alphabet) -> tuple[str, ...]:
     half = max(1, n // 2)
-    token = rng.choice(alpha.tokens)
+    token = alpha.sample(rng)
     return (token,) * half + (alpha.inverse[token],) * (n - half)
 
 
 def _seq_loop(rng: random.Random, n: int, alpha: _Alphabet) -> tuple[str, ...]:
-    first = rng.choice(alpha.tokens)
+    first = alpha.sample(rng)
     options = alpha.perpendicular(first)
     if not options:
         return _seq_roundtrip(rng, n, alpha)
-    second = rng.choice(options)
+    second = alpha.sample(rng, options)
     cycle = (first, second, alpha.inverse[first], alpha.inverse[second])
     return tuple(cycle[i % 4] for i in range(n))
 
 
 def _seq_l_shape(rng: random.Random, n: int, alpha: _Alphabet) -> tuple[str, ...]:
-    first = rng.choice(alpha.tokens)
+    first = alpha.sample(rng)
     options = alpha.perpendicular(first)
     if not options:
         return _seq_repeat(rng, n, alpha)
-    second = rng.choice(options)
+    second = alpha.sample(rng, options)
     half = max(1, n // 2)
     return (first,) * half + (second,) * (n - half)
 
 
 def _seq_zigzag(rng: random.Random, n: int, alpha: _Alphabet) -> tuple[str, ...]:
-    first = rng.choice(alpha.tokens)
+    first = alpha.sample(rng)
     # WBench shows both flavours: exact reversal (A→D→A→D) and a perpendicular
-    # partner (W+left→W+right alternating around a forward carrier).
+    # partner (W+left→W+right alternating around a forward carrier). Pitch as
+    # that partner is a vertical nod every other turn, so rotation alphabets
+    # keep the perpendicular flavour rare.
     options = alpha.perpendicular(first)
-    if options and rng.random() >= 0.6:
-        second = rng.choice(options)
+    p_perpendicular = 0.12 if any("pitch" in t for t in alpha.tokens) else 0.4
+    if options and rng.random() < p_perpendicular:
+        second = alpha.sample(rng, options)
     else:
         second = alpha.inverse[first]
     return tuple(first if i % 2 == 0 else second for i in range(n))
@@ -406,7 +435,7 @@ def _seq_progressive(rng: random.Random, n: int, alpha: _Alphabet) -> tuple[str,
     previous: str | None = None
     for _ in range(n):
         options = [t for t in alpha.tokens if t != previous] or list(alpha.tokens)
-        previous = rng.choice(options)
+        previous = alpha.sample(rng, options)
         out.append(previous)
     return tuple(out)
 
@@ -444,6 +473,61 @@ def paradigm_sequence(
 
 def _needs_perpendicular(paradigm: str) -> bool:
     return paradigm in ("loop", "l_shape")
+
+
+def _pitch_direction(rotation: str) -> str | None:
+    if "pitch_up" in rotation:
+        return "up"
+    if "pitch_down" in rotation:
+        return "down"
+    return None
+
+
+def limit_pitch_runs(
+    turns: Sequence[PlannedTurn],
+    *,
+    max_same_dir_s: float,
+) -> tuple[PlannedTurn, ...]:
+    """Shorten consecutive same-direction pitch so a plan cannot stare at the sky.
+
+    Yaw-only turns are left alone. A mixed yaw+pitch token still counts as pitch.
+    """
+    cap = max(0.05, float(max_same_dir_s))
+    out = list(turns)
+    i = 0
+    while i < len(out):
+        direction = _pitch_direction(out[i].rotation)
+        if direction is None:
+            i += 1
+            continue
+        j = i + 1
+        while j < len(out) and _pitch_direction(out[j].rotation) == direction:
+            j += 1
+        total = sum(out[k].hold_s for k in range(i, j))
+        if total > cap:
+            scale = cap / total
+            for k in range(i, j):
+                turn = out[k]
+                out[k] = PlannedTurn(
+                    translation=turn.translation,
+                    rotation=turn.rotation,
+                    hold_s=max(0.05, turn.hold_s * scale),
+                    turn_index=turn.turn_index,
+                )
+        i = j
+    return tuple(out)
+
+
+def limit_episode_pitch_runs(
+    episode: Episode, *, max_same_dir_s: float
+) -> Episode:
+    """Same plan with consecutive pitch holds capped at *max_same_dir_s*."""
+    return Episode(
+        paradigm=episode.paradigm,
+        channel=episode.channel,
+        carrier=episode.carrier,
+        turns=limit_pitch_runs(episode.turns, max_same_dir_s=max_same_dir_s),
+    )
 
 
 def plan_episode(

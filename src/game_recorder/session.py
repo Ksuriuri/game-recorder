@@ -616,6 +616,7 @@ class Session:
                 look_yaw_max_deg_s=float(self.config.auto_move_look_yaw_max_deg_s),
                 look_pitch_min_deg_s=float(self.config.auto_move_look_pitch_min_deg_s),
                 look_pitch_max_deg_s=float(self.config.auto_move_look_pitch_max_deg_s),
+                pitch_limit_deg=float(self.config.auto_move_pitch_limit_deg),
                 stuck_speed_mps=float(self.config.auto_move_stuck_speed_mps),
                 stuck_s=float(self.config.auto_move_stuck_s),
                 return_yaw_deg_s=float(self.config.auto_move_turn_deg_s),

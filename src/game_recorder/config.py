@@ -116,6 +116,8 @@ class Config:
     auto_move_look_yaw_max_deg_s: float = 30.0
     auto_move_look_pitch_min_deg_s: float = 6.0
     auto_move_look_pitch_max_deg_s: float = 15.0
+    # Hard stop so auto-move cannot stare at the sky or the ground.
+    auto_move_pitch_limit_deg: float = 25.0
     # Coverage × inverse-freq fusion gains (see BalancedRadiusPolicy).
     auto_move_cover_move_beta: float = 1.5
     auto_move_cover_look_gamma: float = 8.0

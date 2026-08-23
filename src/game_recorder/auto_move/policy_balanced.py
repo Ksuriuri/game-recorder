@@ -24,6 +24,7 @@ from game_recorder.auto_move.pose_live import UnifiedPose
 from game_recorder.auto_move.trajectory_patterns import (
     Episode,
     PlannedTurn,
+    limit_episode_pitch_runs,
     max_step_scale,
     plan_episode,
     plan_pause,
@@ -77,12 +78,19 @@ class BalancedRadiusPolicy:
     yaw_target_opposite_weight: float = 0.25
     yaw_target_idle_weight: float = 0.70
     yaw_target_distance_gain: float = 0.50
-    pitch_action_base_weight: float = 0.30
-    pitch_angle_decay_deg: float = 25.0
-    pitch_same_direction_floor: float = 0.15
-    pitch_extreme_deg: float = 20.0
+    pitch_action_base_weight: float = 0.15
+    # Combined yaw+pitch keeps the original prior so horizontal pans are not
+    # suppressed when they glance up or down.
+    pitch_with_yaw_weight: float = 0.30
+    pitch_angle_decay_deg: float = 16.0
+    pitch_same_direction_floor: float = 0.05
+    pitch_extreme_deg: float = 16.0
     pitch_return_boost_per_s: float = 0.35
     pitch_return_boost_max: float = 4.0
+    # Commanded pitch fades out toward this elevation; never stare at sky/ground.
+    pitch_limit_deg: float = 25.0
+    # Extra penalty for pure vertical nods versus glancing while turning.
+    pitch_pure_scale: float = 0.55
     # Multi-turn trajectory paradigms (WBench nav_cate) planned ahead of the
     # per-action sampler. Free sampling takes over whenever no plan is active.
     paradigms: bool = True
@@ -308,6 +316,48 @@ class BalancedRadiusPolicy:
         hi = max(self.hold_min_s, self.hold_max_s)
         return self.rng.uniform(lo, hi)
 
+    def _pitch_deg(self, pose: UnifiedPose | None) -> float:
+        if pose is None:
+            return 0.0
+        norm = math.sqrt(
+            pose.forward_x * pose.forward_x
+            + pose.forward_y * pose.forward_y
+            + pose.forward_z * pose.forward_z
+        )
+        if norm <= 1e-6:
+            return 0.0
+        return math.degrees(
+            math.asin(max(-1.0, min(1.0, pose.forward_z / norm)))
+        )
+
+    def _max_pitch_run_s(self) -> float:
+        if self.look_pitch_deg_s is not None:
+            rate = max(abs(float(self.look_pitch_deg_s)), 1.0)
+        else:
+            rate = max(
+                abs(float(self.look_pitch_min_deg_s)),
+                abs(float(self.look_pitch_max_deg_s)),
+                1.0,
+            )
+        return max(0.6, min(2.0, float(self.pitch_limit_deg) / rate))
+
+    def _clamp_pitch_rate(
+        self, pitch_deg_s: float, pose: UnifiedPose | None
+    ) -> float:
+        if pitch_deg_s == 0.0 or pose is None:
+            return pitch_deg_s
+        limit = max(1.0, float(self.pitch_limit_deg))
+        current = self._pitch_deg(pose)
+        # rotation_rates: pitch_up → negative deg/s; +forward_z is looking up.
+        if pitch_deg_s < 0.0:
+            headroom = limit - current
+        else:
+            headroom = limit + current
+        if headroom <= 0.0:
+            return 0.0
+        fade_span = max(1.0, limit - float(self.pitch_extreme_deg))
+        return pitch_deg_s * min(1.0, headroom / fade_span)
+
     def _observe_look_dwell(self, pose: UnifiedPose, clock: float) -> None:
         yaw = math.atan2(pose.forward_x, pose.forward_y)
         center = self._yaw_dwell_center
@@ -321,16 +371,7 @@ class BalancedRadiusPolicy:
                 self._yaw_dwell_center = yaw
                 self._yaw_dwell_since = clock
 
-        norm = math.sqrt(
-            pose.forward_x * pose.forward_x
-            + pose.forward_y * pose.forward_y
-            + pose.forward_z * pose.forward_z
-        )
-        pitch_deg = (
-            math.degrees(math.asin(max(-1.0, min(1.0, pose.forward_z / norm))))
-            if norm > 1e-6
-            else 0.0
-        )
+        pitch_deg = self._pitch_deg(pose)
         threshold = max(1.0, float(self.pitch_extreme_deg))
         sign = 1 if pitch_deg >= threshold else -1 if pitch_deg <= -threshold else 0
         if sign == 0:
@@ -383,18 +424,12 @@ class BalancedRadiusPolicy:
         if not pitch_up and not pitch_down:
             return factor
 
-        factor *= max(0.01, float(self.pitch_action_base_weight))
-        pitch_deg = 0.0
-        if pose is not None:
-            norm = math.sqrt(
-                pose.forward_x * pose.forward_x
-                + pose.forward_y * pose.forward_y
-                + pose.forward_z * pose.forward_z
-            )
-            if norm > 1e-6:
-                pitch_deg = math.degrees(
-                    math.asin(max(-1.0, min(1.0, pose.forward_z / norm)))
-                )
+        if has_yaw:
+            factor *= max(0.01, float(self.pitch_with_yaw_weight))
+        else:
+            factor *= max(0.01, float(self.pitch_action_base_weight))
+            factor *= max(0.05, float(self.pitch_pure_scale))
+        pitch_deg = self._pitch_deg(pose)
 
         same_direction_angle = (
             max(0.0, pitch_deg)
@@ -604,6 +639,8 @@ class BalancedRadiusPolicy:
                     hold = min(hold, remaining / speed)
                 # Clearly inward movement is safe to hold for the full sampled
                 # duration. Radius checks still run at 30 Hz if the camera turns.
+        if "pitch_up" in chosen.rotation or "pitch_down" in chosen.rotation:
+            hold = min(hold, self._max_pitch_run_s())
         self._hold_until = clock + hold
 
     def _abort_episode(self, *, cooldown_until: float | None = None) -> None:
@@ -745,7 +782,9 @@ class BalancedRadiusPolicy:
 
         if budget < hold:
             episode = episode.with_hold(max(floor, budget))
-        self._episode = episode
+        self._episode = limit_episode_pitch_runs(
+            episode, max_same_dir_s=self._max_pitch_run_s()
+        )
         self._episode_turn = 0
 
     def _paradigm_hold_budget(
@@ -890,6 +929,8 @@ class BalancedRadiusPolicy:
             dist = math.hypot(pose.x - self._anchor_x, pose.y - self._anchor_y)
             if dist >= radius:
                 yaw += self._return_yaw_assist(pose)
+
+        pitch = self._clamp_pitch_rate(pitch, pose)
 
         phase = WanderPhase.WALK
         if discrete.translation.startswith("backward"):

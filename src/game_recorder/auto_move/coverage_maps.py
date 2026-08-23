@@ -227,6 +227,7 @@ class CoverageMaps:
                     for y in range(self.n_yaw)
                 )
                 pitch_score = 1.0 / (1.0 + pitch_visits)
+                pitch_score *= self._pitch_bin_attractiveness(tp)
                 raw[name] = (
                     0.7 * yaw_score + 0.3 * pitch_score
                     if yaw_step
@@ -336,3 +337,16 @@ class CoverageMaps:
         elif "pitch_down" in rotation:
             tp = min(self.n_pitch - 1, pitch_i + 1)
         return ty, tp
+
+    def _pitch_bin_attractiveness(self, pitch_i: int) -> float:
+        """Near-horizon bins are the ones worth covering; sky/ground are not.
+
+        With 6 equal bins from +90° to -90°, bins 2–3 sit around the horizon,
+        1/4 are steep glances, and 0/5 are straight up or down.
+        """
+        dist = min(int(pitch_i), self.n_pitch - 1 - int(pitch_i))
+        if dist <= 0:
+            return 0.05
+        if dist == 1:
+            return 0.35
+        return 1.0
